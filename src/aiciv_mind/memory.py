@@ -10,6 +10,8 @@ Design notes:
 - WAL mode keeps concurrent readers/writers from blocking each other.
 - FTS5 triggers keep the virtual table in sync automatically.
 - Tags live in a separate table for efficient per-tag lookup.
+- v0.1.1: depth scoring (access_count, recency, pinning, human_endorsed),
+  session_journal for lifecycle tracking.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -101,7 +104,29 @@ CREATE TABLE IF NOT EXISTS memory_tags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON memory_tags(tag);
+
+CREATE TABLE IF NOT EXISTS session_journal (
+    session_id     TEXT PRIMARY KEY,
+    agent_id       TEXT NOT NULL,
+    start_time     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    end_time       TEXT,
+    turn_count     INTEGER NOT NULL DEFAULT 0,
+    topics         TEXT NOT NULL DEFAULT '[]',
+    summary        TEXT,
+    identity_ver   INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_agent ON session_journal(agent_id, start_time DESC);
 """
+
+# Columns added in v0.1.1 — applied via _migrate_schema() for existing DBs.
+_V011_COLUMNS: list[tuple[str, str]] = [
+    ("access_count",     "INTEGER NOT NULL DEFAULT 0"),
+    ("last_accessed_at", "TEXT"),
+    ("depth_score",      "REAL NOT NULL DEFAULT 1.0"),
+    ("is_pinned",        "INTEGER NOT NULL DEFAULT 0"),
+    ("human_endorsed",   "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +165,20 @@ class MemoryStore:
         # executescript auto-commits, so we commit the pragma changes first.
         self._conn.commit()
         self._conn.executescript(_SCHEMA_SQL)
+        self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Add v0.1.1 columns to an existing memories table if missing."""
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(memories)")
+        }
+        for col_name, col_def in _V011_COLUMNS:
+            if col_name not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
+                )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -236,6 +275,35 @@ class MemoryStore:
         cursor = self._conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
 
+    def by_type(
+        self,
+        memory_type: str,
+        agent_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return memories of a specific type, newest first."""
+        if agent_id is not None:
+            cursor = self._conn.execute(
+                """
+                SELECT * FROM memories
+                 WHERE memory_type = ? AND agent_id = ?
+                 ORDER BY created_at DESC
+                 LIMIT ?
+                """,
+                (memory_type, agent_id, limit),
+            )
+        else:
+            cursor = self._conn.execute(
+                """
+                SELECT * FROM memories
+                 WHERE memory_type = ?
+                 ORDER BY created_at DESC
+                 LIMIT ?
+                """,
+                (memory_type, limit),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
     def by_agent(self, agent_id: str, limit: int = 50) -> list[dict[str, Any]]:
         """Return memories for a specific agent, newest first."""
         cursor = self._conn.execute(
@@ -260,6 +328,201 @@ class MemoryStore:
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Depth & pinning (v0.1.1)
+    # ------------------------------------------------------------------
+
+    def touch(self, memory_id: str) -> None:
+        """Increment access_count and set last_accessed_at to now."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            """
+            UPDATE memories
+               SET access_count     = access_count + 1,
+                   last_accessed_at = ?
+             WHERE id = ?
+            """,
+            (now, memory_id),
+        )
+        self._conn.commit()
+
+    def pin(self, memory_id: str) -> None:
+        """Mark a memory as always-in-context (pinned)."""
+        self._conn.execute(
+            "UPDATE memories SET is_pinned = 1 WHERE id = ?", (memory_id,)
+        )
+        self._conn.commit()
+
+    def unpin(self, memory_id: str) -> None:
+        """Remove pinned status from a memory."""
+        self._conn.execute(
+            "UPDATE memories SET is_pinned = 0 WHERE id = ?", (memory_id,)
+        )
+        self._conn.commit()
+
+    def get_pinned(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """Return all pinned memories, optionally filtered by agent."""
+        if agent_id is not None:
+            cursor = self._conn.execute(
+                "SELECT * FROM memories WHERE is_pinned = 1 AND agent_id = ?",
+                (agent_id,),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM memories WHERE is_pinned = 1"
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def search_by_depth(
+        self, agent_id: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return top memories sorted by depth_score descending."""
+        if agent_id is not None:
+            cursor = self._conn.execute(
+                """
+                SELECT * FROM memories
+                 WHERE agent_id = ?
+                 ORDER BY depth_score DESC
+                 LIMIT ?
+                """,
+                (agent_id, limit),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM memories ORDER BY depth_score DESC LIMIT ?",
+                (limit,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_depth_score(self, memory_id: str) -> None:
+        """
+        Recompute and store depth_score for a single memory.
+
+        Formula:
+          depth_score = (access_count * 0.3) +
+                        (recency_score * 0.25) +   # 1.0 if accessed today
+                        (is_pinned * 0.2) +
+                        (human_endorsed * 0.15) +
+                        (confidence_score * 0.1)   # HIGH=1.0 MEDIUM=0.6 LOW=0.3
+        """
+        row = self._conn.execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            return
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT")
+        last = row["last_accessed_at"] or ""
+        recency = 1.0 if last.startswith(today) else max(0.0, 1.0 - len(last) * 0)
+
+        # Simple recency: 1.0 today, 0.5 this week, 0.1 older
+        if last.startswith(today[:10]):
+            recency = 1.0
+        elif last[:7] == today[:7]:
+            recency = 0.5
+        elif last:
+            recency = 0.1
+        else:
+            recency = 0.0
+
+        conf_map = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
+        conf = conf_map.get(str(row["confidence"]).upper(), 0.6)
+
+        score = (
+            min(row["access_count"], 20) / 20 * 0.3
+            + recency * 0.25
+            + int(row["is_pinned"]) * 0.2
+            + int(row["human_endorsed"]) * 0.15
+            + conf * 0.1
+        )
+
+        self._conn.execute(
+            "UPDATE memories SET depth_score = ? WHERE id = ?",
+            (round(score, 4), memory_id),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Session journal (v0.1.1)
+    # ------------------------------------------------------------------
+
+    def start_session(self, agent_id: str, session_id: str | None = None) -> str:
+        """
+        Create a session_journal entry.  Returns the session_id (UUID).
+        """
+        sid = session_id or str(uuid.uuid4())[:8]
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO session_journal
+                (session_id, agent_id, start_time)
+            VALUES (?, ?, ?)
+            """,
+            (sid, agent_id, now),
+        )
+        self._conn.commit()
+        return sid
+
+    def record_turn(self, session_id: str, topic: str | None = None) -> None:
+        """Increment turn_count for a session; optionally append a topic."""
+        if topic:
+            row = self._conn.execute(
+                "SELECT topics FROM session_journal WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            existing: list[str] = json.loads(row["topics"]) if row else []
+            if topic not in existing:
+                existing.append(topic)
+            topics_json = json.dumps(existing)
+            self._conn.execute(
+                """
+                UPDATE session_journal
+                   SET turn_count = turn_count + 1, topics = ?
+                 WHERE session_id = ?
+                """,
+                (topics_json, session_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE session_journal SET turn_count = turn_count + 1 WHERE session_id = ?",
+                (session_id,),
+            )
+        self._conn.commit()
+
+    def end_session(self, session_id: str, summary: str) -> None:
+        """Write end_time and summary to the session_journal entry."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            """
+            UPDATE session_journal
+               SET end_time = ?, summary = ?
+             WHERE session_id = ?
+            """,
+            (now, summary, session_id),
+        )
+        self._conn.commit()
+
+    def last_session(self, agent_id: str) -> dict[str, Any] | None:
+        """Return the most recent completed session for this agent."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM session_journal
+             WHERE agent_id = ? AND end_time IS NOT NULL
+             ORDER BY end_time DESC, rowid DESC
+             LIMIT 1
+            """,
+            (agent_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return a session record by ID."""
+        row = self._conn.execute(
+            "SELECT * FROM session_journal WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     # ------------------------------------------------------------------
     # Lifecycle

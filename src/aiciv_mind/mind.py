@@ -23,6 +23,8 @@ import anthropic
 from aiciv_mind.manifest import MindManifest
 from aiciv_mind.memory import MemoryStore
 from aiciv_mind.tools import ToolRegistry
+from aiciv_mind.session_store import SessionStore
+from aiciv_mind.context_manager import ContextManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,9 @@ class Mind:
         memory: MemoryStore,
         tools: ToolRegistry | None = None,
         bus=None,  # SubMindBus | None — for IPC with primary
+        session_store: SessionStore | None = None,
+        context_manager: ContextManager | None = None,
+        boot_context_str: str = "",
     ) -> None:
         self.manifest = manifest
         self.memory = memory
@@ -51,6 +56,10 @@ class Mind:
         self._messages: list[dict] = []
         self._session_id: str | None = None
         self._running = False
+        self._session_store = session_store
+        self._context_manager = context_manager
+        # Boot context injected once at startup (identity + handoff)
+        self._boot_context_str = boot_context_str
 
     async def run_task(
         self,
@@ -65,7 +74,13 @@ class Mind:
         self._session_id = self._session_id or str(uuid.uuid4())[:8]
         self._running = True
 
-        system_prompt = self.manifest.resolved_system_prompt()
+        # Base system prompt + boot context (identity + handoff injected once)
+        base_prompt = self.manifest.resolved_system_prompt()
+        system_prompt = base_prompt
+        if self._boot_context_str:
+            system_prompt = self._boot_context_str + system_prompt
+
+        # Per-turn memory search
         if inject_memories and self.manifest.memory.auto_search_before_task:
             memories = self.memory.search(
                 query=task,
@@ -73,10 +88,20 @@ class Mind:
                 limit=self.manifest.memory.max_context_memories,
             )
             if memories:
-                memory_context = "\n\n## Relevant memories from prior sessions:\n"
+                # Touch accessed memories (update depth signals)
                 for m in memories:
-                    memory_context += f"\n### {m['title']}\n{m['content']}\n"
+                    self.memory.touch(m["id"])
+                if self._context_manager:
+                    memory_context = self._context_manager.format_search_results(memories)
+                else:
+                    memory_context = "\n\n## Relevant memories from prior sessions:\n"
+                    for m in memories:
+                        memory_context += f"\n### {m['title']}\n{m['content']}\n"
                 system_prompt = system_prompt + memory_context
+
+        # Record this turn in the session journal
+        if self._session_store:
+            self._session_store.record_turn()
 
         self._messages.append({"role": "user", "content": task})
 

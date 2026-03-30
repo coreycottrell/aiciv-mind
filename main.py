@@ -49,6 +49,8 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     from aiciv_mind.tools import ToolRegistry
     from aiciv_mind.mind import Mind
     from aiciv_mind.interactive import InteractiveREPL
+    from aiciv_mind.session_store import SessionStore
+    from aiciv_mind.context_manager import ContextManager
 
     # Load manifest
     manifest = MindManifest.from_yaml(manifest_path)
@@ -66,8 +68,31 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     # Build tool registry
     tools = ToolRegistry.default(memory_store=memory)
 
+    # Session lifecycle + context management
+    session_store = SessionStore(memory, agent_id=manifest.mind_id)
+    boot = session_store.boot()
+
+    ctx_mgr = ContextManager(
+        max_context_memories=manifest.memory.max_context_memories,
+        model_max_tokens=manifest.model.max_tokens,
+    )
+    boot_str = ctx_mgr.format_boot_context(boot)
+    if boot_str:
+        logging.getLogger("aiciv_mind.main").info(
+            "Loaded boot context: session %s (prior sessions: %d)",
+            boot.session_id,
+            boot.session_count,
+        )
+
     # Create mind
-    mind = Mind(manifest=manifest, memory=memory, tools=tools)
+    mind = Mind(
+        manifest=manifest,
+        memory=memory,
+        tools=tools,
+        session_store=session_store,
+        context_manager=ctx_mgr,
+        boot_context_str=boot_str,
+    )
 
     try:
         if task:
@@ -79,6 +104,8 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
             repl = InteractiveREPL(mind)
             await repl.run()
     finally:
+        # Write session handoff before exit — the next session will load this
+        session_store.shutdown(mind._messages)
         memory.close()
 
 
