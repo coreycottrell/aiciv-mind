@@ -4,6 +4,26 @@ aiciv_mind.context_manager — Context window management for aiciv-mind.
 Translates BootContext + per-turn memory search results into formatted
 strings that get injected into the system prompt.
 
+## Cache-Optimal Ordering (critical for MiniMax M2.7 / OpenRouter prefix caching)
+
+The system prompt is assembled in this exact order in mind.py:
+
+    [1] STATIC  — base system prompt from manifest (identity, principles, role)
+    [2] STABLE  — boot context: session header, identity memories, handoff, pinned
+    [3] SEMI-STABLE — per-turn search results (changes with each query)
+    [4] DYNAMIC — conversation history / user message (not in system prompt)
+
+Rule: static content MUST come before dynamic content.
+Any reversal invalidates the cached prefix, forcing a full re-ingestion of the prompt.
+
+MiniMax M2.7 via OpenRouter uses automatic prefix caching (~80% cost reduction on hits).
+`cache_control` params are dropped by the LiteLLM config, so we rely entirely on prefix
+stability rather than explicit cache breakpoints.
+
+Optimization target: keep layers 1 and 2 identical across turns within a session.
+Layer 3 may change per turn but only affects the tail — cache is not invalidated for
+layers 1+2.
+
 Design goals:
 - Identity anchors always injected (the mind knows who it is)
 - Last handoff always injected (the mind knows what it was doing)

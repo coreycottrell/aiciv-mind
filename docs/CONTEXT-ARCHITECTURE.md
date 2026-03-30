@@ -464,6 +464,90 @@ async def run_primary(...):
 
 ---
 
+## Prompt Caching Strategy (v0.1.1+)
+
+### Model: MiniMax M2.7 via OpenRouter
+
+M2.7 has automatic prefix caching built in: **80% cost reduction** on cached tokens ($0.06/M cached vs $0.30/M uncached). OpenRouter applies this automatically — no explicit `cache_control` breakpoints needed (and they'd be stripped anyway by the LiteLLM config's `additional_drop_params`).
+
+The only lever we control is **prefix stability**: the system prompt must start with the same bytes across calls for the cache to hit.
+
+### The Ordering Rule
+
+```
+system_prompt =
+    [1] STATIC: base system prompt (manifest → prompts/primary.md)
+    [2] STABLE: boot context (session header, identity memories, handoff, pinned)
+    [3] SEMI-STABLE: per-turn search results
+```
+
+**Never put dynamic content before static content.** A single character difference early in the string invalidates the entire cached prefix.
+
+| Layer | Changes when | Cache behavior |
+|-------|-------------|----------------|
+| STATIC | Never (only if prompt file changes) | Always cached after first call |
+| STABLE | New session / new handoff memory | Cached within a session |
+| SEMI-STABLE | Different memories retrieved | Cached when same memories are relevant |
+| DYNAMIC | Every turn | Not cached (conversation history) |
+
+### Why Ordering Matters
+
+If boot context were prepended BEFORE the base prompt (the original bug in v0.1.1):
+
+```
+session_001_header + "You are a conductor of conductors..."
+session_002_header + "You are a conductor of conductors..."
+```
+
+The prefix changes every session → **zero cache hits**.
+
+With correct ordering:
+```
+"You are a conductor of conductors..." + session_001_header
+"You are a conductor of conductors..." + session_002_header
+```
+
+The first N bytes are identical → **full cache hit on the static layer**.
+
+### Cache Stats Logging
+
+`mind.py` logs cache performance from API response metadata:
+
+```
+[primary] Cache HIT: 12400 cached / 13200 total input tokens (94% hit rate)
+[primary] Cache WRITE: 12400 tokens written to cache
+[primary] No cache metadata (backend: minimax-m27)
+```
+
+The `cache_read_input_tokens` / `cache_creation_input_tokens` fields come from the anthropic SDK usage object. LiteLLM surfaces them when the backend returns them. If no cache metadata arrives, it's logged at DEBUG level and we treat it as a miss.
+
+### Cost Projection
+
+For a 200-turn session with a 3,000-token static system prompt:
+
+| Without caching | With caching |
+|----------------|-------------|
+| 200 × 3,000 = 600K tokens | First call: 3,000 tokens (WRITE). Calls 2-200: 3,000 × 0.2 = 600 per call |
+| 600K × $0.30/M = **$0.18** | 3,000 + 199 × 600 = 122,400 tokens effective |
+| | **~80% savings = ~$0.036** |
+
+At scale (1M turns/day across a mind fleet), the difference is thousands of dollars per day.
+
+### Sticky Routing (OpenRouter)
+
+OpenRouter's Provider Routing maintains "sticky" routes when the same model and system prompt prefix are used consecutively. This means repeated API calls within a session hit the same provider instance with a warm cache. No configuration needed — it's automatic based on the model hash.
+
+### What We Track (v0.2+)
+
+The self-improving loop (Principle 7) should eventually measure:
+- Cache hit rate per session (from logged stats)
+- Cost per turn (cached vs uncached)
+- Correlation between context stability and hit rate
+
+This feeds back into boot context optimization: if certain memory injections consistently cause cache misses, they should be evicted or reformatted for stability.
+
+---
+
 ## What We Are NOT Building
 
 - **LangChain memory** — external framework, wrong abstractions, not native

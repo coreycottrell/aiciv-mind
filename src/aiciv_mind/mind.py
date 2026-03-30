@@ -74,13 +74,22 @@ class Mind:
         self._session_id = self._session_id or str(uuid.uuid4())[:8]
         self._running = True
 
-        # Base system prompt + boot context (identity + handoff injected once)
-        base_prompt = self.manifest.resolved_system_prompt()
-        system_prompt = base_prompt
-        if self._boot_context_str:
-            system_prompt = self._boot_context_str + system_prompt
+        # Build system prompt in cache-optimal order:
+        #   STATIC  (base prompt — identity, principles) ← ALWAYS first → always cached
+        #   STABLE  (boot context — handoff, pinned)     ← stable across turns → cached
+        #   SEMI-STABLE (search results)                 ← changes with query → tail only
+        #
+        # Rule: never put dynamic content before static content.
+        # LiteLLM/OpenRouter caches the stable prefix; a flip in ordering breaks the cache.
+        base_prompt = self.manifest.resolved_system_prompt()  # STATIC
 
-        # Per-turn memory search
+        if self._boot_context_str:
+            # STABLE appended AFTER static — keeps base_prompt as the cache anchor
+            system_prompt = base_prompt + "\n\n" + self._boot_context_str
+        else:
+            system_prompt = base_prompt
+
+        # SEMI-STABLE: per-turn search results appended last
         if inject_memories and self.manifest.memory.auto_search_before_task:
             memories = self.memory.search(
                 query=task,
@@ -151,7 +160,48 @@ class Mind:
         if tools_list:
             kwargs["tools"] = tools_list
 
-        return await self._client.messages.create(**kwargs)
+        response = await self._client.messages.create(**kwargs)
+        self._log_cache_stats(response)
+        return response
+
+    def _log_cache_stats(self, response: Any) -> None:
+        """
+        Log prompt cache hit/miss from API response usage metadata.
+
+        LiteLLM surfaces cache stats from OpenRouter/MiniMax in the anthropic
+        usage object as cache_read_input_tokens / cache_creation_input_tokens.
+        Not all backends return these fields — we log when present, skip silently
+        when absent.  Wrapped in try/except: this is telemetry, never breaks the loop.
+        """
+        try:
+            usage = getattr(response, "usage", None)
+            if usage is None:
+                return
+
+            # Use int() to guard against mock objects in tests
+            cached  = int(getattr(usage, "cache_read_input_tokens",  None) or 0)
+            created = int(getattr(usage, "cache_creation_input_tokens", None) or 0)
+            total_in = int(getattr(usage, "input_tokens", None) or 0)
+
+            if cached > 0:
+                total = total_in + cached
+                pct = cached / total * 100 if total else 0.0
+                logger.info(
+                    "[%s] Cache HIT: %d cached / %d total input tokens (%.0f%% hit rate)",
+                    self.manifest.mind_id, cached, total, pct,
+                )
+            elif created > 0:
+                logger.info(
+                    "[%s] Cache WRITE: %d tokens written to cache",
+                    self.manifest.mind_id, created,
+                )
+            else:
+                logger.debug(
+                    "[%s] No cache metadata (backend: %s)",
+                    self.manifest.mind_id, self.manifest.model.preferred,
+                )
+        except Exception:
+            pass  # telemetry never crashes the loop
 
     async def _execute_tool_calls(self, tool_blocks: list) -> list[dict]:
         """
