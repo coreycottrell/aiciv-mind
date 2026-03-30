@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# pytest
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# CRITICAL: Never commit keypairs or secrets
+*keypair*.json
+*_keypair.json
+*private_key*
+*.pem
+.env
+.env.*
+secrets/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ZMQ socket files
+*.ipc
+/tmp/aiciv-mind*.ipc
+
+# tmux
