@@ -115,8 +115,9 @@ _WRITE_DEFINITION: dict = {
             "memory_type": {
                 "type": "string",
                 "description": (
-                    "Type of memory: 'learning', 'decision', 'error', 'handoff', or 'observation' "
-                    "(default: 'learning')"
+                    "Type of memory: 'learning', 'decision', 'error', 'handoff', 'observation', or 'identity' "
+                    "(default: 'learning'). Use 'identity' for foundational facts about yourself "
+                    "that should persist indefinitely — your name, role, core principles, civilization membership."
                 ),
             },
             "tags": {

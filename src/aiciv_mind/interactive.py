@@ -108,8 +108,43 @@ class InteractiveREPL:
             return True
 
         if cmd == "/clear":
+            # Write handoff memory before clearing so next session knows what was in progress
+            try:
+                from aiciv_mind.memory import Memory
+                last_msgs = self.mind._messages
+                last_text = "(empty)"
+                for msg in reversed(last_msgs):
+                    if msg.get("role") != "assistant":
+                        continue
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        last_text = content[:400]
+                        break
+                    if isinstance(content, list):
+                        for block in reversed(content):
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "").strip()
+                                if text:
+                                    last_text = text[:400]
+                                    break
+                        if last_text != "(empty)":
+                            break
+                handoff = Memory(
+                    agent_id=self.mind.manifest.mind_id,
+                    title="Context cleared — mid-session handoff",
+                    content=(
+                        f"Conversation cleared mid-session by /clear command.\n"
+                        f"Turn count before clear: {len(last_msgs)}\n"
+                        f"Last assistant response: {last_text}"
+                    ),
+                    memory_type="handoff",
+                    tags=["handoff", "clear"],
+                )
+                self.mind.memory.store(handoff)
+            except Exception:
+                pass  # Never block /clear due to memory errors
             self.mind.clear_history()
-            print("Conversation history cleared.")
+            print("Conversation history cleared. Handoff memory written.")
             return True
 
         if cmd == "/memories":

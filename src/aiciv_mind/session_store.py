@@ -147,7 +147,7 @@ class SessionStore:
     # Shutdown
     # ------------------------------------------------------------------
 
-    def shutdown(self, messages: list[dict[str, Any]]) -> None:
+    def shutdown(self, messages: list[dict[str, Any]], cache_stats: dict | None = None) -> None:
         """
         Write the session summary and store a handoff memory.
 
@@ -173,10 +173,17 @@ class SessionStore:
 
         # Build summary
         topics_str = ", ".join(topics) if topics else "general"
+
+        cache_str = ""
+        if cache_stats and cache_stats.get("cache_hits", 0) > 0:
+            hit_rate = cache_stats.get("hit_rate", 0.0)
+            cached_tokens = cache_stats.get("cached_tokens", 0)
+            cache_str = f" Cache hit rate: {hit_rate:.0%} ({cached_tokens} cached tokens)."
+
         summary = (
             f"Session {self._session_id} completed. "
             f"{turn_count} turn(s). "
-            f"Topics: {topics_str}. "
+            f"Topics: {topics_str}.{cache_str} "
             f"Last response: {last_text[:400]}"
         )
 

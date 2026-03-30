@@ -155,6 +155,7 @@ class MemoryStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._touched_this_session: set[str] = set()  # track for depth score update
 
     # ------------------------------------------------------------------
     # Schema
@@ -346,6 +347,7 @@ class MemoryStore:
             (now, memory_id),
         )
         self._conn.commit()
+        self._touched_this_session.add(memory_id)
 
     def pin(self, memory_id: str) -> None:
         """Mark a memory as always-in-context (pinned)."""
@@ -442,6 +444,22 @@ class MemoryStore:
             (round(score, 4), memory_id),
         )
         self._conn.commit()
+
+    def recalculate_touched_depth_scores(self) -> int:
+        """
+        Recalculate depth_score for all memories touched this session.
+        Returns count of memories updated.
+        Called at session shutdown.
+        """
+        count = 0
+        for memory_id in self._touched_this_session:
+            try:
+                self.update_depth_score(memory_id)
+                count += 1
+            except Exception:
+                pass  # individual update failures don't stop the batch
+        self._touched_this_session.clear()
+        return count
 
     # ------------------------------------------------------------------
     # Session journal (v0.1.1)

@@ -81,7 +81,7 @@ def _build_mind() -> tuple[Mind, MemoryStore]:
     if db_path != ":memory:":
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
     memory = MemoryStore(db_path)
-    tools = ToolRegistry.default(memory_store=memory)
+    tools = ToolRegistry.default(memory_store=memory, agent_id=manifest.mind_id)
     mind = Mind(manifest=manifest, memory=memory, tools=tools)
     return mind, memory
 

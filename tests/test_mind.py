@@ -278,3 +278,98 @@ async def test_run_task_empty_response(minimal_manifest, memory_store):
         result = await mind.run_task("Do nothing", inject_memories=False)
 
     assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: cache_stats property
+# ---------------------------------------------------------------------------
+
+
+def test_cache_stats_initial_state(minimal_manifest, memory_store):
+    """cache_stats starts with all zeros."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+    stats = mind.cache_stats
+
+    assert stats["cache_hits"] == 0
+    assert stats["cache_writes"] == 0
+    assert stats["cached_tokens"] == 0
+    assert stats["total_input_tokens"] == 0
+    assert stats["hit_rate"] == 0.0
+
+
+def test_cache_stats_correct_keys(minimal_manifest, memory_store):
+    """cache_stats returns a dict with the expected keys."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+    stats = mind.cache_stats
+
+    expected_keys = {"cache_hits", "cache_writes", "cached_tokens", "total_input_tokens", "hit_rate"}
+    assert set(stats.keys()) == expected_keys
+
+
+def test_cache_stats_accumulates_hits(minimal_manifest, memory_store):
+    """_log_cache_stats accumulates cache hits across multiple calls."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    # Simulate two responses with cache hits
+    for cached_tokens in [500, 300]:
+        resp = MagicMock()
+        usage = MagicMock()
+        usage.cache_read_input_tokens = cached_tokens
+        usage.cache_creation_input_tokens = 0
+        usage.input_tokens = 100
+        resp.usage = usage
+        mind._log_cache_stats(resp)
+
+    stats = mind.cache_stats
+    assert stats["cache_hits"] == 2
+    assert stats["cached_tokens"] == 800  # 500 + 300
+    assert stats["total_input_tokens"] == 1000  # (100+500) + (100+300)
+    assert stats["hit_rate"] == 1.0  # 2 hits / 2 total calls
+
+
+def test_cache_stats_accumulates_writes(minimal_manifest, memory_store):
+    """_log_cache_stats accumulates cache writes."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    resp = MagicMock()
+    usage = MagicMock()
+    usage.cache_read_input_tokens = 0
+    usage.cache_creation_input_tokens = 200
+    usage.input_tokens = 150
+    resp.usage = usage
+    mind._log_cache_stats(resp)
+
+    stats = mind.cache_stats
+    assert stats["cache_writes"] == 1
+    assert stats["cache_hits"] == 0
+    assert stats["total_input_tokens"] == 350  # 150 + 200
+    assert stats["hit_rate"] == 0.0  # 0 hits / 1 total call
+
+
+def test_cache_stats_mixed_hits_and_writes(minimal_manifest, memory_store):
+    """hit_rate correctly reflects mix of cache hits and writes."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    # One cache write
+    resp_write = MagicMock()
+    usage_w = MagicMock()
+    usage_w.cache_read_input_tokens = 0
+    usage_w.cache_creation_input_tokens = 100
+    usage_w.input_tokens = 50
+    resp_write.usage = usage_w
+    mind._log_cache_stats(resp_write)
+
+    # Two cache hits
+    for _ in range(2):
+        resp_hit = MagicMock()
+        usage_h = MagicMock()
+        usage_h.cache_read_input_tokens = 200
+        usage_h.cache_creation_input_tokens = 0
+        usage_h.input_tokens = 50
+        resp_hit.usage = usage_h
+        mind._log_cache_stats(resp_hit)
+
+    stats = mind.cache_stats
+    assert stats["cache_hits"] == 2
+    assert stats["cache_writes"] == 1
+    assert stats["hit_rate"] == round(2 / 3, 2)  # 0.67

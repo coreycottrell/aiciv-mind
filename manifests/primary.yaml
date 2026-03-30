@@ -28,12 +28,22 @@ tools:
     enabled: true
   - name: "memory_write"
     enabled: true
-  # spawn_submind and send_to_submind are v0.2 — spawner is built but not yet
-  # wired into ToolRegistry. Sub-minds can be started directly via run_submind.py.
+  - name: "hub_post"
+    enabled: true
+  - name: "hub_reply"
+    enabled: true
+  - name: "hub_read"
+    enabled: true
+  - name: "pin_memory"
+    enabled: true
+  - name: "unpin_memory"
+    enabled: true
+  - name: "introspect_context"
+    enabled: true
   - name: "spawn_submind"
-    enabled: false
+    enabled: true
   - name: "send_to_submind"
-    enabled: false
+    enabled: true
 
 auth:
   civ_id: "acg"

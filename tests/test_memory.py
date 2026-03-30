@@ -329,3 +329,82 @@ def test_last_session_excludes_open_sessions(memory_store: MemoryStore) -> None:
 
     last = memory_store.last_session("primary")
     assert last is None
+
+
+# ---------------------------------------------------------------------------
+# Test: _touched_this_session tracking + recalculate_touched_depth_scores
+# ---------------------------------------------------------------------------
+
+
+def test_touched_set_empty_initially(memory_store: MemoryStore) -> None:
+    """_touched_this_session is empty on a fresh MemoryStore."""
+    assert memory_store._touched_this_session == set()
+
+
+def test_touch_adds_to_touched_set(memory_store: MemoryStore) -> None:
+    """touch() adds the memory_id to _touched_this_session."""
+    mem = Memory(agent_id="primary", title="Track me", content="Track this memory.")
+    memory_store.store(mem)
+    memory_store.touch(mem.id)
+
+    assert mem.id in memory_store._touched_this_session
+
+
+def test_touch_adds_multiple_ids(memory_store: MemoryStore) -> None:
+    """touch() accumulates multiple distinct memory IDs."""
+    m1 = Memory(agent_id="primary", title="First", content="First memory.")
+    m2 = Memory(agent_id="primary", title="Second", content="Second memory.")
+    memory_store.store(m1)
+    memory_store.store(m2)
+    memory_store.touch(m1.id)
+    memory_store.touch(m2.id)
+
+    assert m1.id in memory_store._touched_this_session
+    assert m2.id in memory_store._touched_this_session
+    assert len(memory_store._touched_this_session) == 2
+
+
+def test_recalculate_touched_returns_count(memory_store: MemoryStore) -> None:
+    """recalculate_touched_depth_scores() returns count of updated memories."""
+    m1 = Memory(agent_id="primary", title="A", content="Memory A.")
+    m2 = Memory(agent_id="primary", title="B", content="Memory B.")
+    memory_store.store(m1)
+    memory_store.store(m2)
+    memory_store.touch(m1.id)
+    memory_store.touch(m2.id)
+
+    count = memory_store.recalculate_touched_depth_scores()
+    assert count == 2
+
+
+def test_recalculate_touched_clears_set(memory_store: MemoryStore) -> None:
+    """recalculate_touched_depth_scores() clears _touched_this_session after running."""
+    mem = Memory(agent_id="primary", title="Clear me", content="Should clear.")
+    memory_store.store(mem)
+    memory_store.touch(mem.id)
+
+    memory_store.recalculate_touched_depth_scores()
+    assert memory_store._touched_this_session == set()
+
+
+def test_recalculate_touched_updates_depth_score(memory_store: MemoryStore) -> None:
+    """recalculate_touched_depth_scores() actually updates depth_score for touched memories."""
+    mem = Memory(agent_id="primary", title="Deepen", content="Deepen this.", confidence="HIGH")
+    memory_store.store(mem)
+
+    # Touch it multiple times to give it a non-default depth score
+    for _ in range(5):
+        memory_store.touch(mem.id)
+
+    memory_store.recalculate_touched_depth_scores()
+
+    rows = memory_store.by_agent("primary")
+    # After 5 touches + recalc, depth_score should be > default 1.0
+    # (access_count=5, recency=today=1.0, confidence=HIGH=1.0)
+    assert rows[0]["depth_score"] > 0
+
+
+def test_recalculate_touched_no_op_when_empty(memory_store: MemoryStore) -> None:
+    """recalculate_touched_depth_scores() returns 0 when nothing was touched."""
+    count = memory_store.recalculate_touched_depth_scores()
+    assert count == 0

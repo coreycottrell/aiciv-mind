@@ -267,3 +267,62 @@ def test_context_manager_empty_results_returns_empty():
 
     ctx = ContextManager()
     assert ctx.format_search_results([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# shutdown() with cache_stats
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_without_cache_stats_backwards_compatible(session_store, memory_store):
+    """shutdown() without cache_stats still works (backward compatibility)."""
+    session_store.boot()
+    messages = [
+        {"role": "assistant", "content": "I did some work."},
+    ]
+    session_store.shutdown(messages)
+
+    last = memory_store.last_session("primary")
+    assert last is not None
+    assert "Cache hit rate" not in last["summary"]
+
+
+def test_shutdown_with_cache_stats_includes_hit_rate(session_store, memory_store):
+    """shutdown() with cache_stats includes hit rate in the session summary."""
+    session_store.boot()
+    messages = [
+        {"role": "assistant", "content": "Used caching effectively."},
+    ]
+    cache_stats = {
+        "cache_hits": 5,
+        "cache_writes": 2,
+        "cached_tokens": 1200,
+        "total_input_tokens": 3000,
+        "hit_rate": 0.71,
+    }
+    session_store.shutdown(messages, cache_stats=cache_stats)
+
+    last = memory_store.last_session("primary")
+    assert last is not None
+    assert "Cache hit rate: 71%" in last["summary"]
+    assert "1200 cached tokens" in last["summary"]
+
+
+def test_shutdown_with_zero_cache_hits_no_cache_string(session_store, memory_store):
+    """shutdown() with cache_stats but zero hits does not include cache string."""
+    session_store.boot()
+    messages = [
+        {"role": "assistant", "content": "No caching."},
+    ]
+    cache_stats = {
+        "cache_hits": 0,
+        "cache_writes": 3,
+        "cached_tokens": 0,
+        "total_input_tokens": 500,
+        "hit_rate": 0.0,
+    }
+    session_store.shutdown(messages, cache_stats=cache_stats)
+
+    last = memory_store.last_session("primary")
+    assert last is not None
+    assert "Cache hit rate" not in last["summary"]

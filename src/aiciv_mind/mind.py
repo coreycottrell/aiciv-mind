@@ -61,6 +61,12 @@ class Mind:
         # Boot context injected once at startup (identity + handoff)
         self._boot_context_str = boot_context_str
 
+        # Cache stats for self-improvement loop
+        self._session_cache_hits: int = 0
+        self._session_cached_tokens: int = 0
+        self._session_cache_writes: int = 0
+        self._session_total_input_tokens: int = 0
+
     async def run_task(
         self,
         task: str,
@@ -200,6 +206,16 @@ class Mind:
                     "[%s] No cache metadata (backend: %s)",
                     self.manifest.mind_id, self.manifest.model.preferred,
                 )
+            # Accumulate session-level stats
+            if cached > 0:
+                self._session_cache_hits += 1
+                self._session_cached_tokens += cached
+                self._session_total_input_tokens += total_in + cached
+            elif created > 0:
+                self._session_cache_writes += 1
+                self._session_total_input_tokens += total_in + created
+            elif total_in > 0:
+                self._session_total_input_tokens += total_in
         except Exception:
             pass  # telemetry never crashes the loop
 
@@ -243,6 +259,21 @@ class Mind:
         result = await self._tools.execute(block.name, tool_input)
         logger.debug("[%s] Tool result: %s", self.manifest.mind_id, str(result)[:200])
         return result
+
+    @property
+    def cache_stats(self) -> dict:
+        """Accumulated cache statistics for this session."""
+        total_calls = self._session_cache_hits + self._session_cache_writes
+        return {
+            "cache_hits": self._session_cache_hits,
+            "cache_writes": self._session_cache_writes,
+            "cached_tokens": self._session_cached_tokens,
+            "total_input_tokens": self._session_total_input_tokens,
+            "hit_rate": (
+                round(self._session_cache_hits / total_calls, 2)
+                if total_calls > 0 else 0.0
+            ),
+        }
 
     def clear_history(self) -> None:
         """Clear conversation history (keeps session_id)."""

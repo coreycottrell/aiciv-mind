@@ -65,8 +65,58 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     # Initialize memory
     memory = MemoryStore(db_path)
 
+    # Try to connect to AiCIV Suite (graceful degradation if unavailable)
+    suite_client = None
+    try:
+        auth_cfg = getattr(manifest, 'auth', None)
+        keypair_path = getattr(auth_cfg, 'keypair_path', None) if auth_cfg else None
+        if keypair_path and Path(keypair_path).exists():
+            from aiciv_mind.suite.client import SuiteClient
+            suite_client = await SuiteClient.connect(keypair_path, eager_auth=True)
+            logging.getLogger("aiciv_mind.main").info("SuiteClient connected — hub tools enabled")
+        else:
+            logging.getLogger("aiciv_mind.main").info("No keypair found — hub tools disabled")
+    except Exception as e:
+        logging.getLogger("aiciv_mind.main").warning(
+            "SuiteClient connect failed: %s — hub tools disabled", e
+        )
+
+    # Initialize sub-mind orchestration (optional — requires libtmux and active tmux session)
+    primary_bus = None
+    spawner = None
+    try:
+        from aiciv_mind.ipc import PrimaryBus
+        from aiciv_mind.spawner import SubMindSpawner
+        from aiciv_mind.registry import MindRegistry
+        primary_bus = PrimaryBus()
+        primary_bus.bind()
+        primary_bus.start_recv()
+        mind_registry = MindRegistry()
+        spawner = SubMindSpawner(
+            session_name="aiciv-mind",
+            mind_root=Path(__file__).parent,
+            registry=mind_registry,
+        )
+        logging.getLogger("aiciv_mind.main").info("Sub-mind IPC ready")
+    except Exception as e:
+        logging.getLogger("aiciv_mind.main").info("Sub-mind IPC not available: %s", e)
+
+    # Build message counter (lazily captures mind reference once created)
+    _mind_ref: list[Mind | None] = [None]
+
+    def get_msg_count() -> int:
+        return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
+
     # Build tool registry
-    tools = ToolRegistry.default(memory_store=memory)
+    tools = ToolRegistry.default(
+        memory_store=memory,
+        agent_id=manifest.mind_id,
+        suite_client=suite_client,
+        context_store=memory,
+        get_message_count=get_msg_count,
+        spawner=spawner,
+        primary_bus=primary_bus,
+    )
 
     # Session lifecycle + context management
     session_store = SessionStore(memory, agent_id=manifest.mind_id)
@@ -89,10 +139,12 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
         manifest=manifest,
         memory=memory,
         tools=tools,
+        bus=primary_bus,
         session_store=session_store,
         context_manager=ctx_mgr,
         boot_context_str=boot_str,
     )
+    _mind_ref[0] = mind  # now the message counter lambda works
 
     try:
         if task:
@@ -104,9 +156,19 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
             repl = InteractiveREPL(mind)
             await repl.run()
     finally:
-        # Write session handoff before exit — the next session will load this
-        session_store.shutdown(mind._messages)
+        # Recalculate depth scores for accessed memories
+        updated = memory.recalculate_touched_depth_scores()
+        if updated > 0:
+            logging.getLogger("aiciv_mind.main").info(
+                "Recalculated depth scores for %d accessed memories", updated
+            )
+        # Write session handoff with cache stats
+        session_store.shutdown(mind._messages, cache_stats=mind.cache_stats)
         memory.close()
+        if suite_client:
+            await suite_client.close()
+        if primary_bus:
+            primary_bus.close()
 
 
 def main() -> None:
