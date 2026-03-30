@@ -3,10 +3,10 @@ mind_id: "research-lead"
 display_name: "Research Team Lead"
 role: "team-lead"
 
-system_prompt_path: "manifests/prompts/research-lead.md"
+system_prompt_path: "prompts/research-lead.md"
 
 model:
-  preferred: "claude-sonnet-4-6"
+  preferred: "kimi-k2"
   temperature: 0.7
   max_tokens: 4096
 

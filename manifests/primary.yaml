@@ -3,10 +3,10 @@ mind_id: "primary"
 display_name: "A-C-Gee Primary Mind"
 role: "conductor-of-conductors"
 
-system_prompt_path: "manifests/prompts/primary.md"
+system_prompt_path: "prompts/primary.md"
 
 model:
-  preferred: "claude-sonnet-4-6"
+  preferred: "kimi-k2"
   temperature: 0.7
   max_tokens: 8192
 

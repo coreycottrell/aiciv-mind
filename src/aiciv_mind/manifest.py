@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator
 
 
 class ToolConfig(BaseModel):
@@ -27,7 +27,7 @@ class ToolConfig(BaseModel):
 class ModelConfig(BaseModel):
     """LLM model configuration."""
 
-    preferred: str = "claude-sonnet-4-6"
+    preferred: str = "ollama/qwen2.5-coder:14b"
     temperature: float = 0.7
     max_tokens: int = 4096
 

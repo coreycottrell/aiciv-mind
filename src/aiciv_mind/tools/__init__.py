@@ -38,6 +38,26 @@ class ToolRegistry:
         self._handlers[name] = handler
         self._read_only[name] = read_only
 
+    def build_openai_tools(self, enabled: list[str] | None = None) -> list[dict]:
+        """
+        Return tool definitions in OpenAI function-calling format.
+
+        Converts from internal Anthropic format (input_schema) to OpenAI format
+        (parameters inside a function wrapper).
+        """
+        anthropic_tools = self.build_anthropic_tools(enabled)
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in anthropic_tools
+        ]
+
     def build_anthropic_tools(self, enabled: list[str] | None = None) -> list[dict]:
         """
         Return list of tool definitions in Anthropic API format.

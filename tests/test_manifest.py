@@ -56,7 +56,7 @@ def test_load_full_manifest(tmp_path: Path) -> None:
         "role": "conductor-of-conductors",
         "system_prompt_path": "system_prompt.md",
         "model": {
-            "preferred": "claude-sonnet-4-6",
+            "preferred": "openrouter/kimi-k2",
             "temperature": 0.5,
             "max_tokens": 8192,
         },
@@ -90,7 +90,7 @@ def test_load_full_manifest(tmp_path: Path) -> None:
     assert manifest.mind_id == "primary"
     assert manifest.display_name == "Primary Mind"
     assert manifest.role == "conductor-of-conductors"
-    assert manifest.model.preferred == "claude-sonnet-4-6"
+    assert manifest.model.preferred == "openrouter/kimi-k2"
     assert manifest.model.temperature == 0.5
     assert manifest.model.max_tokens == 8192
     assert len(manifest.tools) == 2
@@ -111,7 +111,7 @@ def test_minimal_manifest(tmp_path: Path) -> None:
     manifest = MindManifest.from_yaml(manifest_path)
 
     assert manifest.mind_id == "test-mind"
-    assert manifest.model.preferred == "claude-sonnet-4-6"  # default
+    assert manifest.model.preferred == "ollama/qwen2.5-coder:14b"  # default
     assert manifest.tools == []
     assert manifest.sub_minds == []
 

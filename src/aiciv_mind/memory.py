@@ -15,6 +15,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -199,8 +200,13 @@ class MemoryStore:
         Filters by agent_id, domain, and/or memory_type when provided.
         Results are ordered by relevance (rank, lower BM25 = better match).
         """
+        # FTS5 MATCH cannot handle punctuation — strip to words only.
+        clean_query = " ".join(re.findall(r"\w+", query))
+        if not clean_query:
+            return []
+
         filters: list[str] = []
-        params: list[Any] = [query]
+        params: list[Any] = [clean_query]
 
         if agent_id is not None:
             filters.append("m.agent_id = ?")
