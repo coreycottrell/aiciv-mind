@@ -105,15 +105,18 @@ class ToolRegistry:
         get_message_count=None,
         spawner=None,
         primary_bus=None,
+        queue_path: str | None = None,
+        skills_dir: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
 
         If memory_store is provided, memory_search and memory_write are also registered.
         agent_id tags all written memories to the correct mind identity.
-        If suite_client is provided, hub_post, hub_reply, hub_read are also registered.
+        If suite_client is provided, hub_post, hub_reply, hub_read, hub_list_rooms are also registered.
         If context_store is provided, pin_memory, unpin_memory, introspect_context are registered.
         If spawner and primary_bus are both provided, spawn_submind and send_to_submind are registered.
+        If skills_dir is provided and memory_store is available, skill tools are registered.
         """
         from aiciv_mind.tools.bash import register_bash
         from aiciv_mind.tools.files import register_files
@@ -130,7 +133,7 @@ class ToolRegistry:
 
         if suite_client is not None:
             from aiciv_mind.tools.hub_tools import register_hub_tools
-            register_hub_tools(registry, suite_client)
+            register_hub_tools(registry, suite_client, queue_path=queue_path)
 
         if context_store is not None:
             from aiciv_mind.tools.context_tools import register_context_tools
@@ -144,5 +147,9 @@ class ToolRegistry:
         if spawner is not None and primary_bus is not None:
             from aiciv_mind.tools.submind_tools import register_submind_tools
             register_submind_tools(registry, spawner=spawner, bus=primary_bus, primary_mind_id=agent_id)
+
+        if skills_dir is not None and memory_store is not None:
+            from aiciv_mind.tools.skill_tools import register_skill_tools
+            register_skill_tools(registry, memory_store, skills_dir)
 
         return registry

@@ -1,8 +1,8 @@
 """
 Tests for aiciv_mind.tools.hub_tools — Hub connectivity tools.
 
-Covers: registration with/without suite_client, hub_post, hub_reply, hub_read
-handlers (success and error paths).
+Covers: registration with/without suite_client, hub_post, hub_reply, hub_read,
+hub_list_rooms, hub_queue_read handlers (success and error paths).
 
 Run with:
     cd /home/corey/projects/AI-CIV/aiciv-mind
@@ -11,6 +11,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -31,6 +32,7 @@ def _make_mock_suite_client():
     suite.hub.create_thread = AsyncMock()
     suite.hub.reply_to_thread = AsyncMock()
     suite.hub.list_threads = AsyncMock()
+    suite.hub.list_rooms = AsyncMock()
     return suite
 
 
@@ -240,3 +242,130 @@ def test_hub_read_is_read_only():
     assert registry.is_read_only("hub_read") is True
     assert registry.is_read_only("hub_post") is False
     assert registry.is_read_only("hub_reply") is False
+
+
+# ---------------------------------------------------------------------------
+# hub_list_rooms tests
+# ---------------------------------------------------------------------------
+
+
+def test_hub_list_rooms_registered():
+    """hub_list_rooms appears in registry when suite_client is provided."""
+    suite = _make_mock_suite_client()
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite)
+    assert "hub_list_rooms" in registry.names()
+
+
+@pytest.mark.asyncio
+async def test_hub_list_rooms_success():
+    suite = _make_mock_suite_client()
+    suite.hub.list_rooms.return_value = [
+        {"id": "room-1", "slug": "general", "room_type": "discussion"},
+        {"id": "room-2", "slug": "research", "room_type": "discussion"},
+    ]
+
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite)
+
+    result = await registry.execute("hub_list_rooms", {"group_id": "grp-abc"})
+
+    assert "#general" in result
+    assert "room-1" in result
+    assert "#research" in result
+    assert "room-2" in result
+    suite.hub.list_rooms.assert_awaited_once_with("grp-abc")
+
+
+@pytest.mark.asyncio
+async def test_hub_list_rooms_empty():
+    suite = _make_mock_suite_client()
+    suite.hub.list_rooms.return_value = []
+
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite)
+
+    result = await registry.execute("hub_list_rooms", {"group_id": "grp-abc"})
+    assert "No rooms found" in result
+
+
+@pytest.mark.asyncio
+async def test_hub_list_rooms_error():
+    suite = _make_mock_suite_client()
+    suite.hub.list_rooms.side_effect = ConnectionError("Network down")
+
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite)
+
+    result = await registry.execute("hub_list_rooms", {"group_id": "grp-abc"})
+    assert "ERROR" in result
+    assert "Network down" in result
+
+
+def test_hub_list_rooms_is_read_only():
+    suite = _make_mock_suite_client()
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite)
+    assert registry.is_read_only("hub_list_rooms") is True
+
+
+# ---------------------------------------------------------------------------
+# hub_queue_read tests
+# ---------------------------------------------------------------------------
+
+
+def test_hub_queue_read_registered_with_queue_path(tmp_path):
+    """hub_queue_read appears in registry when queue_path is provided."""
+    suite = _make_mock_suite_client()
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite, queue_path=str(tmp_path / "q.jsonl"))
+    assert "hub_queue_read" in registry.names()
+
+
+def test_hub_queue_read_not_registered_without_queue_path():
+    """hub_queue_read is NOT registered when queue_path is None."""
+    suite = _make_mock_suite_client()
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite, queue_path=None)
+    assert "hub_queue_read" not in registry.names()
+
+
+@pytest.mark.asyncio
+async def test_hub_queue_read_no_file(tmp_path):
+    """hub_queue_read returns message when queue file doesn't exist."""
+    suite = _make_mock_suite_client()
+    registry = ToolRegistry()
+    qpath = str(tmp_path / "nonexistent.jsonl")
+    register_hub_tools(registry, suite, queue_path=qpath)
+
+    result = await registry.execute("hub_queue_read", {})
+    assert "No queue file" in result
+
+
+@pytest.mark.asyncio
+async def test_hub_queue_read_returns_unprocessed(tmp_path):
+    """hub_queue_read returns unprocessed events and marks them processed."""
+    suite = _make_mock_suite_client()
+    qpath = tmp_path / "queue.jsonl"
+
+    events = [
+        {"event": "new_thread", "room_id": "r1", "thread_id": "t1",
+         "title": "Hello", "created_by": "synth", "processed": False},
+        {"event": "new_thread", "room_id": "r1", "thread_id": "t2",
+         "title": "Already Read", "created_by": "acg", "processed": True},
+    ]
+    qpath.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    registry = ToolRegistry()
+    register_hub_tools(registry, suite, queue_path=str(qpath))
+
+    result = await registry.execute("hub_queue_read", {})
+    assert "1 unprocessed" in result
+    assert "Hello" in result
+    assert "Already Read" not in result
+
+    # Verify events are now marked processed
+    lines = qpath.read_text().strip().splitlines()
+    for line in lines:
+        evt = json.loads(line)
+        assert evt["processed"] is True

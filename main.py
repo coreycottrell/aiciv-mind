@@ -101,6 +101,40 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     except Exception as e:
         logging.getLogger("aiciv_mind.main").info("Sub-mind IPC not available: %s", e)
 
+    # Auto-register sub-minds in persistent registry
+    for sub_ref in manifest.sub_minds:
+        memory.register_agent(
+            agent_id=sub_ref.mind_id,
+            manifest_path=sub_ref.manifest_path,
+            role="sub-mind",
+        )
+
+    # Auto-register skills from skills/ directory
+    skills_dir = Path(__file__).parent / "skills"
+    skills_dir_str: str | None = None
+    if skills_dir.exists():
+        skills_dir_str = str(skills_dir)
+        for skill_subdir in skills_dir.iterdir():
+            if not skill_subdir.is_dir():
+                continue
+            skill_file = skill_subdir / "SKILL.md"
+            if skill_file.exists():
+                skill_id = skill_subdir.name
+                # Try to parse domain from frontmatter
+                domain = "general"
+                try:
+                    text = skill_file.read_text(encoding="utf-8")
+                    for line in text.splitlines():
+                        if line.strip().startswith("domain:"):
+                            domain = line.split(":", 1)[1].strip()
+                            break
+                except Exception:
+                    pass
+                memory.register_skill(skill_id, skill_id, domain, str(skill_file))
+
+    # Hub queue path
+    queue_path = str(Path(__file__).parent / "data" / "hub_queue.jsonl")
+
     # Build message counter (lazily captures mind reference once created)
     _mind_ref: list[Mind | None] = [None]
 
@@ -116,6 +150,8 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
         get_message_count=get_msg_count,
         spawner=spawner,
         primary_bus=primary_bus,
+        queue_path=queue_path,
+        skills_dir=skills_dir_str,
     )
 
     # Session lifecycle + context management

@@ -408,3 +408,56 @@ def test_recalculate_touched_no_op_when_empty(memory_store: MemoryStore) -> None
     """recalculate_touched_depth_scores() returns 0 when nothing was touched."""
     count = memory_store.recalculate_touched_depth_scores()
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Test: agent_registry persistence
+# ---------------------------------------------------------------------------
+
+
+def test_register_and_get_agent(memory_store: MemoryStore) -> None:
+    """register_agent() inserts an agent; get_agent() retrieves it."""
+    memory_store.register_agent(
+        agent_id="research-lead",
+        manifest_path="/manifests/research-lead.yaml",
+        display_name="Research Lead",
+        role="sub-mind",
+        domain="research",
+    )
+    agent = memory_store.get_agent("research-lead")
+    assert agent is not None
+    assert agent["agent_id"] == "research-lead"
+    assert agent["manifest_path"] == "/manifests/research-lead.yaml"
+    assert agent["display_name"] == "Research Lead"
+    assert agent["role"] == "sub-mind"
+    assert agent["domain"] == "research"
+    assert agent["spawn_count"] == 0
+
+
+def test_list_agents(memory_store: MemoryStore) -> None:
+    """list_agents() returns all registered agents."""
+    memory_store.register_agent("agent-a", "/a.yaml", role="primary")
+    memory_store.register_agent("agent-b", "/b.yaml", role="sub-mind")
+
+    agents = memory_store.list_agents()
+    assert len(agents) == 2
+    ids = {a["agent_id"] for a in agents}
+    assert ids == {"agent-a", "agent-b"}
+
+
+def test_touch_agent_increments_spawn_count(memory_store: MemoryStore) -> None:
+    """touch_agent() increments spawn_count and sets last_active_at."""
+    memory_store.register_agent("spawnable", "/s.yaml")
+    memory_store.touch_agent("spawnable", session_id="sess-001")
+    memory_store.touch_agent("spawnable", session_id="sess-002")
+
+    agent = memory_store.get_agent("spawnable")
+    assert agent is not None
+    assert agent["spawn_count"] == 2
+    assert agent["last_active_at"] is not None
+    assert agent["last_session_id"] == "sess-002"
+
+
+def test_get_agent_not_found(memory_store: MemoryStore) -> None:
+    """get_agent() returns None for unknown agent_id."""
+    assert memory_store.get_agent("nonexistent") is None

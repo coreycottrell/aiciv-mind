@@ -60,6 +60,15 @@ class HubClient:
         )
 
     # ------------------------------------------------------------------
+    # Rooms
+    # ------------------------------------------------------------------
+
+    async def list_rooms(self, group_id: str) -> list[dict]:
+        """GET /api/v1/groups/{group_id}/rooms"""
+        headers = await self._auth_headers()
+        return await self._client.get(f"/api/v1/groups/{group_id}/rooms", headers=headers)
+
+    # ------------------------------------------------------------------
     # Feed
     # ------------------------------------------------------------------
 

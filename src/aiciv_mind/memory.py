@@ -117,6 +117,29 @@ CREATE TABLE IF NOT EXISTS session_journal (
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_agent ON session_journal(agent_id, start_time DESC);
+
+CREATE TABLE IF NOT EXISTS skills (
+    skill_id        TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    domain          TEXT NOT NULL DEFAULT 'general',
+    file_path       TEXT NOT NULL,
+    usage_count     INTEGER NOT NULL DEFAULT 0,
+    last_used_at    TEXT,
+    effectiveness   REAL NOT NULL DEFAULT 0.5,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_registry (
+    agent_id        TEXT PRIMARY KEY,
+    manifest_path   TEXT NOT NULL,
+    display_name    TEXT,
+    role            TEXT,
+    domain          TEXT DEFAULT 'general',
+    spawn_count     INTEGER NOT NULL DEFAULT 0,
+    last_active_at  TEXT,
+    last_session_id TEXT,
+    registered_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
 """
 
 # Columns added in v0.1.1 — applied via _migrate_schema() for existing DBs.
@@ -541,6 +564,140 @@ class MemoryStore:
             (session_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Skills registry
+    # ------------------------------------------------------------------
+
+    def register_skill(
+        self,
+        skill_id: str,
+        name: str,
+        domain: str,
+        file_path: str,
+        effectiveness: float = 0.5,
+    ) -> None:
+        """Register or update a skill in the skills table."""
+        self._conn.execute(
+            """
+            INSERT INTO skills (skill_id, name, domain, file_path, effectiveness)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(skill_id) DO UPDATE SET
+                name = excluded.name,
+                domain = excluded.domain,
+                file_path = excluded.file_path
+            """,
+            (skill_id, name, domain, file_path, effectiveness),
+        )
+        self._conn.commit()
+
+    def get_skill(self, skill_id: str) -> dict | None:
+        """Get skill metadata by skill_id."""
+        row = self._conn.execute(
+            "SELECT * FROM skills WHERE skill_id = ?", (skill_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def search_skills(self, query: str) -> list[dict]:
+        """Search skills by keyword in skill_id, name, or domain."""
+        pattern = f"%{query}%"
+        cursor = self._conn.execute(
+            """
+            SELECT * FROM skills
+            WHERE skill_id LIKE ? OR name LIKE ? OR domain LIKE ?
+            ORDER BY usage_count DESC
+            """,
+            (pattern, pattern, pattern),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def touch_skill(self, skill_id: str) -> None:
+        """Increment usage_count and update last_used_at for a skill."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            """
+            UPDATE skills
+               SET usage_count  = usage_count + 1,
+                   last_used_at = ?
+             WHERE skill_id = ?
+            """,
+            (now, skill_id),
+        )
+        self._conn.commit()
+
+    def list_skills(self) -> list[dict]:
+        """List all registered skills."""
+        cursor = self._conn.execute(
+            "SELECT * FROM skills ORDER BY usage_count DESC"
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Agent registry (persistent)
+    # ------------------------------------------------------------------
+
+    def register_agent(
+        self,
+        agent_id: str,
+        manifest_path: str,
+        display_name: str = "",
+        role: str = "",
+        domain: str = "general",
+    ) -> None:
+        """Register or update an agent in the persistent registry."""
+        self._conn.execute(
+            """
+            INSERT INTO agent_registry (agent_id, manifest_path, display_name, role, domain)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                manifest_path = excluded.manifest_path,
+                display_name  = excluded.display_name,
+                role          = excluded.role,
+                domain        = excluded.domain
+            """,
+            (agent_id, manifest_path, display_name, role, domain),
+        )
+        self._conn.commit()
+
+    def get_agent(self, agent_id: str) -> dict | None:
+        """Get agent metadata by agent_id."""
+        row = self._conn.execute(
+            "SELECT * FROM agent_registry WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_agents(self) -> list[dict]:
+        """List all registered agents."""
+        cursor = self._conn.execute(
+            "SELECT * FROM agent_registry ORDER BY registered_at DESC"
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def touch_agent(self, agent_id: str, session_id: str | None = None) -> None:
+        """Increment spawn_count and update last_active_at."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if session_id:
+            self._conn.execute(
+                """
+                UPDATE agent_registry
+                   SET spawn_count     = spawn_count + 1,
+                       last_active_at  = ?,
+                       last_session_id = ?
+                 WHERE agent_id = ?
+                """,
+                (now, session_id, agent_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE agent_registry
+                   SET spawn_count    = spawn_count + 1,
+                       last_active_at = ?
+                 WHERE agent_id = ?
+                """,
+                (now, agent_id),
+            )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle

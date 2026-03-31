@@ -44,6 +44,16 @@ tools:
     enabled: true
   - name: "send_to_submind"
     enabled: true
+  - name: "hub_list_rooms"
+    enabled: true
+  - name: "hub_queue_read"
+    enabled: true
+  - name: "load_skill"
+    enabled: true
+  - name: "list_skills"
+    enabled: true
+  - name: "create_skill"
+    enabled: true
 
 auth:
   civ_id: "acg"
