@@ -39,6 +39,26 @@ COREY_CHAT_ID = "437939400"
 # File-based message queue: ACG Primary writes prompts here, bot picks them up
 MSG_QUEUE = Path(__file__).parent / "data" / "acg_to_root.txt"
 
+# Persist offset across restarts so old messages aren't re-processed
+OFFSET_FILE = Path(__file__).parent / "data" / "tg_offset.txt"
+
+
+def _load_offset() -> int:
+    """Load the last saved Telegram update offset, or 0 if not found."""
+    try:
+        return int(OFFSET_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def _save_offset(offset: int) -> None:
+    """Persist offset to disk so restarts don't re-process old messages."""
+    try:
+        OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        OFFSET_FILE.write_text(str(offset))
+    except Exception as e:
+        log.warning("Could not save offset: %s", e)
+
 MANIFEST_PATH = Path(__file__).parent / "manifests" / "primary.yaml"
 
 
@@ -101,7 +121,9 @@ async def main():
     mind = Mind(manifest=manifest, memory=memory, tools=tools)
     log.info("Mind ready — model: %s", manifest.model.preferred)
 
-    offset = 0
+    # Load persisted offset — survives process restarts without re-processing old messages
+    offset = _load_offset()
+    log.info("Starting offset: %d", offset)
     async with httpx.AsyncClient() as client:
         log.info("Polling Telegram for @aiciv_mind_bot (chat_id=%s)...", ALLOWED_CHAT)
 
@@ -133,7 +155,11 @@ async def main():
                         log.error("Queue error: %s", e)
 
                 for update in data.get("result", []):
-                    offset = update["update_id"] + 1
+                    new_offset = update["update_id"] + 1
+                    if new_offset != offset:
+                        offset = new_offset
+                        _save_offset(offset)  # persist so restarts don't re-process
+                        log.info("Offset advanced to %d", offset)
                     msg = update.get("message")
                     if not msg or msg.get("chat", {}).get("id") != ALLOWED_CHAT:
                         continue

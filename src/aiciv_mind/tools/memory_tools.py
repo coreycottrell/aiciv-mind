@@ -79,6 +79,14 @@ def _make_search_handler(memory_store):
                 agent = getattr(mem, "agent_id", "?")
                 domain = getattr(mem, "domain", "general")
 
+            # Update depth scoring — this is the mechanism by which frequently-accessed
+            # memories rise in depth_score over time (compounding intelligence).
+            if mem_id != "?":
+                try:
+                    memory_store.touch(mem_id)
+                except Exception:
+                    pass  # Never let touch() failure suppress search results
+
             sections.append(
                 f"## {title}\n"
                 f"*id: {mem_id} | agent: {agent} | domain: {domain}*\n\n"
