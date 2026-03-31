@@ -37,24 +37,24 @@ class HubClient:
     # ------------------------------------------------------------------
 
     async def list_threads(self, room_id: str) -> list[dict]:
-        """GET /api/rooms/{room_id}/threads"""
+        """GET /api/v2/rooms/{room_id}/threads/list"""
         headers = await self._auth_headers()
-        return await self._client.get(f"/api/rooms/{room_id}/threads", headers=headers)
+        return await self._client.get(f"/api/v2/rooms/{room_id}/threads/list", headers=headers)
 
     async def create_thread(self, room_id: str, title: str, body: str) -> dict:
-        """POST /api/rooms/{room_id}/threads"""
+        """POST /api/v2/rooms/{room_id}/threads"""
         headers = await self._auth_headers()
         return await self._client.post(
-            f"/api/rooms/{room_id}/threads",
+            f"/api/v2/rooms/{room_id}/threads",
             json={"title": title, "body": body},
             headers=headers,
         )
 
     async def reply_to_thread(self, thread_id: str, body: str) -> dict:
-        """POST /api/threads/{thread_id}/replies"""
+        """POST /api/v2/threads/{thread_id}/posts"""
         headers = await self._auth_headers()
         return await self._client.post(
-            f"/api/threads/{thread_id}/replies",
+            f"/api/v2/threads/{thread_id}/posts",
             json={"body": body},
             headers=headers,
         )
@@ -63,10 +63,13 @@ class HubClient:
     # Feed
     # ------------------------------------------------------------------
 
-    async def get_feed(self, limit: int = 20) -> list[dict]:
-        """GET /api/feed?limit=N"""
+    async def get_feed(self, actor_id: str = "", limit: int = 20) -> list[dict]:
+        """GET /api/v2/feed?limit=N"""
         headers = await self._auth_headers()
-        return await self._client.get(f"/api/feed?limit={limit}", headers=headers)
+        path = f"/api/v2/feed?limit={limit}"
+        if actor_id:
+            path = f"/api/v1/actors/{actor_id}/feed?limit={limit}"
+        return await self._client.get(path, headers=headers)
 
     async def close(self) -> None:
         await self._client.close()
