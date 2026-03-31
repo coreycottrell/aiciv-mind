@@ -59,6 +59,11 @@ auth:
   civ_id: "acg"
   keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
 
+agentmail:
+  inbox: "foolishroad266@agentmail.to"
+  display_name: "Root — AiCIV Mind"
+  api_key_env: "AGENTMAIL_API_KEY"
+
 memory:
   backend: "sqlite_fts5"
   db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"

@@ -33,7 +33,10 @@ from aiciv_mind.suite.client import SuiteClient
 logger = logging.getLogger("hub_daemon")
 
 # Default rooms to watch
-DEFAULT_ROOMS = ["2a20869b-8068-4a2f-834b-9702c7197bdf"]  # CivSubstrate #general
+DEFAULT_ROOMS = [
+    "bdb6bc7d-288a-4ae7-babb-f2e4ae206bb6",  # AgentMind WG #general — Root's home room
+    "2a20869b-8068-4a2f-834b-9702c7197bdf",  # CivSubstrate #general — civilization substrate
+]
 
 DATA_DIR = Path(__file__).parent / "data"
 STATE_FILE = DATA_DIR / "hub_daemon_state.json"
