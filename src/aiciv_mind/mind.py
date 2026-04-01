@@ -375,17 +375,64 @@ class Mind:
             )
 
         # Fallback: [TOOL_CALL] blocks (M2.7 native format)
+        # Uses brace-counting to handle content with embedded } characters.
         if not blocks:
-            tool_call_re = re.compile(
-                r'\[TOOL_CALL\]\s*\{tool\s*=>\s*"([^"]+)",\s*args\s*=>\s*\{(.*?)\}\s*\}\s*\[/TOOL_CALL\]',
-                re.DOTALL,
-            )
-            for match in tool_call_re.finditer(text):
-                name = match.group(1)
-                args_body = match.group(2).strip()
+            # First, extract full blocks between [TOOL_CALL] and [/TOOL_CALL]
+            tc_start = 0
+            while True:
+                start_idx = text.find("[TOOL_CALL]", tc_start)
+                if start_idx == -1:
+                    break
+                end_idx = text.find("[/TOOL_CALL]", start_idx)
+                if end_idx == -1:
+                    break
+                block_text = text[start_idx + len("[TOOL_CALL]"):end_idx].strip()
+                tc_start = end_idx + len("[/TOOL_CALL]")
+
+                # Extract tool name: tool => "name"
+                name_match = re.search(r'tool\s*=>\s*"([^"]+)"', block_text)
+                if not name_match:
+                    continue
+                name = name_match.group(1)
                 if name not in registered:
                     continue
-                args = self._parse_cli_style_args(args_body)
+
+                # Find args => { ... } using brace-counting
+                args_marker = block_text.find("args")
+                if args_marker == -1:
+                    continue
+                brace_start = block_text.find("{", args_marker)
+                if brace_start == -1:
+                    continue
+                # Count braces to find the matching close
+                depth = 0
+                in_str = False
+                esc = False
+                args_end = brace_start
+                for ci in range(brace_start, len(block_text)):
+                    c = block_text[ci]
+                    if esc:
+                        esc = False
+                    elif c == '\\' and in_str:
+                        esc = True
+                    elif c == '"' and not esc:
+                        in_str = not in_str
+                    elif not in_str:
+                        if c == '{':
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0:
+                                args_end = ci
+                                break
+                args_body = block_text[brace_start + 1:args_end].strip()
+
+                # Try JSON parse first (M2.7 sometimes puts JSON in TOOL_CALL)
+                try:
+                    args = json.loads("{" + args_body + "}")
+                except (json.JSONDecodeError, ValueError):
+                    args = self._parse_cli_style_args(args_body)
+
                 block = type("SyntheticToolUse", (), {
                     "name": name,
                     "input": args,
@@ -443,12 +490,45 @@ class Mind:
 
     @staticmethod
     def _parse_cli_style_args(text: str) -> dict:
-        """Parse --key value or --key \"value\" pairs into a dict."""
+        """Parse --key value or --key \"value\" pairs into a dict.
+
+        Handles escaped quotes inside quoted values so long content
+        (like memory_write bodies) isn't truncated at embedded quotes.
+        """
         result = {}
-        pattern = re.compile(r'--(\w+)\s+(?:"([^"]*)"|([\S]+))')
-        for match in pattern.finditer(text):
-            key = match.group(1)
-            value = match.group(2) if match.group(2) is not None else match.group(3)
+        # First try: --key "value with \"escaped\" quotes"
+        # Use a manual scan for quoted values to handle escapes properly
+        i = 0
+        while i < len(text):
+            m = re.match(r'--(\w+)\s+', text[i:])
+            if not m:
+                i += 1
+                continue
+            key = m.group(1)
+            i += m.end()
+            if i < len(text) and text[i] == '"':
+                # Scan for closing quote, respecting escaped quotes
+                i += 1  # skip opening quote
+                value_chars = []
+                while i < len(text):
+                    if text[i] == '\\' and i + 1 < len(text) and text[i + 1] == '"':
+                        value_chars.append('"')
+                        i += 2
+                    elif text[i] == '"':
+                        i += 1  # skip closing quote
+                        break
+                    else:
+                        value_chars.append(text[i])
+                        i += 1
+                value = ''.join(value_chars)
+            else:
+                # Unquoted value — grab until whitespace
+                end = i
+                while end < len(text) and not text[end].isspace():
+                    end += 1
+                value = text[i:end]
+                i = end
+            # Type coercion
             try:
                 value = int(value)
             except (ValueError, TypeError):
