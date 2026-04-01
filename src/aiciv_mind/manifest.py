@@ -50,6 +50,22 @@ class MemoryConfig(BaseModel):
     max_context_memories: int = 10
 
 
+class CompactionConfig(BaseModel):
+    """Context compaction configuration — preserves recent messages, summarizes older ones."""
+
+    enabled: bool = True
+    preserve_recent: int = 4  # Keep N most recent messages verbatim
+    max_context_tokens: int = 50000  # Compact when estimated tokens exceed this
+
+
+class HooksConfig(BaseModel):
+    """Pre/post tool hook configuration for governance."""
+
+    enabled: bool = True
+    blocked_tools: list[str] = []  # Tools denied by pre-hook
+    log_all: bool = True  # Audit-log every tool call
+
+
 class SubMindRef(BaseModel):
     """Reference to a sub-mind that this mind can spawn."""
 
@@ -70,12 +86,15 @@ class MindManifest(BaseModel):
     mind_id: str
     display_name: str
     role: str
+    self_modification_enabled: bool = False
     system_prompt: str | None = None
     system_prompt_path: str | None = None
     model: ModelConfig = ModelConfig()
     tools: list[ToolConfig] = []
     auth: AuthConfig
     memory: MemoryConfig
+    compaction: CompactionConfig = CompactionConfig()
+    hooks: HooksConfig = HooksConfig()
     sub_minds: list[SubMindRef] = []
 
     @classmethod

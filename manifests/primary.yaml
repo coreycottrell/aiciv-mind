@@ -88,6 +88,16 @@ tools:
   - name: "scratchpad_write"
     enabled: true
 
+compaction:
+  enabled: true
+  preserve_recent: 4
+  max_context_tokens: 50000
+
+hooks:
+  enabled: true
+  blocked_tools: []  # add git_push, netlify_deploy for autonomous/dream mode
+  log_all: true
+
 auth:
   civ_id: "acg"
   keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"

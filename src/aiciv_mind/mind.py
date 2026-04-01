@@ -51,6 +51,15 @@ class Mind:
         self.memory = memory
         self.bus = bus
         self._tools = tools or ToolRegistry.default(memory_store=memory)
+
+        # Attach hook governance if configured
+        if manifest.hooks.enabled:
+            from aiciv_mind.tools.hooks import HookRunner
+            hooks = HookRunner(
+                blocked_tools=manifest.hooks.blocked_tools,
+                log_all=manifest.hooks.log_all,
+            )
+            self._tools.set_hooks(hooks)
         self._client = anthropic.AsyncAnthropic(
             base_url=os.environ.get("MIND_API_URL", "http://localhost:4000"),
             api_key=os.environ.get("MIND_API_KEY", "sk-1234"),
@@ -62,6 +71,9 @@ class Mind:
         self._context_manager = context_manager
         # Boot context injected once at startup (identity + handoff)
         self._boot_context_str = boot_context_str
+
+        # Compaction state (preserve-recent-N pattern)
+        self._compacted_summary: str = ""
 
         # Cache stats for self-improvement loop
         self._session_cache_hits: int = 0
@@ -138,6 +150,26 @@ class Mind:
 
         while iteration < max_iterations and self._running:
             iteration += 1
+
+            # Compaction check: if messages exceed token threshold, compact
+            if (self.manifest.compaction.enabled
+                    and self._context_manager
+                    and self._context_manager.should_compact(
+                        self._messages,
+                        self.manifest.compaction.max_context_tokens,
+                    )):
+                self._messages, self._compacted_summary = (
+                    self._context_manager.compact_history(
+                        self._messages,
+                        preserve_recent=self.manifest.compaction.preserve_recent,
+                        existing_summary=self._compacted_summary,
+                    )
+                )
+                logger.info(
+                    "[%s] Compacted history: %d messages remain, summary %d chars",
+                    self.manifest.mind_id, len(self._messages),
+                    len(self._compacted_summary),
+                )
 
             response = await self._call_model(system_prompt, tools_list)
 

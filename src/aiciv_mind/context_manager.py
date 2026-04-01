@@ -150,6 +150,150 @@ class ContextManager:
         return "\n".join(lines) + "\n"
 
     # ------------------------------------------------------------------
+    # Context compaction (preserve-recent-N pattern from clawd-code)
+    # ------------------------------------------------------------------
+
+    def should_compact(self, messages: list[dict], max_tokens: int) -> bool:
+        """
+        Check if messages should be compacted.
+
+        Both conditions must be true:
+        1. More messages than preserve_recent + 2 (room for summary pair)
+        2. Estimated token count exceeds threshold
+        """
+        if len(messages) <= 6:  # minimum: need old messages + summary pair + recent
+            return False
+        total_chars = sum(self._message_chars(m) for m in messages)
+        return total_chars // _CHARS_PER_TOKEN > max_tokens
+
+    def compact_history(
+        self,
+        messages: list[dict],
+        preserve_recent: int = 4,
+        existing_summary: str = "",
+    ) -> tuple[list[dict], str]:
+        """
+        Compact conversation history while preserving recent messages verbatim.
+
+        Strategy:
+        - Split messages into old (to summarize) and recent (to keep)
+        - Build heuristic summary from old messages, merging with prior summaries
+        - Return [summary_user, summary_assistant] + recent (maintains alternation)
+
+        Returns (compacted_messages, updated_summary_text).
+        """
+        if len(messages) <= preserve_recent + 2:
+            return messages, existing_summary
+
+        # Find split point: ensure recent block starts with a user message
+        split = len(messages) - preserve_recent
+        while split < len(messages) and messages[split].get("role") != "user":
+            split += 1
+
+        if split >= len(messages) - 1:
+            return messages, existing_summary
+
+        old_messages = messages[:split]
+        recent_messages = messages[split:]
+
+        summary = self._build_compaction_summary(old_messages, existing_summary)
+
+        # Summary pair maintains user/assistant alternation
+        compacted = [
+            {
+                "role": "user",
+                "content": (
+                    "[COMPACTED CONTEXT — earlier conversation summarized]\n\n"
+                    f"{summary}\n\n"
+                    "[Recent messages follow verbatim. Continue without re-asking questions.]"
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "I have the compacted context from our earlier conversation. "
+                    "Continuing from where we left off."
+                ),
+            },
+        ] + recent_messages
+
+        return compacted, summary
+
+    def _build_compaction_summary(self, messages: list[dict], existing: str) -> str:
+        """Build a heuristic summary from messages being compacted."""
+        topics: list[str] = []
+        tools_used: set[str] = set()
+        key_outputs: list[str] = []
+
+        for msg in messages:
+            text = self._extract_message_text(msg)
+            role = msg.get("role", "")
+
+            if role == "user":
+                first_line = text.split("\n")[0][:150].strip()
+                if first_line and not first_line.startswith("[Tool result"):
+                    topics.append(first_line)
+                for line in text.split("\n"):
+                    if line.startswith("[Tool result:"):
+                        try:
+                            tool_name = line.split(":")[1].split("]")[0].strip()
+                            tools_used.add(tool_name)
+                        except IndexError:
+                            pass
+
+            elif role == "assistant":
+                if len(text) > 50:
+                    key_outputs.append(text[:300])
+
+        parts: list[str] = []
+        if existing:
+            parts.append(f"Prior context: {existing[:500]}")
+        if topics:
+            parts.append("Topics covered:\n" + "\n".join(f"- {t}" for t in topics[-8:]))
+        if tools_used:
+            parts.append(f"Tools used: {', '.join(sorted(tools_used))}")
+        if key_outputs:
+            parts.append("Key responses:\n" + "\n---\n".join(key_outputs[-3:]))
+
+        return "\n\n".join(parts) if parts else "Previous conversation context."
+
+    @staticmethod
+    def _extract_message_text(msg: dict) -> str:
+        """Extract plain text from a message dict (handles str, list, content blocks)."""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if hasattr(block, "text"):
+                    parts.append(block.text)
+                elif isinstance(block, dict):
+                    if block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_result":
+                        parts.append(block.get("content", ""))
+            return "\n".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _message_chars(msg: dict) -> int:
+        """Estimate character count of a message."""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            total = 0
+            for block in content:
+                if hasattr(block, "text"):
+                    total += len(block.text)
+                elif isinstance(block, dict):
+                    total += len(str(block.get("content", "")))
+                    total += len(str(block.get("text", "")))
+            return total
+        return len(str(content))
+
+    # ------------------------------------------------------------------
     # Token budget helpers
     # ------------------------------------------------------------------
 
