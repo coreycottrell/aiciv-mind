@@ -345,7 +345,49 @@ class Mind:
                 self.manifest.mind_id, name, str(args)[:100],
             )
 
+        # Fallback: [TOOL_CALL] blocks (M2.7 native format)
+        if not blocks:
+            tool_call_re = re.compile(
+                r'\[TOOL_CALL\]\s*\{tool\s*=>\s*"([^"]+)",\s*args\s*=>\s*\{(.*?)\}\s*\}\s*\[/TOOL_CALL\]',
+                re.DOTALL,
+            )
+            for match in tool_call_re.finditer(text):
+                name = match.group(1)
+                args_body = match.group(2).strip()
+                if name not in registered:
+                    continue
+                args = self._parse_cli_style_args(args_body)
+                block = type("SyntheticToolUse", (), {
+                    "name": name,
+                    "input": args,
+                    "id": f"synthetic_{uuid.uuid4().hex[:12]}",
+                    "type": "tool_use",
+                })()
+                blocks.append(block)
+                logger.info(
+                    "[%s] Parsed TOOL_CALL block: %s(%s)",
+                    self.manifest.mind_id, name, str(args)[:100],
+                )
+
         return blocks
+
+    @staticmethod
+    def _parse_cli_style_args(text: str) -> dict:
+        """Parse --key value or --key \"value\" pairs into a dict."""
+        result = {}
+        pattern = re.compile(r'--(\w+)\s+(?:"([^"]*)"|([\S]+))')
+        for match in pattern.finditer(text):
+            key = match.group(1)
+            value = match.group(2) if match.group(2) is not None else match.group(3)
+            try:
+                value = int(value)
+            except (ValueError, TypeError):
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    pass
+            result[key] = value
+        return result
 
     @staticmethod
     def _extract_json_objects(text: str) -> list[str]:
