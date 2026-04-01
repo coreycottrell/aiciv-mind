@@ -369,6 +369,41 @@ class Mind:
                     self.manifest.mind_id, name, str(args)[:100],
                 )
 
+        # Fallback: <minimax:tool_call> XML blocks (M2.7 XML format)
+        if not blocks:
+            xml_re = re.compile(
+                r'<minimax:tool_call>\s*<invoke\s+name="([^"]+)">\s*(.*?)</invoke>\s*</minimax:tool_call>',
+                re.DOTALL,
+            )
+            for match in xml_re.finditer(text):
+                name = match.group(1)
+                if name not in registered:
+                    continue
+                # Parse <parameter name="key">value</parameter> pairs
+                args = {}
+                param_re = re.compile(
+                    r'<parameter\s+name="([^"]+)">(.*?)</parameter>',
+                    re.DOTALL,
+                )
+                for pm in param_re.finditer(match.group(2)):
+                    val = pm.group(2).strip()
+                    # Try to parse as JSON value (bool, int, etc.)
+                    try:
+                        args[pm.group(1)] = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        args[pm.group(1)] = val
+                block = type("SyntheticToolUse", (), {
+                    "name": name,
+                    "input": args,
+                    "id": f"synthetic_{uuid.uuid4().hex[:12]}",
+                    "type": "tool_use",
+                })()
+                blocks.append(block)
+                logger.info(
+                    "[%s] Parsed XML tool call: %s(%s)",
+                    self.manifest.mind_id, name, str(args)[:100],
+                )
+
         return blocks
 
     @staticmethod
