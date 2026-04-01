@@ -13,7 +13,7 @@ system_prompt_path: "prompts/primary.md"
 model:
   preferred: "minimax-m27"
   temperature: 0.7
-  max_tokens: 8192
+  max_tokens: 16384
 
 tools:
   - name: "bash"

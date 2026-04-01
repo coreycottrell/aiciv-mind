@@ -704,5 +704,10 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the SQLite connection."""
+        """Close the SQLite connection and optimize the FTS5 index."""
+        try:
+            self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+            self._conn.commit()
+        except Exception:
+            pass  # FTS5 optimize is best-effort; never crash on close
         self._conn.close()

@@ -116,7 +116,10 @@ class Mind:
 
         # Record this turn in the session journal
         if self._session_store:
-            self._session_store.record_turn()
+            # Extract coarse topic from task text (first 5 words)
+            _topic_words = task.strip().split()[:5]
+            _topic = " ".join(_topic_words) if _topic_words else None
+            self._session_store.record_turn(topic=_topic)
 
         self._messages.append({"role": "user", "content": task})
 

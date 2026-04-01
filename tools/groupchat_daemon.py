@@ -95,6 +95,30 @@ async def post_reply(thread_id: str, body: str, token: str) -> bool:
         return resp.status_code in (200, 201)
 
 
+def _make_shutdown_handler(mind, memory, session_store):
+    """Create a signal handler that writes handoff and exits cleanly."""
+    import sys
+
+    def _handler(signum, frame):
+        LOG.info("SIGTERM received — writing handoff and exiting cleanly")
+        try:
+            memory.recalculate_touched_depth_scores()
+        except Exception as e:
+            LOG.warning("depth score recalc failed: %s", e)
+        try:
+            session_store.shutdown(mind._messages)
+        except Exception as e:
+            LOG.warning("session shutdown failed: %s", e)
+        try:
+            memory.close()
+        except Exception:
+            pass
+        LOG.info("Shutdown complete")
+        sys.exit(0)
+
+    return _handler
+
+
 async def run_daemon(thread_id: str):
     from aiciv_mind.manifest import MindManifest
     from aiciv_mind.memory import MemoryStore
@@ -163,6 +187,26 @@ async def run_daemon(thread_id: str):
     seen_post_ids: set[str] = set()
     acg_entity_id = "c537633e-13b3-5b33-82c6-d81a12cfbbf0"
 
+    # Persist seen_post_ids across restarts to avoid replaying history
+    data_dir = Path(__file__).parent.parent / "data"
+    data_dir.mkdir(exist_ok=True)
+    seen_posts_path = data_dir / f"seen_posts_{thread_id[:8]}.json"
+
+    if seen_posts_path.exists():
+        try:
+            saved = json.loads(seen_posts_path.read_text())
+            seen_post_ids = set(saved)
+            LOG.info("Loaded %d seen post IDs from disk", len(seen_post_ids))
+        except Exception as e:
+            LOG.warning("Could not load seen_post_ids: %s", e)
+
+    # Register SIGTERM/SIGINT handler for clean shutdown
+    import signal as _signal
+    _handler = _make_shutdown_handler(mind, memory, session_store)
+    _signal.signal(_signal.SIGTERM, _handler)
+    _signal.signal(_signal.SIGINT, _handler)
+    LOG.info("SIGTERM handler registered")
+
     # Get initial Hub token
     hub_token = await get_hub_token()
     token_acquired = time.time()
@@ -221,6 +265,12 @@ async def run_daemon(thread_id: str):
                         LOG.info("Root replied (%s): %s", "ok" if success else "FAILED", response[:80])
                 except Exception as e:
                     LOG.error("Mind error: %s", e)
+
+            # Persist seen_post_ids after each poll cycle
+            try:
+                seen_posts_path.write_text(json.dumps(list(seen_post_ids)))
+            except Exception:
+                pass
 
         except Exception as e:
             LOG.error("Poll error: %s", e)

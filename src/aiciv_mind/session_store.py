@@ -90,6 +90,23 @@ class SessionStore:
         # Start session record
         self._session_id = self._memory.start_session(self._agent_id)
 
+        # Clean up orphaned sessions (turn_count=0, end_time=NULL, not this session)
+        try:
+            self._memory._conn.execute(
+                """
+                UPDATE session_journal
+                   SET end_time = datetime('now'),
+                       summary  = 'Orphaned session — closed at next boot'
+                 WHERE agent_id = ?
+                   AND end_time IS NULL
+                   AND session_id != ?
+                """,
+                (self._agent_id, self._session_id),
+            )
+            self._memory._conn.commit()
+        except Exception:
+            pass  # never crash on cleanup
+
         # Count how many sessions this agent has had
         last = self._memory.last_session(self._agent_id)
 
