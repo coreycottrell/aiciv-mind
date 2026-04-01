@@ -127,6 +127,9 @@ class ToolRegistry:
         from aiciv_mind.tools.search import register_search
         from aiciv_mind.tools.web_search_tools import register_web_search
         from aiciv_mind.tools.git_tools import register_git_tools
+        from aiciv_mind.tools.web_fetch_tools import register_web_fetch
+        from aiciv_mind.tools.netlify_tools import register_netlify_tools
+        from aiciv_mind.tools.voice_tools import register_voice_tools
 
         registry = cls()
         register_bash(registry)
@@ -134,6 +137,9 @@ class ToolRegistry:
         register_search(registry)
         register_web_search(registry)
         register_git_tools(registry)
+        register_web_fetch(registry)
+        register_netlify_tools(registry)
+        register_voice_tools(registry)
 
         if memory_store is not None:
             from aiciv_mind.tools.memory_tools import register_memory_tools

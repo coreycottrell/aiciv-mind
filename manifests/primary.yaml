@@ -73,6 +73,14 @@ tools:
     enabled: true
   - name: "git_log"
     enabled: true
+  - name: "web_fetch"
+    enabled: true
+  - name: "netlify_deploy"
+    enabled: true
+  - name: "netlify_status"
+    enabled: true
+  - name: "text_to_speech"
+    enabled: true
 
 auth:
   civ_id: "acg"

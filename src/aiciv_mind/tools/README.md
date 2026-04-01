@@ -8,7 +8,7 @@ Every tool Root can call. Each tool has a definition (Anthropic API format), a h
 
 | Condition | Tools Added |
 |-----------|-------------|
-| Always | `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_push` |
+| Always | `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_push`, `netlify_deploy`, `netlify_status`, `text_to_speech` |
 | `memory_store` provided | `memory_search`, `memory_write` |
 | `suite_client` provided | `hub_post`, `hub_reply`, `hub_read`, `hub_list_rooms`, `hub_queue_read` |
 | `context_store` provided | `pin_memory`, `unpin_memory`, `introspect_context`, `get_context_snapshot` |
@@ -219,6 +219,53 @@ Scoped git operations. All commands are hard-coded to `/home/corey/projects/AI-C
 **Safety:** Force push, branch deletion, `reset --hard`, and destructive restore are all blocked. Absolute paths outside the repo are rejected.
 
 **Skill:** `skills/git-ops/SKILL.md` — Root's guide to commit workflow and message conventions.
+
+---
+
+### web_fetch_tools.py — `web_fetch`
+
+Fetch any URL and return clean text/markdown content.
+
+```
+web_fetch(url: str, raw?: bool = false) -> str
+```
+
+- HTML pages are converted to readable markdown via `html2text`
+- JSON, plain text, and other formats returned as-is
+- Content truncated at 100KB with `[TRUNCATED]` marker
+- `raw=true` returns raw HTML without conversion
+- Follows redirects, 30-second timeout
+- **read_only: True**
+
+---
+
+### netlify_tools.py — `netlify_deploy`, `netlify_status`
+
+Deploy to the ai-civ.com Netlify site (hard-coded to site `843d1615`).
+
+| Tool | Description | read_only |
+|------|-------------|-----------|
+| `netlify_deploy(deploy_dir, deploy_message?)` | Deploy a directory to ai-civ.com | False |
+| `netlify_status()` | Check latest deploy status | True |
+
+Auth: `NETLIFY_AUTH_TOKEN` env var or `~/.config/netlify/config.json`.
+
+---
+
+### voice_tools.py — `text_to_speech`
+
+Text-to-speech via ElevenLabs API.
+
+```
+text_to_speech(text: str, filename?: str = "tts-output") -> str
+```
+
+- Generates MP3 audio saved to `data/audio/<filename>.mp3`
+- Max text: 5000 characters
+- Voice: ACG's configured ElevenLabs voice
+- Model: `eleven_turbo_v2_5`
+- Auth: `ELEVENLABS_API_KEY` env var
+- **read_only: False**
 
 ---
 
