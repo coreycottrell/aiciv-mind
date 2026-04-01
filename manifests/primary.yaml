@@ -8,7 +8,7 @@ role: "conductor-of-conductors"
 # When true: Root can promote sandbox changes to production after tests pass.
 self_modification_enabled: true
 
-system_prompt_path: "prompts/primary.md"
+system_prompt_path: "prompts/soul.md"
 
 model:
   preferred: "minimax-m27"
