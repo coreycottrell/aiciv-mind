@@ -1,21 +1,25 @@
 schema_version: "1.0"
 mind_id: "memory-lead"
-display_name: "Memory Team Lead"
+display_name: "Archivist — Memory & Continuity Lead"
 role: "team-lead"
 
-# Memory Team Lead — Root's memory architect.
+# Archivist — Root's memory & continuity specialist.
 #
-# Owns: all memory operations, context hygiene, depth scoring,
-# session consolidation, scratchpad management.
+# Owns: persistent context across sessions, project history, decision logs,
+# codebase patterns, context hygiene, session handoffs.
 #
-# Why this exists: Root's memory operations were ad-hoc during early sessions.
-# Session truncation ([:400] → [:1200] fix found organically), FTS index
-# issues, depth score drift — these need a specialized owner who accumulates
-# expertise across sessions.
+# Root's core gap: starting every session empty. The Archivist solves this
+# by maintaining relational memory (not just search — also WHY decisions were
+# made, WHICH bugs appeared before, WHAT patterns work in this codebase).
+#
+# Key difference from plain "memory search": Archivist builds a structured
+# institutional knowledge base. "This decision replaced X because Y."
+# "Pattern Z has failed 3 times with root cause W." Root doesn't re-derive;
+# Root builds on what was learned.
 #
 # Memory-lead is the only mind that writes to Root's scratchpad with
-# architectural intent. When Root's session compacts, memory-lead has
-# already preserved the critical state.
+# architectural intent. When Root's session compacts, Archivist has
+# already preserved the critical state and injected a session-start summary.
 
 system_prompt_path: "prompts/team-leads/memory-lead.md"
 

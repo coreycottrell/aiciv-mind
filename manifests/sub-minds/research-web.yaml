@@ -1,0 +1,35 @@
+schema_version: "1.0"
+mind_id: "research-web"
+display_name: "Web Research Specialist"
+role: "specialist"
+
+# Web Research Specialist — spawned by research-lead for a single web search angle.
+#
+# One question in, structured findings out. Does not persist state.
+# research-lead synthesizes output from this and sibling sub-minds.
+
+system_prompt_path: "prompts/sub-minds/research-web.md"
+
+model:
+  preferred: "gemini-flash-free"    # 1M context, good for synthesizing search results
+  fallback: "qwen3-next-free"       # fallback if flash unavailable
+  temperature: 0.4
+  max_tokens: 4096
+
+tools:
+  - name: "web_search"
+    enabled: true
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only commands only", "no write operations", "no git operations"]
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: false    # read-only specialist, no auto-search
+  max_context_memories: 0           # no memories loaded — focused on external search only

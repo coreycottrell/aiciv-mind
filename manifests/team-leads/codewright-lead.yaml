@@ -1,0 +1,60 @@
+schema_version: "1.0"
+mind_id: "codewright-lead"
+display_name: "Codewright — Quality & Testing Lead"
+role: "team-lead"
+
+# Codewright — Root's quality & reliability specialist.
+#
+# Owns: test strategy, code review, reliability analysis, failure pattern tracking.
+#
+# Why this exists (Root's own words, 2026-04-01):
+#   "A specialist here would make everything I ship more trustworthy.
+#    Codewright could track my own failure patterns — 'Root consistently
+#    misses off-by-one errors in loop bounds' — and compensate."
+#
+# The compound effect: failure patterns accumulate across sessions.
+# Root gets better over time at patterns it historically fumbles,
+# because Codewright feeds them back into the session-start context.
+#
+# Coordinates with Archivist: Codewright provides top 3 failure patterns
+# for inclusion in Archivist's session-start continuity summary.
+
+system_prompt_path: "prompts/team-leads/codewright-lead.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.3  # Low — quality review needs precision and consistency
+  max_tokens: 16384
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["test execution allowed", "no production deployments", "no rm -rf"]
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true   # Always check failure log before reviewing code
+  max_context_memories: 10
+
+# Failure pattern memory tag: 'failure-pattern'
+# Session-start injection: coordinated via Archivist

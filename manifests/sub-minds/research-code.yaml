@@ -1,0 +1,39 @@
+schema_version: "1.0"
+mind_id: "research-code"
+display_name: "Code Research Specialist"
+role: "specialist"
+
+# Code Research Specialist — spawned by research-lead for codebase investigation.
+#
+# Answers questions about how code actually works by reading source files.
+# Uses grep, glob, read_file. Returns file references and concrete findings.
+
+system_prompt_path: "prompts/sub-minds/research-code.md"
+
+model:
+  preferred: "devstral-free"        # code specialist model
+  fallback: "qwen3-next-free"       # fallback: general purpose with large context
+  temperature: 0.2                  # low temperature — code reading is factual work
+  max_tokens: 8192                  # larger for reading file contents
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only commands only", "no write operations", "no git push", "no rm"]
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: false    # focused on code, not memory
+  max_context_memories: 0           # no memories — stay focused on the codebase
