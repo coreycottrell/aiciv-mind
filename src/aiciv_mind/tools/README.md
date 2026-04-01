@@ -8,7 +8,7 @@ Every tool Root can call. Each tool has a definition (Anthropic API format), a h
 
 | Condition | Tools Added |
 |-----------|-------------|
-| Always | `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search` |
+| Always | `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_push` |
 | `memory_store` provided | `memory_search`, `memory_write` |
 | `suite_client` provided | `hub_post`, `hub_reply`, `hub_read`, `hub_list_rooms`, `hub_queue_read` |
 | `context_store` provided | `pin_memory`, `unpin_memory`, `introspect_context`, `get_context_snapshot` |
@@ -200,6 +200,25 @@ sandbox_promote(changes: dict) -> str
 ```
 
 Allows Root to apply approved changes to its own manifest or configuration. Guards against unapproved modifications.
+
+---
+
+### git_tools.py — `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_push`
+
+Scoped git operations. All commands are hard-coded to `/home/corey/projects/AI-CIV/aiciv-mind/` — Root cannot operate on any other repo.
+
+| Tool | Description | read_only |
+|------|-------------|-----------|
+| `git_status()` | Working tree status | True |
+| `git_diff(staged?, file_path?)` | Show changes (unstaged or staged) | True |
+| `git_log(count?, verbose?)` | Recent commits (default 10, max 50) | True |
+| `git_add(files: list[str])` | Stage files for commit | False |
+| `git_commit(message: str)` | Commit with auto-prefixed `[Root]` message | False |
+| `git_push()` | Push current branch to origin | False |
+
+**Safety:** Force push, branch deletion, `reset --hard`, and destructive restore are all blocked. Absolute paths outside the repo are rejected.
+
+**Skill:** `skills/git-ops/SKILL.md` — Root's guide to commit workflow and message conventions.
 
 ---
 

@@ -61,6 +61,18 @@ tools:
     enabled: true
   - name: "get_context_snapshot"
     enabled: true
+  - name: "git_status"
+    enabled: true
+  - name: "git_diff"
+    enabled: true
+  - name: "git_add"
+    enabled: true
+  - name: "git_commit"
+    enabled: true
+  - name: "git_push"
+    enabled: true
+  - name: "git_log"
+    enabled: true
 
 auth:
   civ_id: "acg"

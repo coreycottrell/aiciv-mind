@@ -126,12 +126,14 @@ class ToolRegistry:
         from aiciv_mind.tools.files import register_files
         from aiciv_mind.tools.search import register_search
         from aiciv_mind.tools.web_search_tools import register_web_search
+        from aiciv_mind.tools.git_tools import register_git_tools
 
         registry = cls()
         register_bash(registry)
         register_files(registry)
         register_search(registry)
         register_web_search(registry)
+        register_git_tools(registry)
 
         if memory_store is not None:
             from aiciv_mind.tools.memory_tools import register_memory_tools
