@@ -25,6 +25,11 @@ class ToolRegistry:
         self._tools: dict[str, dict] = {}       # name -> Anthropic tool definition
         self._handlers: dict[str, Callable] = {} # name -> handler function
         self._read_only: dict[str, bool] = {}    # name -> read_only flag
+        self._hooks = None  # Optional HookRunner for pre/post governance
+
+    def set_hooks(self, hooks) -> None:
+        """Attach a HookRunner for pre/post tool execution governance."""
+        self._hooks = hooks
 
     def register(
         self,
@@ -73,19 +78,40 @@ class ToolRegistry:
         """
         Execute a tool by name with the given input dict.
 
-        Returns the tool's string output, or an error message if the tool
-        is unknown or raises an exception.
+        If a HookRunner is attached, pre-hooks can deny the call and
+        post-hooks can log or modify the output.
+
+        Returns the tool's string output, or an error/blocked message.
         """
+        # Pre-hook: can deny the tool call
+        if self._hooks:
+            pre = self._hooks.pre_tool_use(name, tool_input)
+            if not pre.allowed:
+                return f"BLOCKED: {pre.message}"
+
         if name not in self._handlers:
             return f"ERROR: Unknown tool '{name}'"
+
+        is_error = False
         try:
             handler = self._handlers[name]
             result = handler(tool_input)
             if asyncio.iscoroutine(result):
                 result = await result
-            return str(result)
+            result = str(result)
         except Exception as e:
-            return f"ERROR: Tool '{name}' failed: {type(e).__name__}: {e}"
+            result = f"ERROR: Tool '{name}' failed: {type(e).__name__}: {e}"
+            is_error = True
+
+        # Post-hook: log and optionally modify output
+        if self._hooks:
+            post = self._hooks.post_tool_use(name, tool_input, result, is_error)
+            if not post.allowed:
+                return f"BLOCKED (post): {post.message}"
+            if post.modified_output is not None:
+                result = post.modified_output
+
+        return result
 
     def is_read_only(self, name: str) -> bool:
         """Return True if the named tool is safe to run concurrently with other read-only tools."""

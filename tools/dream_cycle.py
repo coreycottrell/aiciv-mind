@@ -118,6 +118,15 @@ async def dream(quick: bool = False, post_to_hub_enabled: bool = True) -> None:
         scratchpad_dir=scratchpad_dir,
     )
 
+    # Dream mode governance: block destructive tools
+    from aiciv_mind.tools.hooks import HookRunner
+    dream_hooks = HookRunner(
+        blocked_tools=["git_push", "netlify_deploy"],
+        log_all=True,
+    )
+    tools.set_hooks(dream_hooks)
+    LOG.info("Dream hooks active — git_push, netlify_deploy blocked")
+
     session_store = SessionStore(memory, agent_id=manifest.mind_id)
     boot = session_store.boot()
 
