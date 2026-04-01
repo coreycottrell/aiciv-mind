@@ -6,7 +6,7 @@ role: "team-lead"
 system_prompt_path: "prompts/research-lead.md"
 
 model:
-  preferred: "kimi-k2"
+  preferred: "minimax-m27"
   temperature: 0.7
   max_tokens: 16384
 

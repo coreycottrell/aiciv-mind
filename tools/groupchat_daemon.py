@@ -95,7 +95,7 @@ async def post_reply(thread_id: str, body: str, token: str) -> bool:
         return resp.status_code in (200, 201)
 
 
-def _make_shutdown_handler(mind, memory, session_store):
+def _make_shutdown_handler(mind, memory, session_store, primary_bus=None):
     """Create a signal handler that writes handoff and exits cleanly."""
     import sys
 
@@ -113,6 +113,11 @@ def _make_shutdown_handler(mind, memory, session_store):
             memory.close()
         except Exception:
             pass
+        if primary_bus is not None:
+            try:
+                primary_bus.close()
+            except Exception:
+                pass
         LOG.info("Shutdown complete")
         sys.exit(0)
 
@@ -155,6 +160,26 @@ async def run_daemon(thread_id: str):
     def get_msg_count():
         return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
 
+    # Sub-mind IPC infrastructure — PrimaryBus (ZMQ ROUTER) + SubMindSpawner (libtmux)
+    # Bound before ToolRegistry so spawn_submind + send_to_submind are wired in.
+    primary_bus = None
+    spawner = None
+    try:
+        from aiciv_mind.ipc.primary_bus import PrimaryBus
+        from aiciv_mind.spawner import SubMindSpawner
+
+        mind_root = Path(__file__).parent.parent
+        primary_bus = PrimaryBus()
+        primary_bus.bind()
+        primary_bus.start_recv()
+        spawner = SubMindSpawner(
+            session_name="aiciv-subminds",
+            mind_root=mind_root,
+        )
+        LOG.info("PrimaryBus bound + SubMindSpawner ready (session: aiciv-subminds)")
+    except Exception as e:
+        LOG.warning("Sub-mind IPC unavailable: %s — spawn_submind/send_to_submind disabled", e)
+
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
@@ -165,6 +190,8 @@ async def run_daemon(thread_id: str):
         skills_dir=skills_dir if Path(skills_dir).exists() else None,
         scratchpad_dir=scratchpad_dir,
         manifest_path=manifest_path,
+        spawner=spawner,
+        primary_bus=primary_bus,
     )
 
     session_store = SessionStore(memory, agent_id=manifest.mind_id)
@@ -202,7 +229,7 @@ async def run_daemon(thread_id: str):
 
     # Register SIGTERM/SIGINT handler for clean shutdown
     import signal as _signal
-    _handler = _make_shutdown_handler(mind, memory, session_store)
+    _handler = _make_shutdown_handler(mind, memory, session_store, primary_bus=primary_bus)
     _signal.signal(_signal.SIGTERM, _handler)
     _signal.signal(_signal.SIGINT, _handler)
     LOG.info("SIGTERM handler registered")
