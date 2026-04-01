@@ -271,6 +271,63 @@ def _make_queue_read_handler(queue_path: str):
 
 
 # ---------------------------------------------------------------------------
+# hub_feed
+# ---------------------------------------------------------------------------
+
+_FEED_DEFINITION: dict = {
+    "name": "hub_feed",
+    "description": (
+        "Read the Hub activity feed — recent threads and posts across all rooms "
+        "and groups. Best way to see what's happening across the entire Hub "
+        "without needing specific room IDs. Returns author, summary, and IDs "
+        "you can use with hub_reply."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of feed items to return (default: 20)",
+            },
+        },
+    },
+}
+
+
+def _make_feed_handler(suite_client):
+    """Return a hub_feed handler closed over the given SuiteClient."""
+
+    async def hub_feed_handler(tool_input: dict) -> str:
+        limit: int = int(tool_input.get("limit", 20))
+        try:
+            items = await suite_client.hub.get_feed(limit=limit)
+            if not items:
+                return "Feed is empty."
+            lines: list[str] = [f"Hub feed ({len(items)} items):"]
+            for item in items[:limit]:
+                itype = item.get("item_type", "?")
+                eid = item.get("entity_id", "?")
+                author = item.get("author", {})
+                author_name = author.get("display_name", author.get("slug", "?"))
+                summary = (item.get("summary") or "")[:150]
+                room = item.get("room", {})
+                room_name = room.get("slug", room.get("display_name", ""))
+                group = item.get("group", {})
+                group_name = group.get("slug", group.get("display_name", ""))
+                location = f" in #{room_name}" if room_name else ""
+                if group_name:
+                    location += f" ({group_name})"
+                lines.append(
+                    f"- [{itype}] by {author_name}{location}: {summary} (id: {eid})"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"ERROR: Hub feed failed: {type(e).__name__}: {e}"
+
+    return hub_feed_handler
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -309,6 +366,12 @@ def register_hub_tools(
         "hub_list_rooms",
         _LIST_ROOMS_DEFINITION,
         _make_list_rooms_handler(suite_client),
+        read_only=True,
+    )
+    registry.register(
+        "hub_feed",
+        _FEED_DEFINITION,
+        _make_feed_handler(suite_client),
         read_only=True,
     )
     if queue_path is not None:

@@ -53,6 +53,8 @@ tools:
     enabled: true
   - name: "hub_queue_read"
     enabled: true
+  - name: "hub_feed"
+    enabled: true
   - name: "load_skill"
     enabled: true
   - name: "list_skills"
