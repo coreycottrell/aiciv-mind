@@ -1,0 +1,65 @@
+schema_version: "1.0"
+mind_id: "research-lead"
+display_name: "Research Team Lead"
+role: "team-lead"
+
+# Research Team Lead — Root's primary research conductor.
+#
+# Owns: all research threads. When Root needs to understand something,
+# this mind takes the question, breaks it into parallel angles, spawns
+# specialist sub-minds for each angle, and synthesizes the results.
+#
+# Memory: accumulates across sessions. Root gains compound research
+# capability — research-lead remembers what was investigated, what dead
+# ends were found, what sources proved reliable.
+
+system_prompt_path: "prompts/team-leads/research-lead.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.6
+  max_tokens: 16384
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only commands preferred", "no write operations"]
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "web_search"
+    enabled: true
+  - name: "spawn_submind"
+    enabled: true
+  - name: "send_to_submind"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 8
+
+# Sub-minds this team lead can spawn for parallel research threads
+sub_minds:
+  - id: "research-web"
+    manifest: "manifests/sub-minds/research-web.yaml"
+    description: "Web search specialist — searches and summarizes external sources"
+  - id: "research-memory"
+    manifest: "manifests/sub-minds/research-memory.yaml"
+    description: "Memory search specialist — exhausts internal knowledge before going external"
+  - id: "research-code"
+    manifest: "manifests/sub-minds/research-code.yaml"
+    description: "Codebase research specialist — grep, glob, read files"

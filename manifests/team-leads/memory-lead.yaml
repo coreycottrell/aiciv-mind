@@ -1,0 +1,59 @@
+schema_version: "1.0"
+mind_id: "memory-lead"
+display_name: "Memory Team Lead"
+role: "team-lead"
+
+# Memory Team Lead — Root's memory architect.
+#
+# Owns: all memory operations, context hygiene, depth scoring,
+# session consolidation, scratchpad management.
+#
+# Why this exists: Root's memory operations were ad-hoc during early sessions.
+# Session truncation ([:400] → [:1200] fix found organically), FTS index
+# issues, depth score drift — these need a specialized owner who accumulates
+# expertise across sessions.
+#
+# Memory-lead is the only mind that writes to Root's scratchpad with
+# architectural intent. When Root's session compacts, memory-lead has
+# already preserved the critical state.
+
+system_prompt_path: "prompts/team-leads/memory-lead.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.3  # Low — memory operations need precision, not creativity
+  max_tokens: 16384
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["sqlite3 queries allowed", "no destructive operations on memory.db"]
+  - name: "read_file"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
+  - name: "introspect_context"
+    enabled: true
+  - name: "pin_memory"
+    enabled: true
+  - name: "unpin_memory"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 12  # Higher — needs more context to make good pruning decisions
+
+sub_minds: []  # Memory operations are sequential — no parallel spawning needed
