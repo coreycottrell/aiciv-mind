@@ -64,6 +64,22 @@
 ## P0 — This Week (<2h each)
 ### Broken things or performance losses happening NOW
 
+### P0-0: PIN M2.7 FOR EVERYTHING + Enable reasoning_split (Corey Directive 2026-04-01)
+- **Source**: M27-FOCUS.md, Corey directive
+- **Current State**: May be falling back to M2.5. reasoning_split not enabled. Thinking tokens unaudited.
+- **Priority Justification**: M2.7 was TRAINED to improve its own harness. We ARE the harness. Pin it. Max out thinking. Never constrain.
+- **Build**:
+  - Verify LiteLLM routes ALL calls to M2.7 (not M2.5 fallback)
+  - Add `reasoning_split: true` to LiteLLM extra_body config
+  - Audit mind.py: verify `<think>` blocks preserved in `_messages`
+  - If stripping: fix immediately (40% performance at stake)
+  - Test temperature 1.0 vs 0.7
+  - Update all manifests: research-lead.yaml should use M2.7 too (not kimi-k2)
+- **Estimate**: 1h
+- **Principle**: P7 (Self-Improving Loop — M2.7's self-evolution IS our loop)
+
+---
+
 ---
 
 ### P0-1: Fix introspect_context Stale Pinned Count
