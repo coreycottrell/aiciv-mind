@@ -19,6 +19,8 @@ Every tool Root can call. Each tool has a definition (Anthropic API format), a h
 
 **Concurrency:** Read-only tools (`grep`, `glob`, `read_file`, `memory_search`, `web_search`, etc.) run in parallel via `asyncio.gather` when called in the same model turn. Write tools run sequentially.
 
+**Text-embedded tool calls:** Some models (e.g. M2.7 via Ollama) emit tool calls as JSON text (`{"name": "tool_name", "arguments": {...}}`) instead of structured `tool_use` content blocks. The Mind loop detects these via `_parse_text_tool_calls()`, executes them, and injects results as plain text for the next turn. This is transparent — Root calls tools the same way regardless of whether the backend produces native or text-embedded calls.
+
 ---
 
 ## Tool Reference

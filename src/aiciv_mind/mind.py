@@ -13,8 +13,10 @@ Model names use LiteLLM routing format in the manifest, e.g.:
   "openrouter/kimi-k2"
 """
 import asyncio
+import json
 import logging
 import os
+import re
 import uuid
 from typing import Any
 
@@ -149,14 +151,35 @@ class Mind:
                     final_text = tb.text
                     logger.debug("[%s] %s", self.manifest.mind_id, tb.text[:200])
 
-            # Check for tool use
+            # Check for tool use — native blocks first, then text-embedded fallback
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            synthetic_calls = False
 
-            if not tool_use_blocks or response.stop_reason == "end_turn":
+            if not tool_use_blocks and text_blocks:
+                # Some models (M2.7 via Ollama) emit tool calls as JSON text
+                # instead of structured tool_use blocks. Parse them out.
+                tool_use_blocks = self._parse_text_tool_calls(final_text)
+                synthetic_calls = bool(tool_use_blocks)
+
+            if not tool_use_blocks:
+                break
+            # For native tool_use, end_turn means stop. For synthetic (text-parsed)
+            # calls, end_turn is always set — ignore it and execute the tools.
+            if not synthetic_calls and response.stop_reason == "end_turn":
                 break
 
             tool_results = await self._execute_tool_calls(tool_use_blocks)
-            self._messages.append({"role": "user", "content": tool_results})
+
+            if synthetic_calls:
+                # For text-embedded tool calls, inject results as plain text
+                # so the model sees them naturally (it never produced tool_use IDs)
+                result_text = "\n".join(
+                    f"[Tool result: {b.name}]\n{r['content']}"
+                    for b, r in zip(tool_use_blocks, tool_results)
+                )
+                self._messages.append({"role": "user", "content": result_text})
+            else:
+                self._messages.append({"role": "user", "content": tool_results})
 
         self._running = False
 
@@ -241,6 +264,87 @@ class Mind:
                 self._session_total_input_tokens += total_in
         except Exception:
             pass  # telemetry never crashes the loop
+
+    def _parse_text_tool_calls(self, text: str) -> list:
+        """
+        Extract tool calls embedded as JSON in a text response.
+
+        Some models (e.g. M2.7 via Ollama) emit tool calls as JSON text instead
+        of structured tool_use content blocks.  This method detects patterns like:
+            {"name": "tool_name", "arguments": {...}}
+        and converts them into synthetic tool-block objects compatible with
+        _execute_tool_calls().
+
+        Strategy: find all top-level JSON objects in the text by scanning for
+        balanced braces, then check if any are valid tool calls.
+
+        Returns an empty list if no valid tool-call JSON is found.
+        """
+        blocks = []
+        registered = set(self._tools.names())
+
+        # Extract all JSON objects from the text (handles nested braces)
+        for candidate in self._extract_json_objects(text):
+            try:
+                obj = json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if not isinstance(obj, dict):
+                continue
+
+            name = obj.get("name")
+            args = obj.get("arguments", {})
+
+            if not name or name not in registered:
+                continue
+            if not isinstance(args, dict):
+                continue
+
+            block = type("SyntheticToolUse", (), {
+                "name": name,
+                "input": args,
+                "id": f"synthetic_{uuid.uuid4().hex[:12]}",
+                "type": "tool_use",
+            })()
+            blocks.append(block)
+            logger.info(
+                "[%s] Parsed text tool call: %s(%s)",
+                self.manifest.mind_id, name, str(args)[:100],
+            )
+
+        return blocks
+
+    @staticmethod
+    def _extract_json_objects(text: str) -> list[str]:
+        """Extract balanced JSON object strings from text."""
+        results = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                depth = 0
+                start = i
+                in_string = False
+                escape_next = False
+                while i < len(text):
+                    c = text[i]
+                    if escape_next:
+                        escape_next = False
+                    elif c == '\\' and in_string:
+                        escape_next = True
+                    elif c == '"' and not escape_next:
+                        in_string = not in_string
+                    elif not in_string:
+                        if c == '{':
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0:
+                                results.append(text[start:i + 1])
+                                break
+                    i += 1
+            i += 1
+        return results
 
     async def _execute_tool_calls(self, tool_blocks: list) -> list[dict]:
         """
