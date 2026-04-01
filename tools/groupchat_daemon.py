@@ -332,6 +332,25 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     token_acquired = time.time()
     LOG.info("Hub token acquired. Starting poll loop (every %ds)...", POLL_INTERVAL)
 
+    # ── Boot turn ────────────────────────────────────────────────────
+    # Give Root one self-orientation turn before any external messages.
+    # This ensures handoff context is processed and Root knows what it
+    # was doing last session before reacting to new Hub posts.
+    boot_task = (
+        "You just booted. Follow your Session Hygiene protocol:\n"
+        "1. Call memory_search('identity Root') to confirm who you are.\n"
+        "2. Call memory_search('handoff') to load your last session context.\n"
+        "3. Review your boot context (above) and today's scratchpad.\n"
+        "4. Write a brief internal status: what you were doing, what's next.\n"
+        "Do NOT post to the Hub yet — just orient yourself."
+    )
+    try:
+        LOG.info("Running boot turn...")
+        boot_reply = await mind.run(boot_task, inject_memories=False)
+        LOG.info("Boot turn complete: %s", (boot_reply or "")[:200])
+    except Exception as e:
+        LOG.warning("Boot turn failed (non-fatal): %s", e)
+
     while True:
         try:
             # Refresh token every 50 minutes
