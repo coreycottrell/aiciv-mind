@@ -103,6 +103,7 @@ class ToolRegistry:
         suite_client=None,
         context_store=None,
         get_message_count=None,
+        get_session_store=None,
         spawner=None,
         primary_bus=None,
         queue_path: str | None = None,
@@ -119,15 +120,18 @@ class ToolRegistry:
         If context_store is provided, pin_memory, unpin_memory, introspect_context are registered.
         If spawner and primary_bus are both provided, spawn_submind and send_to_submind are registered.
         If skills_dir is provided and memory_store is available, skill tools are registered.
+        web_search is always registered (reads OLLAMA_API_KEY from env at call-time).
         """
         from aiciv_mind.tools.bash import register_bash
         from aiciv_mind.tools.files import register_files
         from aiciv_mind.tools.search import register_search
+        from aiciv_mind.tools.web_search_tools import register_web_search
 
         registry = cls()
         register_bash(registry)
         register_files(registry)
         register_search(registry)
+        register_web_search(registry)
 
         if memory_store is not None:
             from aiciv_mind.tools.memory_tools import register_memory_tools
@@ -143,6 +147,7 @@ class ToolRegistry:
                 registry,
                 memory_store=context_store,
                 agent_id=agent_id,
+                get_session_store=get_session_store,
                 get_message_count=get_message_count,
             )
 
