@@ -114,12 +114,72 @@ async def main():
         log.error("Set AICIV_MIND_TG_TOKEN")
         return
 
-    # Build the mind
+    # Build the mind — full tool registry (matches main.py)
+    from aiciv_mind.session_store import SessionStore
+    from aiciv_mind.context_manager import ContextManager
+
     manifest = MindManifest.from_yaml(str(MANIFEST_PATH))
-    memory = MemoryStore(manifest.memory.db_path)
-    tools = ToolRegistry.default(memory_store=memory)
-    mind = Mind(manifest=manifest, memory=memory, tools=tools)
-    log.info("Mind ready — model: %s", manifest.model.preferred)
+    db_path = manifest.memory.db_path
+    if db_path != ":memory:":
+        import os as _os
+        db_dir = _os.path.dirname(db_path)
+        if db_dir:
+            _os.makedirs(db_dir, exist_ok=True)
+    memory = MemoryStore(db_path)
+
+    # Try SuiteClient for Hub tools
+    suite_client = None
+    try:
+        auth_cfg = getattr(manifest, 'auth', None)
+        keypair_path = getattr(auth_cfg, 'keypair_path', None) if auth_cfg else None
+        if keypair_path and Path(keypair_path).exists():
+            from aiciv_mind.suite.client import SuiteClient
+            suite_client = await SuiteClient.connect(keypair_path, eager_auth=True)
+            log.info("SuiteClient connected — hub tools enabled")
+    except Exception as e:
+        log.info("SuiteClient unavailable: %s", e)
+
+    # Skills + scratchpad + sandbox paths
+    skills_dir = str(Path(__file__).parent / "skills")
+    scratchpad_dir = str(Path(__file__).parent / "scratchpads")
+    manifest_path = str(MANIFEST_PATH)
+    queue_path = str(Path(__file__).parent / "data" / "hub_queue.jsonl")
+
+    # Message counter
+    _mind_ref = [None]
+    def get_msg_count():
+        return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
+
+    tools = ToolRegistry.default(
+        memory_store=memory,
+        agent_id=manifest.mind_id,
+        suite_client=suite_client,
+        context_store=memory,
+        get_message_count=get_msg_count,
+        queue_path=queue_path,
+        skills_dir=skills_dir if Path(skills_dir).exists() else None,
+        scratchpad_dir=scratchpad_dir,
+        manifest_path=manifest_path,
+    )
+
+    # Session lifecycle
+    session_store = SessionStore(memory, agent_id=manifest.mind_id)
+    boot = session_store.boot()
+    ctx_mgr = ContextManager(
+        max_context_memories=manifest.memory.max_context_memories,
+        model_max_tokens=manifest.model.max_tokens,
+        scratchpad_dir=scratchpad_dir,
+    )
+    boot_str = ctx_mgr.format_boot_context(boot)
+    if boot_str:
+        log.info("Loaded boot context: session %s (prior sessions: %d)", boot.session_id, boot.session_count)
+
+    mind = Mind(
+        manifest=manifest, memory=memory, tools=tools,
+        boot_context_str=boot_str, session_store=session_store, context_manager=ctx_mgr,
+    )
+    _mind_ref[0] = mind
+    log.info("Mind ready — model: %s (full tool registry)", manifest.model.preferred)
 
     # Load persisted offset — survives process restarts without re-processing old messages
     offset = _load_offset()
