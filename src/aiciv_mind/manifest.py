@@ -66,6 +66,14 @@ class HooksConfig(BaseModel):
     log_all: bool = True  # Audit-log every tool call
 
 
+class AgentMailConfig(BaseModel):
+    """AgentMail inbox configuration."""
+
+    inbox: str = ""  # e.g. "foolishroad266@agentmail.to"
+    display_name: str = ""
+    api_key_env: str = "AGENTMAIL_API_KEY"
+
+
 class SubMindRef(BaseModel):
     """Reference to a sub-mind that this mind can spawn."""
 
@@ -92,6 +100,7 @@ class MindManifest(BaseModel):
     model: ModelConfig = ModelConfig()
     tools: list[ToolConfig] = []
     auth: AuthConfig
+    agentmail: AgentMailConfig = AgentMailConfig()
     memory: MemoryConfig
     compaction: CompactionConfig = CompactionConfig()
     hooks: HooksConfig = HooksConfig()

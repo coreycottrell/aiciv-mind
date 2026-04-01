@@ -262,6 +262,9 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     except Exception as e:
         LOG.warning("Sub-mind IPC unavailable: %s — spawn_submind/send_to_submind disabled", e)
 
+    # AgentMail inbox from manifest (enables email_read + email_send)
+    agentmail_inbox = manifest.agentmail.inbox if manifest.agentmail.inbox else None
+
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
@@ -274,6 +277,7 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
         manifest_path=manifest_path,
         spawner=spawner,
         primary_bus=primary_bus,
+        agentmail_inbox=agentmail_inbox,
     )
 
     session_store = SessionStore(memory, agent_id=manifest.mind_id)

@@ -87,6 +87,10 @@ tools:
     enabled: true
   - name: "scratchpad_write"
     enabled: true
+  - name: "email_read"
+    enabled: true
+  - name: "email_send"
+    enabled: true
 
 compaction:
   enabled: true
@@ -103,7 +107,7 @@ auth:
   keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
 
 agentmail:
-  inbox: "foolishroad266@agentmail.to"
+  inbox: "root-aiciv@agentmail.to"
   display_name: "Root — AiCIV Mind"
   api_key_env: "AGENTMAIL_API_KEY"
 

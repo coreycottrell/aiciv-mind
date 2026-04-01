@@ -136,6 +136,7 @@ class ToolRegistry:
         skills_dir: str | None = None,
         scratchpad_dir: str | None = None,
         manifest_path: str | None = None,
+        agentmail_inbox: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
@@ -200,5 +201,9 @@ class ToolRegistry:
         if manifest_path is not None:
             from aiciv_mind.tools.sandbox_tools import register_sandbox_tools
             register_sandbox_tools(registry, manifest_path)
+
+        if agentmail_inbox:
+            from aiciv_mind.tools.email_tools import register_email_tools
+            register_email_tools(registry, agentmail_inbox)
 
         return registry
