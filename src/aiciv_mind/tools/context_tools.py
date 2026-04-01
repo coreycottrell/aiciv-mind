@@ -5,12 +5,16 @@ These tools give the mind agency over its own context window:
   - pin_memory: mark a memory as always-in-context at session boot
   - unpin_memory: remove a memory from always-in-context
   - introspect_context: inspect current context window state
+  - get_context_snapshot: rich JSON snapshot for the context-engineer sub-mind
 
 Registered only when context_store is provided to ToolRegistry.default().
 All handlers are sync (SQLite + counter — no I/O beyond that).
 """
 
 from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
 
 from aiciv_mind.tools import ToolRegistry
 
@@ -158,6 +162,152 @@ def _make_introspect_handler(memory_store, agent_id: str, session_store=None, ge
 
 
 # ---------------------------------------------------------------------------
+# get_context_snapshot
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_DEFINITION: dict = {
+    "name": "get_context_snapshot",
+    "description": (
+        "Return a rich JSON snapshot of Root's memory state for the context-engineer "
+        "sub-mind. Includes total counts, pinned memories, top/bottom depth scores, "
+        "and stale memories. Use before calling send_to_submind('context-engineer', ...)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+
+def _make_snapshot_handler(memory_store, agent_id: str, get_message_count=None):
+    """Return a get_context_snapshot handler for the context engineer sub-mind."""
+
+    def snapshot_handler(tool_input: dict) -> str:
+        try:
+            now = datetime.now(timezone.utc)
+            stale_cutoff = "2000-01-01T00:00:00Z"  # fallback — any old date
+
+            # Total memory count
+            row = memory_store._conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            total = row[0] if row else 0
+
+            # Session count
+            row = memory_store._conn.execute(
+                "SELECT COUNT(*) FROM session_journal WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            session_count = row[0] if row else 0
+
+            # Message count
+            message_count = get_message_count() if get_message_count else 0
+
+            # Pinned memories
+            pinned_rows = memory_store.get_pinned(agent_id=agent_id)
+            pinned = [
+                {
+                    "id": m["id"],
+                    "title": m["title"],
+                    "depth_score": m.get("depth_score", 0.0),
+                    "access_count": m.get("access_count", 0),
+                    "last_accessed_at": m.get("last_accessed_at"),
+                }
+                for m in pinned_rows
+            ]
+
+            # Top 10 by depth score (search_by_depth returns list[dict])
+            top_rows = memory_store.search_by_depth(agent_id=agent_id, limit=10)
+            top_by_depth = [
+                {
+                    "id": m["id"],
+                    "title": m["title"],
+                    "depth_score": m.get("depth_score") or 0.0,
+                    "access_count": m.get("access_count") or 0,
+                    "is_pinned": bool(m.get("is_pinned", 0)),
+                    "memory_type": m.get("memory_type") or "learning",
+                }
+                for m in top_rows
+            ]
+
+            # Bottom 10 by depth score (eviction candidates) — convert to dict
+            bottom_rows = [
+                dict(r) for r in memory_store._conn.execute(
+                    """
+                    SELECT id, title, depth_score, access_count, is_pinned, memory_type,
+                           last_accessed_at
+                    FROM memories
+                    WHERE agent_id = ?
+                    ORDER BY depth_score ASC
+                    LIMIT 10
+                    """,
+                    (agent_id,),
+                ).fetchall()
+            ]
+            bottom_by_depth = [
+                {
+                    "id": m["id"],
+                    "title": m["title"],
+                    "depth_score": m["depth_score"] or 0.0,
+                    "access_count": m["access_count"] or 0,
+                    "is_pinned": bool(m["is_pinned"]),
+                    "memory_type": m["memory_type"] or "learning",
+                    "last_accessed_at": m["last_accessed_at"],
+                }
+                for m in bottom_rows
+            ]
+
+            # Stale memories: not accessed in 14+ days (or never accessed), low depth
+            stale_rows = [
+                dict(r) for r in memory_store._conn.execute(
+                    """
+                    SELECT id, title, depth_score, access_count, is_pinned, memory_type,
+                           last_accessed_at, created_at
+                    FROM memories
+                    WHERE agent_id = ?
+                      AND is_pinned = 0
+                      AND (last_accessed_at IS NULL
+                           OR last_accessed_at < date('now', '-14 days'))
+                      AND depth_score < 0.3
+                    ORDER BY depth_score ASC
+                    LIMIT 20
+                    """,
+                    (agent_id,),
+                ).fetchall()
+            ]
+            stale_memories = [
+                {
+                    "id": m["id"],
+                    "title": m["title"],
+                    "depth_score": m["depth_score"] or 0.0,
+                    "access_count": m["access_count"] or 0,
+                    "last_accessed_at": m["last_accessed_at"],
+                    "memory_type": m["memory_type"] or "learning",
+                }
+                for m in stale_rows
+            ]
+
+            snapshot = {
+                "total_memories": total,
+                "session_count": session_count,
+                "message_count": message_count,
+                "pinned_count": len(pinned),
+                "pinned": pinned,
+                "top_by_depth": top_by_depth,
+                "bottom_by_depth": bottom_by_depth,
+                "stale_memories": stale_memories,
+                "snapshot_time": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+
+            return json.dumps(snapshot, indent=2)
+
+        except Exception as e:
+            return f"ERROR: get_context_snapshot failed: {type(e).__name__}: {e}"
+
+    return snapshot_handler
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -170,9 +320,9 @@ def register_context_tools(
     get_message_count=None,
 ) -> None:
     """
-    Register pin_memory, unpin_memory, and introspect_context tools.
+    Register pin_memory, unpin_memory, introspect_context, and get_context_snapshot tools.
 
-    All tools close over memory_store. introspect_context also uses
+    All tools close over memory_store. introspect_context and get_context_snapshot also use
     session_store and get_message_count for richer context reporting.
     """
     registry.register(
@@ -191,5 +341,11 @@ def register_context_tools(
         "introspect_context",
         _INTROSPECT_DEFINITION,
         _make_introspect_handler(memory_store, agent_id, session_store, get_message_count),
+        read_only=True,
+    )
+    registry.register(
+        "get_context_snapshot",
+        _SNAPSHOT_DEFINITION,
+        _make_snapshot_handler(memory_store, agent_id, get_message_count),
         read_only=True,
     )

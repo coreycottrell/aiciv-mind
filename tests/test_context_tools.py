@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+import json
+
 from aiciv_mind.memory import Memory, MemoryStore
 from aiciv_mind.session_store import SessionStore
 from aiciv_mind.tools import ToolRegistry
@@ -280,5 +282,94 @@ class TestRegistryIntegration:
             assert registry.is_read_only("pin_memory") is False
             assert registry.is_read_only("unpin_memory") is False
             assert registry.is_read_only("introspect_context") is True
+            assert registry.is_read_only("get_context_snapshot") is True
         finally:
             store.close()
+
+    def test_get_context_snapshot_registered(self):
+        store = MemoryStore(":memory:")
+        try:
+            registry = ToolRegistry.default(
+                memory_store=store,
+                agent_id="primary",
+                context_store=store,
+            )
+            assert "get_context_snapshot" in registry.names()
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
+# get_context_snapshot tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetContextSnapshot:
+    def test_returns_valid_json(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        result = handler({})
+        # Must be valid JSON
+        data = json.loads(result)
+        assert isinstance(data, dict)
+
+    def test_snapshot_has_required_keys(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        data = json.loads(handler({}))
+        required_keys = {
+            "total_memories", "session_count", "message_count",
+            "pinned_count", "pinned", "top_by_depth", "bottom_by_depth",
+            "stale_memories", "snapshot_time",
+        }
+        assert required_keys.issubset(data.keys())
+
+    def test_total_memories_count(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        data = json.loads(handler({}))
+        assert data["total_memories"] == 1  # one sample memory
+
+    def test_pinned_count_reflects_actual_pins(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        # Before pin
+        data = json.loads(handler({}))
+        assert data["pinned_count"] == 0
+        assert data["pinned"] == []
+
+        # After pin
+        store.pin(mem_id)
+        data = json.loads(handler({}))
+        assert data["pinned_count"] == 1
+        assert data["pinned"][0]["id"] == mem_id
+
+    def test_top_by_depth_is_list(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        data = json.loads(handler({}))
+        assert isinstance(data["top_by_depth"], list)
+        # Should include our 1 memory
+        assert len(data["top_by_depth"]) >= 1
+
+    def test_message_count_in_snapshot(self, registry_with_context):
+        registry, store, mem_id, msg_count = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        msg_count[0] = 7
+        data = json.loads(handler({}))
+        assert data["message_count"] == 7
+
+    def test_snapshot_time_is_iso(self, registry_with_context):
+        registry, store, mem_id, _ = registry_with_context
+        handler = registry._handlers["get_context_snapshot"]
+
+        data = json.loads(handler({}))
+        # snapshot_time should be an ISO datetime string
+        assert "T" in data["snapshot_time"]
+        assert "Z" in data["snapshot_time"]

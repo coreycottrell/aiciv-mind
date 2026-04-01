@@ -54,6 +54,8 @@ tools:
     enabled: true
   - name: "create_skill"
     enabled: true
+  - name: "get_context_snapshot"
+    enabled: true
 
 auth:
   civ_id: "acg"
@@ -74,4 +76,7 @@ memory:
 sub_minds:
   - mind_id: "research-lead"
     manifest_path: "manifests/research-lead.yaml"
+    auto_spawn: false
+  - mind_id: "context-engineer"
+    manifest_path: "manifests/context-engineer.yaml"
     auto_spawn: false

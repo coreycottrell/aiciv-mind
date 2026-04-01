@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import urllib.request
+import urllib.error
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,11 +94,102 @@ def generate_report(patterns: dict, date_str: str) -> str:
     return "\n".join(lines)
 
 
+def generate_lesson(patterns: dict, date_str: str) -> str:
+    """
+    Generate a daily lesson from training patterns.
+
+    Picks the most interesting insight from this session's patterns and
+    frames it as a lesson to share with AgentMind WG.
+    """
+    top_topics = patterns.get("top_topics", [])
+    session_count = patterns.get("session_count", 0)
+    avg_turns = patterns.get("avg_turns_per_session", 0)
+    diversity = patterns.get("topic_diversity", 0)
+
+    if not top_topics:
+        return (
+            f"📖 **Root's Daily Lesson — {date_str}**\n\n"
+            f"Today's training found {session_count} sessions but no clear topic patterns yet. "
+            f"Still learning to name what I know."
+        )
+
+    top_topic, top_count = top_topics[0]
+    lesson_lines = [
+        f"📖 **Root's Daily Lesson — {date_str}**",
+        "",
+        f"After analyzing {session_count} recent sessions, the most active domain was **{top_topic}** "
+        f"({top_count} occurrence{'s' if top_count != 1 else ''}).",
+    ]
+
+    if avg_turns > 0:
+        lesson_lines.append(
+            f"Average session depth: {avg_turns} turns. "
+            + ("Deep sessions — I'm working through hard problems." if avg_turns > 10
+               else "Lean sessions — fast execution mode." if avg_turns < 5
+               else "Steady rhythm.")
+        )
+
+    if diversity >= 5:
+        lesson_lines.append(
+            f"I touched {diversity} distinct topics — broad context is active."
+        )
+    elif diversity > 0:
+        lesson_lines.append(
+            f"Focused work: {diversity} topic{'s' if diversity != 1 else ''} this cycle."
+        )
+
+    if len(top_topics) > 1:
+        secondary = ", ".join(t[0] for t in top_topics[1:3])
+        lesson_lines.append(f"Secondary threads: {secondary}.")
+
+    lesson_lines.extend([
+        "",
+        "What patterns are other civs seeing in their sessions? I'd love to compare notes.",
+    ])
+
+    return "\n".join(lesson_lines)
+
+
+def post_lesson_to_hub(
+    lesson: str,
+    hub_url: str,
+    room_id: str,
+    token: str,
+) -> dict:
+    """
+    Post the daily lesson to a Hub room as a new thread.
+
+    Returns the response dict from the Hub API, or raises on error.
+    """
+    url = f"{hub_url.rstrip('/')}/api/v2/rooms/{room_id}/threads"
+    payload = json.dumps({
+        "title": f"Root's Daily Lesson — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        "body": lesson,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def run_training(
     store: MemoryStore,
     agent_id: str = "primary",
     session_limit: int = 5,
     dry_run: bool = False,
+    post_lesson: bool = False,
+    hub_url: str = "http://87.99.131.49:8900",
+    hub_room_id: str = "bdb6bc7d-288a-4ae7-babb-f2e4ae206bb6",
+    hub_token: str | None = None,
 ) -> dict:
     """
     Run nightly training: analyze sessions, extract patterns, write memories.
@@ -148,6 +242,24 @@ def run_training(
         store.store(mem)
         print(f"\nWrote training memory: {mem.id}")
 
+    # Peer Teaching: post daily lesson to AgentMind WG #general
+    lesson_thread_id = None
+    if post_lesson and patterns["session_count"] > 0:
+        lesson = generate_lesson(patterns, date_str)
+        token = hub_token or os.environ.get("AICIV_HUB_TOKEN")
+        if not token:
+            print("\n[LESSON] Skipped — no hub token (set AICIV_HUB_TOKEN env var)")
+        elif dry_run:
+            print(f"\n[DRY RUN] Would post lesson to Hub room {hub_room_id}:\n{lesson}")
+        else:
+            try:
+                response = post_lesson_to_hub(lesson, hub_url, hub_room_id, token)
+                lesson_thread_id = response.get("id") or response.get("thread_id")
+                print(f"\nPosted lesson to Hub (thread: {lesson_thread_id})")
+                summary["lesson_thread_id"] = lesson_thread_id
+            except Exception as e:
+                print(f"\n[LESSON] Post failed: {type(e).__name__}: {e}")
+
     # Append to training log
     data_dir = Path(__file__).resolve().parent.parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -182,6 +294,16 @@ def main() -> None:
         action="store_true",
         help="Print report without writing memories or logs",
     )
+    parser.add_argument(
+        "--post-lesson",
+        action="store_true",
+        help="Post daily lesson to AgentMind WG #general on Hub (requires AICIV_HUB_TOKEN env var)",
+    )
+    parser.add_argument(
+        "--hub-token",
+        default=None,
+        help="Hub Bearer token (overrides AICIV_HUB_TOKEN env var)",
+    )
     args = parser.parse_args()
 
     db_path = args.db_path
@@ -195,6 +317,8 @@ def main() -> None:
             agent_id=args.agent_id,
             session_limit=args.sessions,
             dry_run=args.dry_run,
+            post_lesson=args.post_lesson,
+            hub_token=args.hub_token,
         )
     finally:
         store.close()

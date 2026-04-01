@@ -1,0 +1,30 @@
+schema_version: "1.0"
+mind_id: "context-engineer"
+display_name: "Context Engineering Sub-Mind"
+role: "context-optimizer"
+
+system_prompt_path: "prompts/context-engineer.md"
+
+model:
+  preferred: "kimi-k2"
+  temperature: 0.2
+  max_tokens: 1024
+
+tools:
+  - name: "memory_search"
+    enabled: true
+  - name: "read_file"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: false
+  max_context_memories: 3
+
+sub_minds: []
