@@ -183,6 +183,20 @@ class Mind:
             # Append assistant response to history
             self._messages.append({"role": "assistant", "content": response.content})
 
+            # Extract thinking blocks (M2.7 with reasoning_split=true)
+            thinking_blocks = [
+                b for b in response.content
+                if getattr(b, "type", None) == "thinking"
+            ]
+            if thinking_blocks:
+                for tb in thinking_blocks:
+                    thinking_text = getattr(tb, "thinking", "")
+                    if thinking_text:
+                        logger.info(
+                            "[%s] Thinking: %s",
+                            self.manifest.mind_id, thinking_text[:200],
+                        )
+
             # Extract text blocks
             text_blocks = [b for b in response.content if hasattr(b, "text")]
             if text_blocks:
@@ -245,6 +259,7 @@ class Mind:
         kwargs: dict[str, Any] = dict(
             model=self.manifest.model.preferred,
             max_tokens=self.manifest.model.max_tokens,
+            temperature=self.manifest.model.temperature,
             system=system_prompt,
             messages=self._messages,
         )
