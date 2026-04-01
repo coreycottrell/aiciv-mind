@@ -151,6 +151,7 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
         suite_client=suite_client,
         context_store=memory,
         get_message_count=get_msg_count,
+        get_session_store=lambda: session_store,
         spawner=spawner,
         primary_bus=primary_bus,
         queue_path=queue_path,

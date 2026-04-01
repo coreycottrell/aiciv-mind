@@ -60,7 +60,7 @@ def registry_with_context(memory_store, sample_memory):
         registry,
         memory_store=memory_store,
         agent_id="primary",
-        session_store=session_store,
+        get_session_store=lambda: session_store,
         get_message_count=get_msg_count,
     )
     return registry, memory_store, sample_memory, msg_count
@@ -206,7 +206,7 @@ class TestIntrospectContext:
             registry,
             memory_store=memory_store,
             agent_id="primary",
-            session_store=None,
+            get_session_store=None,
             get_message_count=None,
         )
         handler = registry._handlers["introspect_context"]

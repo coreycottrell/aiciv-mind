@@ -80,7 +80,7 @@ class SubMindSpawner:
             f"--id {mind_id}"
         )
 
-        window = session.new_window(window_name=mind_id, window_command=cmd)
+        window = session.new_window(window_name=mind_id, window_shell=cmd)
         pane = window.active_pane
 
         # pane_pid is a string in libtmux 0.55; convert to int for the handle

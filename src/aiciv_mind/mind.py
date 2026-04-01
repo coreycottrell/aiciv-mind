@@ -159,6 +159,23 @@ class Mind:
             self._messages.append({"role": "user", "content": tool_results})
 
         self._running = False
+
+        # Loop 1 — store what was learned from this task
+        if getattr(self.manifest, 'self_modification_enabled', False) and final_text:
+            try:
+                _summary = final_text.strip()[:200]
+                _task_topic = task.strip().split()[:5]
+                _topic_str = " ".join(_task_topic) if _task_topic else "general"
+                self.memory.store(
+                    agent_id=self.manifest.mind_id,
+                    title=f"Task result: {_topic_str}",
+                    content=_summary,
+                    memory_type="learning",
+                    tags=["loop-1", "task-result"],
+                )
+            except Exception:
+                pass  # never let memory write crash the task return
+
         return final_text
 
     async def _call_model(self, system_prompt: str, tools_list: list[dict]) -> Any:

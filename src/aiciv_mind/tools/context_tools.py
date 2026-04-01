@@ -116,7 +116,7 @@ _INTROSPECT_DEFINITION: dict = {
 }
 
 
-def _make_introspect_handler(memory_store, agent_id: str, session_store=None, get_message_count=None):
+def _make_introspect_handler(memory_store, agent_id: str, get_session_store=None, get_message_count=None):
     """Return an introspect_context handler closed over state references."""
 
     def introspect_handler(tool_input: dict) -> str:
@@ -124,6 +124,7 @@ def _make_introspect_handler(memory_store, agent_id: str, session_store=None, ge
             parts: list[str] = ["## Context Introspection"]
 
             # Session info
+            session_store = get_session_store() if get_session_store else None
             session_id = session_store.session_id if session_store else None
             parts.append(f"**Session ID:** {session_id or '(unknown)'}")
 
@@ -316,14 +317,14 @@ def register_context_tools(
     registry: ToolRegistry,
     memory_store,
     agent_id: str,
-    session_store=None,
+    get_session_store=None,
     get_message_count=None,
 ) -> None:
     """
     Register pin_memory, unpin_memory, introspect_context, and get_context_snapshot tools.
 
     All tools close over memory_store. introspect_context and get_context_snapshot also use
-    session_store and get_message_count for richer context reporting.
+    get_session_store (a callable returning session_store) and get_message_count for richer context reporting.
     """
     registry.register(
         "pin_memory",
@@ -340,7 +341,7 @@ def register_context_tools(
     registry.register(
         "introspect_context",
         _INTROSPECT_DEFINITION,
-        _make_introspect_handler(memory_store, agent_id, session_store, get_message_count),
+        _make_introspect_handler(memory_store, agent_id, get_session_store=get_session_store, get_message_count=get_message_count),
         read_only=True,
     )
     registry.register(
