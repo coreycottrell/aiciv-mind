@@ -108,6 +108,7 @@ class ToolRegistry:
         queue_path: str | None = None,
         skills_dir: str | None = None,
         scratchpad_dir: str | None = None,
+        manifest_path: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
@@ -156,5 +157,9 @@ class ToolRegistry:
         if scratchpad_dir is not None:
             from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
             register_scratchpad_tools(registry, scratchpad_dir)
+
+        if manifest_path is not None:
+            from aiciv_mind.tools.sandbox_tools import register_sandbox_tools
+            register_sandbox_tools(registry, manifest_path)
 
         return registry

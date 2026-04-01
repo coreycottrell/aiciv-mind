@@ -3,6 +3,11 @@ mind_id: "primary"
 display_name: "A-C-Gee Primary Mind"
 role: "conductor-of-conductors"
 
+# Kill switch for self-modification. Corey controls this.
+# When false: sandbox_promote() is blocked. Root can experiment but not apply changes.
+# When true: Root can promote sandbox changes to production after tests pass.
+self_modification_enabled: false
+
 system_prompt_path: "prompts/primary.md"
 
 model:

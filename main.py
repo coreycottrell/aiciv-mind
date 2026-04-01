@@ -156,6 +156,7 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
         queue_path=queue_path,
         skills_dir=skills_dir_str,
         scratchpad_dir=scratchpad_dir,
+        manifest_path=manifest_path,
     )
 
     # Session lifecycle + context management
