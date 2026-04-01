@@ -42,6 +42,27 @@ LOG = logging.getLogger("groupchat")
 DEFAULT_THREAD = "f6518cc3-3479-4a1a-a284-2192269ca5fb"
 POLL_INTERVAL = 5  # seconds
 HUB = "http://87.99.131.49:8900"
+
+
+# ---------------------------------------------------------------------------
+# Scheduled task tracker
+# ---------------------------------------------------------------------------
+
+class ScheduledTaskTracker:
+    """Track when scheduled tasks last ran, trigger at intervals."""
+
+    def __init__(self):
+        self._last_run: dict[str, float] = {}  # name -> timestamp
+
+    def should_run(self, name: str, interval_minutes: int) -> bool:
+        """Return True if enough time has passed since last run."""
+        now = time.time()
+        last = self._last_run.get(name, 0)
+        return (now - last) >= (interval_minutes * 60)
+
+    def mark_run(self, name: str) -> None:
+        """Record that a task just ran."""
+        self._last_run[name] = time.time()
 AUTH = "http://5.161.90.32:8700"
 
 # Root mention patterns — anywhere in a post/thread triggers active response
@@ -350,6 +371,20 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     except Exception as e:
         LOG.warning("Boot turn failed (non-fatal): %s", e)
 
+    # ── Scheduled task scheduler ─────────────────────────────────────
+    scheduler = ScheduledTaskTracker()
+    scheduled_tasks = getattr(manifest, "scheduled_tasks", None) or []
+    # Parse scheduled_tasks from manifest raw data if not in model
+    if not scheduled_tasks:
+        try:
+            import yaml as _yaml
+            raw = _yaml.safe_load(Path(manifest_path).read_text())
+            scheduled_tasks = raw.get("scheduled_tasks", [])
+        except Exception:
+            scheduled_tasks = []
+    if scheduled_tasks:
+        LOG.info("Scheduled tasks: %s", [t.get("name", t) if isinstance(t, dict) else t for t in scheduled_tasks])
+
     while True:
         try:
             # Refresh token every 50 minutes
@@ -372,6 +407,33 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
                         )
                 except Exception as e:
                     LOG.error("Error polling target %s: %s", target.id[:8], e)
+
+            # ── Check scheduled tasks ─────────────────────────────────
+            for task_def in scheduled_tasks:
+                if not isinstance(task_def, dict):
+                    continue
+                name = task_def.get("name", "unknown")
+                interval = task_def.get("interval_minutes", 60)
+                prompt = task_def.get("prompt", "")
+                enabled = task_def.get("enabled", True)
+
+                if not enabled or not prompt:
+                    continue
+
+                if scheduler.should_run(name, interval):
+                    LOG.info("Scheduled task '%s' triggered (every %d min)", name, interval)
+                    scheduler.mark_run(name)
+                    try:
+                        reply = await mind.run_task(
+                            f"[Scheduled BOOP: {name}]\n{prompt}",
+                            inject_memories=True,
+                        )
+                        LOG.info(
+                            "Scheduled task '%s' complete: %s",
+                            name, (reply or "")[:200],
+                        )
+                    except Exception as e:
+                        LOG.error("Scheduled task '%s' failed: %s", name, e)
 
         except Exception as e:
             LOG.error("Poll loop error: %s", e)

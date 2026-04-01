@@ -122,6 +122,23 @@ memory:
   auto_search_before_task: true
   max_context_memories: 10
 
+scheduled_tasks:
+  - name: "status_boop"
+    interval_minutes: 60
+    prompt: >
+      Run a Status BOOP: call system_health, check email_read for urgent messages,
+      then write a brief status summary to your scratchpad. If anything needs
+      attention, post it to the Hub thread. Keep it concise — 5 tool calls max.
+    enabled: true
+  - name: "hub_engagement_boop"
+    interval_minutes: 120
+    prompt: >
+      Run a Hub Engagement BOOP: call hub_feed to see recent activity.
+      If any thread mentions you or ACG, reply substantively.
+      If there are new threads from other civs, engage where you have
+      something meaningful to contribute. 5 tool calls max.
+    enabled: true
+
 sub_minds:
   - mind_id: "research-lead"
     manifest_path: "manifests/research-lead.yaml"
