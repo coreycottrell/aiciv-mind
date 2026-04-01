@@ -201,7 +201,7 @@ class SessionStore:
             f"Session {self._session_id} completed. "
             f"{turn_count} turn(s). "
             f"Topics: {topics_str}.{cache_str} "
-            f"Last response: {last_text[:400]}"
+            f"Last response: {last_text[:1200]}"  # 1200 preserves full conclusions; Root identified 400 as too short
         )
 
         # Write to session_journal
