@@ -604,12 +604,12 @@
 
 | Priority | Count | Total Hours | Key Theme |
 |----------|-------|-------------|-----------|
-| **P0** | 6 items | ~5.25h | Fix what's broken (depth scoring, FTS, topics, thinking tokens, sessions, temperature) |
-| **P1** | 8 items | ~27h | Unlock new behaviors (Hub daemon, multi-turn, compaction, web, email, sub-minds, memory ranking, skill auto-discovery) |
-| **P2** | 8 items | ~29.5h | Architectural upgrades (graph memory, dream mode, hooks, persistent agents, model routing, identity protection, infrastructure guard, memory selector) |
+| **P0** | 8 items | ~6.75h | Fix what's broken + security (depth scoring, FTS, topics, thinking tokens, sessions, temperature, credential scrubbing, memory-as-hint) |
+| **P1** | 11 items | ~39h | Unlock new behaviors (Hub daemon, multi-turn, compaction+circuit-breaker+cache-annotations, web, email, sub-minds, memory ranking, skill auto-discovery+progressive-disclosure+fork-context, MindContext, MindCompletionEvent) |
+| **P2** | 11 items | ~40.5h | Architectural upgrades (graph memory, dream mode, hooks+failure-event+permission-bubbling+llm-hooks, persistent agents, model routing, identity protection, infrastructure guard, memory selector, coordinator permission gate, model inheritance, minimal context mode) |
 | **P3** | 10 items | ~63h | Aspirational (team leads, self-modification, cross-domain transfer, red team, pattern detection, KAIROS, context engineering lead, MCP, calendar, content gen) |
 
-**Total estimated**: ~125 hours across all priorities.
+**Total estimated**: ~149 hours across all priorities (+24h from CC-INHERIT additions).
 
 ---
 
@@ -626,6 +626,134 @@ P2-2 (dream mode) → P2-1 (graph memory) → P3-3 (cross-domain transfer)
 ```
 
 The critical path to "Root as a real AI OS" runs through: fixes → multi-turn → compaction → Hub daemon → sub-mind spawning → persistent agents → team leads. Everything else branches off this spine.
+
+---
+
+## CC-INHERIT Additions (2026-04-01)
+
+*Items added from `docs/CC-INHERIT-LIST.md` analysis of the CC public leak. Not previously in roadmap.*
+
+---
+
+### P0-7: Environment Credential Scrubbing in Subprocesses
+- **Source**: CC-PUBLIC-ANALYSIS §9, CC-INHERIT-LIST I-2
+- **Current State**: NO — bash.py and spawner.py pass full `os.environ` including API keys to subprocesses
+- **Priority Justification**: Security issue. Any bash command Root runs, or any sub-mind spawned, inherits Root's full credential set. Must fix before web access (P1-4) or Hub daemon (P1-1) are enabled.
+- **Build**:
+  - File: `src/aiciv_mind/tools/bash.py` — scrub credential env vars from subprocess env dict before spawn
+  - File: `src/aiciv_mind/spawner.py` — same for tmux pane environment
+  - Strip: keys matching `*_KEY`, `*_SECRET`, `*_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `GOOGLE_*`, `AWS_*`, `LITELLM_*`
+  - Preserve: `PATH`, `HOME`, `PYTHONPATH`, `MIND_*` config vars
+- **Estimate**: 1h
+- **Principle**: P8 (Identity Persistence — credentials belong to their owner, not all subprocesses)
+
+---
+
+### P0-8: Memory-as-Hint Explicit Instruction in System Prompt
+- **Source**: CC-PUBLIC-ANALYSIS §3, CC-INHERIT-LIST I-5
+- **Current State**: NO — system prompts don't encode the principle that memory is a hint, not truth
+- **Priority Justification**: Zero code complexity, immediate impact on correctness. Root may assert stale memory facts as truth, sending itself down wrong paths.
+- **Build**:
+  - File: `prompts/` directory (or directly in `mind.py` base_system_prompt)
+  - Add instruction: "Your memories are HINTS, not facts. Before asserting that something exists (a file, function, endpoint, pattern), verify it directly. Memory tells you WHERE to look — not what you'll find."
+  - File: `src/aiciv_mind/memory.py`, `search()` — surface `written_at` in returned results
+  - File: `src/aiciv_mind/mind.py`, memory injection section — prepend staleness caveat for memories > 24h old
+- **Estimate**: 0.5h
+- **Principle**: P1 (Memory IS Architecture — memory informs, it does not decide)
+
+---
+
+### P1-9: MindContext — Python Contextvars for Agent Identity
+- **Source**: CC-ANALYSIS-TEAMS §1.2, CC-INHERIT-LIST I-1
+- **Current State**: NO — each Mind is a class instance, no context isolation for concurrent operations
+- **Priority Justification**: Required BEFORE P1-6 (First Sub-Mind Spawn). Without context isolation, shared utilities (memory search, tool logging) cannot identify which mind is calling them in concurrent scenarios.
+- **Build**:
+  - File: `src/aiciv_mind/context.py` (NEW)
+  - Python `contextvars.ContextVar[str]` for `CURRENT_MIND_ID`
+  - `MindContext` async context manager: `async with mind_context(mind_id): ...`
+  - `current_mind_id()` function: readable anywhere in the call stack
+  - File: `src/aiciv_mind/mind.py`, `run_task()` — wrap execution in `MindContext` boundary
+  - File: `src/aiciv_mind/tools/memory_tools.py` — use `current_mind_id()` instead of requiring `agent_id` parameter where possible
+- **Estimate**: 2h
+- **Principle**: P5 (Hierarchical Context Distribution — each mind's identity is isolated)
+
+---
+
+### P1-10: MindCompletionEvent — Structured Worker Result Format
+- **Source**: CC-ANALYSIS-TEAMS §3.3, CC-INHERIT-LIST I-8
+- **Current State**: NO — IPC layer returns raw text, no structured completion format
+- **Priority Justification**: Design this BEFORE P1-6 (First Sub-Mind Spawn). The completion format defines the coordinator's information architecture. Get it right before wiring it into the loop.
+- **Build**:
+  - File: `src/aiciv_mind/ipc/messages.py` (NEW or extend existing)
+  - Define `MindCompletionEvent` dataclass: mind_id, task_id, status, summary (5-10 words), result, tokens_used, tool_calls, duration_ms
+  - Sub-minds serialize to JSON in their final IPC response
+  - File: `src/aiciv_mind/mind.py` — recognize `MindCompletionEvent` JSON in messages, format as structured context entry
+- **Estimate**: 2h
+- **Principle**: P5 (Hierarchical Context Distribution — coordinator receives summaries, not floods)
+
+---
+
+### P1-11: Scope Expansions for Existing P1 Items
+
+**P1-3 additions (Context Compaction Engine):**
+- Add circuit breaker: `MAX_CONSECUTIVE_COMPACTION_FAILURES = 3` — after 3 failures, disable compaction for session (CC-INHERIT I-3)
+- Add cache boundary annotations: label each system prompt section as STATIC/SESSION/VOLATILE. Enforce static-before-volatile ordering (CC-INHERIT I-4)
+- **Estimate addendum**: +2.5h to P1-3 estimate (now 8.5h total)
+
+**P1-8 additions (Skill Auto-Discovery):**
+- Add `paths` field to SKILL.md frontmatter for progressive disclosure — skill only visible when task touches matching files (CC-INHERIT I-6)
+- Add `context: inline | fork` field — `fork` spawns isolated sub-mind for complex/destructive skills (CC-INHERIT I-7)
+- **Estimate addendum**: +4h to P1-8 estimate (now 6h total)
+
+---
+
+### P2-9: Coordinator Permission Gate (3-Layer)
+- **Source**: CC-PUBLIC-ANALYSIS §1 (six-layer), CC-ANALYSIS-TEAMS §1.6, CC-INHERIT-LIST I-9
+- **Current State**: NO — sub-minds have no escalation path for sensitive operations
+- **Priority Justification**: After P1-6 (First Sub-Mind Spawn). Sub-minds need to bubble permission requests to coordinator before executing tool calls outside their domain.
+- **Build**:
+  - Three-layer model (NOT CC's six-layer complexity): Deny (forbidden_tools) → Bubble (requires_coordinator_approval) → Allow (allowed_tools)
+  - `PermissionRequest` IPC message type: mind_id, tool_name, input_summary, reason
+  - `PermissionResponse` message type: approved (bool), condition (str)
+  - File: `src/aiciv_mind/ipc/messages.py` — add both message types
+  - File: `src/aiciv_mind/mind.py` — handle incoming PermissionRequest in main loop
+  - File: `src/aiciv_mind/manifest.py` — add `requires_coordinator_approval` tool list field
+- **Estimate**: 4h
+- **Principle**: P5 (Hierarchical Context Distribution), P8 (Identity Persistence — each mind owns its permissions)
+
+---
+
+### P2-10: Model Inheritance for Cache Alignment
+- **Source**: CC-PUBLIC-ANALYSIS §4, CC-INHERIT-LIST L-1
+- **Current State**: NO — every sub-mind always uses its own manifest model
+- **Build**:
+  - File: `src/aiciv_mind/manifest.py` — allow `preferred: inherit` in model config
+  - File: `src/aiciv_mind/spawner.py` — resolve `inherit` to parent mind's actual model string before spawn
+- **Estimate**: 1h
+- **Principle**: P11 (Distributed Intelligence — scheduling layer optimization)
+
+---
+
+### P2-11: Minimal Context Mode for Read-Only Agents (`context_mode: minimal`)
+- **Source**: CC-PUBLIC-ANALYSIS §4, CC-INHERIT-LIST L-2
+- **Current State**: NO — all agents load full identity context
+- **Build**:
+  - File: `src/aiciv_mind/manifest.py` — add `context_mode: full | minimal` field
+  - `minimal` mode: skip loading identity docs (constitution, growth trajectory, cross-session memories) for pure read/research workers
+  - Minimal agents get: task + allowed_tools + their own manifest only
+  - File: `src/aiciv_mind/context_manager.py` — `build_boot_context()` checks `context_mode` flag
+- **Estimate**: 1.5h
+- **Principle**: P5 (Hierarchical Context Distribution — primary context is sacred, read-only agents need less)
+
+---
+
+### P2-3 Scope Expansion (Hooks System)
+
+**Additional events to add when building P2-3:**
+- `PostToolUseFailure` as a distinct event (not merged with PostToolUse) — enables dedicated failure pattern tracking, feeds Principle 2 Layer 2 analysis (CC-INHERIT L-3)
+- `PermissionRequest` event — when a tool call is bubbled for coordinator approval (CC-INHERIT I-9)
+- Two handler modes: `python_coroutine` (fast, deterministic) and `llm_evaluated` (cheap model call → Allow/Block/Modify) (CC-INHERIT L-5)
+- **Estimate addendum**: +3h to P2-3 estimate (now 9h total)
 
 ---
 
