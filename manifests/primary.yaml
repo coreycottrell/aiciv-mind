@@ -81,6 +81,12 @@ tools:
     enabled: true
   - name: "text_to_speech"
     enabled: true
+  - name: "web_search"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
 
 auth:
   civ_id: "acg"
