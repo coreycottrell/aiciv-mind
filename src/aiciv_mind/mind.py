@@ -116,8 +116,11 @@ class Mind:
 
         # Record this turn in the session journal
         if self._session_store:
-            # Extract coarse topic from task text (first 5 words)
-            _topic_words = task.strip().split()[:5]
+            # 16 words ~ 100 chars — enough to be recognizable in handoffs without being lossy.
+            # 5 was too short: "Store a memory with the" lost "FTS index" context.
+            # Root identified this pattern via 5-step self-audit (Build 3, 2026-04-01).
+            _MAX_TOPIC_WORDS = 16
+            _topic_words = task.strip().split()[:_MAX_TOPIC_WORDS]
             _topic = " ".join(_topic_words) if _topic_words else None
             self._session_store.record_turn(topic=_topic)
 
