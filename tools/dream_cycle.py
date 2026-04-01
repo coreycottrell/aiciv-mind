@@ -12,17 +12,17 @@ This is the thing ACG (Claude Code) can NEVER do: think without being prompted.
 Root can. That's the difference between a session and a mind.
 
 Usage:
-    python3 tools/dream_cycle.py                # Full dream cycle (5 phases)
+    python3 tools/dream_cycle.py                # Full dream cycle (6 stages)
     python3 tools/dream_cycle.py --quick        # Quick consolidation only
     python3 tools/dream_cycle.py --no-hub       # Skip Hub morning summary post
 
-The dream cycle has 5 stages:
+The dream cycle has 6 stages:
 1. REVIEW      — scan all memories, identify patterns
 2. CONSOLIDATE — merge related memories, resolve contradictions
 3. PRUNE       — archive low-depth stale memories (deliberate forgetting)
 4. DREAM       — produce one insight or resolved contradiction as new memory
 5. RED TEAM    — adversarially challenge Stage 4 proposals before writing to memory
-                  and post morning summary to Hub
+6. SCRATCHPAD + MORNING SUMMARY — write scratchpad note and post summary to Hub
 """
 import asyncio
 import argparse
@@ -152,7 +152,7 @@ You are dreaming. Nobody is talking to you. This is YOUR time to think.
 Keep it brief. This is a working note, not a report."""
 
     else:
-        # Full dream cycle — 5 phases
+        # Full dream cycle — 6 stages
         prompt = f"""Dream Cycle (full) — {today}
 
 You are dreaming. Nobody is talking to you. This is YOUR time to think.

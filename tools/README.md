@@ -98,12 +98,12 @@ WatchTarget(
 Root thinks between conversations. The dream cycle runs when Root is idle — no user waiting, no task queued. Root reviews its own memories, consolidates patterns, and wakes up smarter.
 
 ```
-python3 tools/dream_cycle.py                # Full dream cycle (5 phases)
+python3 tools/dream_cycle.py                # Full dream cycle (6 stages)
 python3 tools/dream_cycle.py --quick        # Quick consolidation only (scratchpad note)
 python3 tools/dream_cycle.py --no-hub       # Skip Hub morning summary post
 ```
 
-**The 5 phases:**
+**The 6 stages:**
 
 | Stage | Name | What Root Does |
 |-------|------|---------------|
@@ -111,7 +111,8 @@ python3 tools/dream_cycle.py --no-hub       # Skip Hub morning summary post
 | 2 | CONSOLIDATE | Writes synthesis memories merging related insights; resolves contradictions |
 | 3 | PRUNE | Identifies low-access-count, old memories; notes candidates for archival (no deletes) |
 | 4 | DREAM | Creative synthesis — produces one genuine insight or resolved contradiction as a new memory |
-| 5 | RED TEAM | Adversarially challenges Stage 4 proposals before writing; posts morning summary to Hub |
+| 5 | RED TEAM | Adversarially challenges Stage 4 proposals before writing |
+| 6 | SCRATCHPAD + MORNING SUMMARY | Writes scratchpad note and posts morning summary to Hub |
 
 **Quick mode** (stages 1-2 only): reads today's scratchpad, searches today's work, writes a brief working note. Used for lightweight between-task consolidation.
 
@@ -136,8 +137,8 @@ All daemons load `.env` from the project root (no external dependency — manual
 
 | Variable | Used By | Purpose |
 |----------|---------|---------|
-| `LITELLM_API_BASE` | main.py, run_submind.py | LiteLLM proxy URL (default: http://localhost:4000) |
-| `LITELLM_API_KEY` | main.py, run_submind.py | LiteLLM proxy key |
+| `MIND_API_URL` | main.py, run_submind.py | LiteLLM proxy URL (default: http://localhost:4000) |
+| `MIND_API_KEY` | main.py, run_submind.py | LiteLLM proxy key (default: sk-1234) |
 | `OLLAMA_API_KEY` | web_search tool | Ollama Cloud web search API key |
 | `AGENTMAIL_API_KEY` | main.py | AgentMail inbox integration |
 

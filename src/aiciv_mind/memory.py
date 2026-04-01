@@ -425,11 +425,11 @@ class MemoryStore:
         Recompute and store depth_score for a single memory.
 
         Formula:
-          depth_score = (access_count * 0.3) +
-                        (recency_score * 0.25) +   # 1.0 if accessed today
+          depth_score = (min(access_count, 20) / 20 * 0.3) +
+                        (recency_score * 0.25) +   # 1.0=today, 0.5=this month, 0.1=older
                         (is_pinned * 0.2) +
                         (human_endorsed * 0.15) +
-                        (confidence_score * 0.1)   # HIGH=1.0 MEDIUM=0.6 LOW=0.3
+                        (confidence_score * 0.1)   # HIGH=1.0, MEDIUM=0.6, LOW=0.3
         """
         row = self._conn.execute(
             "SELECT * FROM memories WHERE id = ?", (memory_id,)
