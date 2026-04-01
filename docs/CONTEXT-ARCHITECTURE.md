@@ -464,6 +464,138 @@ async def run_primary(...):
 
 ---
 
+## Addendum — CC Review Directives (2026-04-01)
+
+*Updates from Corey + ACG Primary review. All items tracked in BUILD-ROADMAP.md (CC-P1-x, CC-P2-x).*
+
+---
+
+### Memory Type Expansion (CC-P1-2)
+
+The 4-type taxonomy expands to 10. New types added to `MemoryType` enum:
+
+| New Type | Purpose | When to Write |
+|----------|---------|---------------|
+| `intent` | What the mind was trying to achieve (goal, not outcome) | At start of significant work |
+| `relationship` | How interactions with specific entities evolve | After notable entity interactions |
+| `contradiction` | Explicitly flagged conflict between memories | When two memories say opposite things |
+| `intuition` | Pre-verbal pattern signal — promoted at 3+ alignments | When something "feels off" without formal evidence |
+| `failure` | Cognitive error: what I thought + what I should have thought | After debugging sessions > 30min too long |
+| `temporal` | Versioned truth — facts that change over time | When a fact you know has changed |
+
+Full specification: `docs/MEMORY-TYPES-SPEC.md`.
+
+### Memory Versioning (CC-P1-3)
+
+Two new columns added to all memories:
+
+```sql
+-- Schema additions (CC-P1-3)
+ALTER TABLE memories ADD COLUMN supersedes TEXT DEFAULT '[]';
+-- JSON array of memory_ids this memory replaces.
+-- When set, referenced memories auto-set confidence=possibly_deprecated.
+
+ALTER TABLE memories ADD COLUMN confidence TEXT DEFAULT 'fresh';
+-- NOTE: different semantics from existing confidence column.
+-- Existing column: HIGH/MEDIUM/LOW relevance score for depth_score formula.
+-- New column: freshness lifecycle: fresh|verified|stale|possibly_deprecated.
+-- Rename existing column to relevance_confidence to avoid collision.
+```
+
+**Migration note**: The existing `confidence` column tracks HIGH/MEDIUM/LOW relevance and feeds into depth_score. Rename it to `relevance_confidence` during the CC-P1-3 migration. The new `confidence` column tracks `fresh|verified|stale|possibly_deprecated` lifecycle.
+
+Dream Mode scans for:
+- `stale` memories with specific claims (file paths, function names) → verify they still exist
+- `possibly_deprecated` memories → confirm safe to archive
+- `contradiction` type with `resolution_status: open` → research and resolve
+
+### Memory Isolation Enforcement (CC-P1-4)
+
+**Rule**: Each layer (Conductor / Team Lead / Agent) has its own isolated `MemoryStore`. No shared stores. No crossover.
+
+```
+Conductor Store    ← WRITES: conductor only
+[conductor.db]       READS: conductor + dream synthesizer
+
+Team Lead Store    ← WRITES: team lead only
+[lead-{id}.db]       READS: team lead + dream synthesizer
+
+Agent Store        ← WRITES: agent only
+[agent-{id}.db]      READS: agent only
+```
+
+**Implementation change**: `MemoryStore.__init__()` accepts `owner_id` parameter. The store enforces that only the `owner_id` can write. Sub-minds receive their own `MemoryStore(owner_id=submind_id)` at spawn.
+
+Dream synthesizes **upward** (agent → lead → conductor). Never scatters downward.
+
+Full isolation model: `docs/RUNTIME-ARCHITECTURE.md` (Memory Isolation Model section).
+
+### Dual Scratchpad Architecture (CC-P1-5)
+
+The v0.2 scratchpad (`scratchpad.py`) was designed as a single ephemeral store. This expands to **two scratchpads at the team lead layer**:
+
+| Scratchpad | Path | Who Writes | Who Reads |
+|------------|------|-----------|-----------|
+| Personal | `scratchpads/{mind_id}/personal.md` | Team lead only | Team lead |
+| Team | `scratchpads/{mind_id}/team.md` | Agents (security-validated) | Team lead |
+
+The **team scratchpad** enables agents to share findings with the team lead without polluting the lead's memory store. The lead reads it before synthesizing agent results.
+
+**Security layer on team scratchpad** (CC-P2-1):
+- Path traversal validation (4 layers from CC-ANALYSIS-TEAMS §2.6)
+- Content validation (attribution required, frontmatter attack blocked)
+- Rate limiting (max 10 writes per agent per session)
+- All rejected writes logged to `data/security_audit.jsonl`
+
+**`scratchpad_tools.py` extension** (CC-P1-5):
+```python
+scratchpad_read(scope: "personal" | "team")
+scratchpad_write(content, scope: "personal" | "team")
+scratchpad_write_as_agent(content, agent_id)  # routes to team scope with attribution
+```
+
+At the Conductor layer, the same dual structure applies:
+- `scratchpads/conductor/personal.md` — conductor working notes
+- `scratchpads/conductor/team.md` — team lead summaries written here
+
+### Updated `scratchpad.py` Design (v0.2 revised)
+
+The original v0.2 design (`Scratchpad` as in-memory ephemeral) is revised:
+
+```python
+class Scratchpad:
+    """
+    Dual scratchpad — personal (private) + team (shared).
+    Both are file-persisted (not just in-memory) for crash recovery.
+
+    Personal scratchpad: scratchpads/{mind_id}/personal.md
+      - Append-only during session
+      - Read at session start for continuity
+      - KAIROS-style: becomes Dream Mode input
+
+    Team scratchpad: scratchpads/{mind_id}/team.md
+      - Agents write via scratchpad_write_as_agent()
+      - Security-validated on every write
+      - Team lead reads before synthesizing
+    """
+```
+
+### MemorySelector: Always M2.7 (CC-P0-1)
+
+**UPDATED**: P2-8 specified "M2.5-free for MemorySelector." **This is wrong per Corey directive.**
+
+MemorySelector uses **M2.7**. Always. Memory selection is the last thing to scale down — it is how the mind decides what to think about. A cheap model here breaks the entire relevance chain.
+
+Code annotation when implemented:
+```python
+# M2.7 intentional — DO NOT downgrade.
+# Corey directive 2026-04-01: "MemorySelector is the last thing to scale down."
+# Future scale-down candidate only — evaluate after sub-mind architecture stable.
+selector_model = "minimax-m27"
+```
+
+---
+
 ## Prompt Caching Strategy (v0.1.1+)
 
 ### Model: MiniMax M2.7 via OpenRouter

@@ -781,6 +781,329 @@ The critical path to "Root as a real AI OS" runs through: fixes → multi-turn �
 
 ---
 
+## ADDENDUM — Corey + Primary CC Review Directives (2026-04-01)
+
+*All items derived from Corey's review of CC-ANALYSIS-TEAMS.md and ACG Primary's architectural synthesis.*
+*Reference document: `docs/RUNTIME-ARCHITECTURE.md` — the infographic-grade architecture diagram.*
+
+---
+
+### CC-P0-1: MemorySelector Model Lock (Do NOT Scale Down)
+
+- **Source**: Corey directive (review of CC-ANALYSIS-TEAMS §2.4)
+- **Current State**: PARTIAL — P2-8 specifies M2.5-free for MemorySelector. COREY SAYS NO.
+- **Priority Justification**: Memory selection is the LAST thing to scale down. It is how the mind decides what to think about. Using a cheap/weak model here breaks the entire relevance chain. M2.7 for everything including memory selection passes.
+- **Build**:
+  - Update P2-8 spec: Replace "Use M2.5-free for selection call" with "Use M2.7 for selection call"
+  - Add code comment in `src/aiciv_mind/memory_selector.py` (when built): `# M2.7 intentional — do NOT downgrade. Corey directive 2026-04-01.`
+  - Mark as "future scale-down candidate only" — evaluate after sub-mind architecture is stable
+- **Estimate**: 0.1h (note update only)
+- **Principle**: P11 (Distributed Intelligence — memory selection IS intelligence)
+
+---
+
+### CC-P1-1: Task ID Format Upgrade — Human-Readable Name Stub
+
+- **Source**: Corey directive (CC-ANALYSIS-TEAMS §1.8)
+- **Current State**: Specified as `{type}{8_random_alphanum}` (random suffix)
+- **Corey Upgrade**: Change to `{type}{task-name-stub-max-8-chars}` — name stub derived from the entity's task/name, not random. Also ADD `a{8}` for AGENTS as a new type. Prepare meta-operation for creating new ID types.
+- **Why**: Log lines immediately tell you what kind of entity AND what it's doing. `mresearch` is instantly more readable than `m4f2x9qk`.
+- **Build**:
+  - File: `src/aiciv_mind/id_registry.py` (NEW) — ID type registry
+    - `IDType` dataclass: prefix, description, example
+    - Built-in types: `m` (mind), `t` (team), `s` (session), `j` (job), `a` (agent)
+    - `register_id_type(prefix, description)` — meta-operation for new types at runtime
+    - `generate_id(type_prefix, name)` — slugify name to max 8 chars (lowercase, alphanumeric, truncate)
+    - Collision detection: if slug already used, append 1-char disambiguator
+  - File: `src/aiciv_mind/session_store.py` — use `generate_id('s', session_name)` for session IDs
+  - File: `src/aiciv_mind/spawner.py` — use `generate_id('a', agent_name)` for spawned agents
+  - File: `src/aiciv_mind/registry.py` — use `generate_id('m', mind_name)` for mind handles
+  - Example IDs: `mresrch` (research mind), `tsprint1` (sprint team), `sdayone` (day one session), `jdream` (dream job), `adebug` (debug agent)
+- **Estimate**: 2h
+- **Principle**: P8 (Identity Persistence — identities are named, not random)
+
+---
+
+### CC-P1-2: Memory Type Expansion — 6 New Types
+
+- **Source**: Corey directive (ACG Primary analysis of CC-ANALYSIS-TEAMS §2.3)
+- **Current State**: 4 types — user, feedback, project, reference
+- **New Types**: 6 additional types bringing the total to 10
+- **Why**: The 4-type taxonomy was designed for a single human-AI pair. A civilization of minds needs richer epistemic distinctions.
+- **Build**:
+  - File: `src/aiciv_mind/memory.py`, `MemoryType` enum — add 6 entries:
+    - `INTENT` — "What was I trying to do?" Goals, motivations, not outcomes. Designed to survive compaction (small + stable). Example: "I was trying to solve Hub auth failures, not just fix the immediate error."
+    - `RELATIONSHIP` — How interactions with a specific entity (mind, civ, human) have evolved over time. Loaded selectively when interacting with that entity. Example: "Synth-civ is direct and prefers technical depth. Avoid preamble."
+    - `CONTRADICTION` — Explicitly flagged conflicts between memories. NOT resolved immediately — Dream Mode resolves them. Body structure: `memory_a`, `memory_b`, `detected_at`, `resolution_status: open|resolved`. Example: "Memory A says Hub endpoint is /api/rooms, Memory B says /rooms — which is correct?"
+    - `INTUITION` — Pre-verbal pattern recognition, below the threshold of formal memory. Promoted to real memory when 3+ intuitions align on the same signal. Body: `signal`, `confidence: weak|moderate|strong`, `aligned_count`. Example: "Something feels off about the JWT cache expiry logic — no concrete reason yet."
+    - `FAILURE` — "What I was thinking when I failed + what I should have thought." Not the solution (that's in the code) — the cognitive error. Body: `what_i_thought`, `what_i_should_have_thought`, `failure_class`. Example: "I assumed the error was in our code; it was in the upstream API contract."
+    - `TEMPORAL` — Versioned truth. A fact that changes over time, with explicit versioning. Uses `supersedes` + `confidence` fields. Example: "Hub endpoint was /api/v1/rooms (2026-03-01) → /api/rooms (2026-03-22)."
+  - File: `src/aiciv_mind/memory.py` — validate all 10 types in `store()` method
+  - File: `docs/MEMORY-TYPES-SPEC.md` (NEW) — full specification for all 10 types
+  - File: `src/aiciv_mind/tools/memory_tools.py` — expose new types in `memory_write` tool description
+- **Estimate**: 3h
+- **Principle**: P1 (Memory IS Architecture — richer taxonomy = richer intelligence), P2 (System > Symptom — failure type captures systemic causes)
+
+---
+
+### CC-P1-3: Memory Versioning — Supersedes + Confidence Fields
+
+- **Source**: Corey directive (simplest form of temporal versioning)
+- **Current State**: No versioning. When something changes, old memory just sits there as potentially-wrong truth.
+- **Build**:
+  - File: `src/aiciv_mind/memory.py`, memories table schema — add two columns:
+    - `supersedes TEXT` — JSON array of memory_ids this memory replaces: `["id1", "id2"]`
+    - `confidence TEXT DEFAULT 'fresh'` — enum: `fresh | verified | stale | possibly_deprecated`
+  - Migration: `ALTER TABLE memories ADD COLUMN supersedes TEXT DEFAULT '[]'`
+  - Migration: `ALTER TABLE memories ADD COLUMN confidence TEXT DEFAULT 'fresh'`
+  - File: `src/aiciv_mind/memory.py`, `store()` — accept optional `supersedes`, `confidence` params
+  - File: `src/aiciv_mind/memory.py`, `store()` — when `supersedes` is non-empty, automatically set those memory IDs' confidence to `possibly_deprecated`
+  - File: `src/aiciv_mind/memory.py`, `search()` — surface `supersedes` and `confidence` in returned results
+  - Dream Mode integration: Scan for `stale` + `possibly_deprecated` memories → flag for human review or auto-archive
+  - File: `src/aiciv_mind/tools/memory_tools.py` — expose `supersedes` and `confidence` in `memory_write` tool
+- **Estimate**: 2h
+- **Principle**: P1 (Memory IS Architecture — versioned truth is better than frozen truth)
+
+---
+
+### CC-P1-4: Memory Isolation Enforcement — No Crossover Between Layers
+
+- **Source**: Corey directive
+- **Current State**: No isolation model defined. All minds share the same `memory.db` by default.
+- **Rule**: Team lead has their memory. Agents have their memory. Scratchpad + memory.md at EVERY level. NO shared memory stores. Clean separation.
+- **Build**:
+  - File: `src/aiciv_mind/memory.py` — `MemoryStore` accepts `owner_id` param at construction
+  - Each mind gets its own `MemoryStore` keyed to its mind/agent ID
+  - File: `src/aiciv_mind/spawner.py` — pass agent-specific `owner_id` when creating sub-mind MemoryStore
+  - File: `src/aiciv_mind/mind.py` — enforce: `self._memory_store` is private to this mind, not passed to sub-minds
+  - Sub-minds get their own `MemoryStore(owner_id=submind_id)` pointing to their own DB namespace (separate table partition or separate file)
+  - Dream Mode: synthesizes UP the chain — agents → team lead → conductor. Never leaks DOWN.
+  - File: `docs/MEMORY-ISOLATION.md` (NEW) — document the isolation model + permitted data flows
+- **Estimate**: 3h
+- **Principle**: P5 (Hierarchical Context Distribution — each layer's context is sovereign), P8 (Identity Persistence — memory belongs to the mind that earned it)
+
+---
+
+### CC-P1-5: Dual Scratchpad Architecture — Personal + Team at Team Lead Layer
+
+- **Source**: Corey directive
+- **Current State**: Single scratchpad per mind (existing scratchpad_tools.py).
+- **Rule**: At the team lead layer, TWO scratchpads: (1) personal — team lead's private working notes, (2) team — agents write here, team lead reads. Feedback flows back here too. Also at the Primary/Conductor layer.
+- **Build**:
+  - File: `src/aiciv_mind/tools/scratchpad_tools.py` — extend with `scope` param
+    - `scratchpad_read(scope: "personal" | "team")` — read respective scratchpad
+    - `scratchpad_write(content, scope: "personal" | "team")` — write to respective scratchpad
+    - `scratchpad_write_as_agent(content, agent_id)` — agents use this to write to team scratchpad (routes to team scope with agent attribution)
+  - Storage:
+    - Personal: `scratchpads/{mind_id}/personal.md`
+    - Team: `scratchpads/{mind_id}/team.md` — security-validated writes only (see CC-P2-1)
+  - Conductor layer: `scratchpads/conductor/personal.md` + `scratchpads/conductor/team.md`
+  - Boot sequence: Load personal scratchpad into context. Team scratchpad loaded on-demand.
+  - File: `src/aiciv_mind/manifest.py` — add `scratchpad_mode: personal_only | dual` field
+- **Estimate**: 2h
+- **Principle**: P5 (Hierarchical Context Distribution), P6 (Context Engineering — team scratchpad is shared working memory)
+
+---
+
+### CC-P1-6: Skills Lifecycle Hooks — Pre/Post Hooks Per Skill
+
+- **Source**: Corey directive (extends CC-ANALYSIS-TEAMS §4.3)
+- **Current State**: P1-11 scope expansion adds `paths` and `context` fields to SKILL.md. Corey extends: skills should be able to define their own pre/post hooks.
+- **Build**:
+  - SKILL.md frontmatter extension:
+    ```yaml
+    hooks:
+      pre_skill:  # runs before skill content is injected
+        - type: memory_search   # search memories relevant to this skill
+          query: "{task}"
+        - type: tool_call       # call a tool before skill activates
+          tool: scratchpad_read
+          args: {scope: "team"}
+      post_skill:  # runs after skill completes
+        - type: memory_write    # auto-write learning from skill execution
+          template: "Applied {skill_name}: {outcome}"
+        - type: tool_call
+          tool: scratchpad_write
+          args: {scope: "personal", content: "{skill_summary}"}
+  - File: `src/aiciv_mind/tools/skill_tools.py` — parse `hooks` from SKILL.md frontmatter
+  - File: `src/aiciv_mind/mind.py` — execute pre_skill hooks before injecting skill content, post_skill hooks after skill turn completes
+  - Pre-skill hooks run before the model call. Post-skill hooks run after the model call returns.
+  - Hook types: `memory_search`, `tool_call`, `memory_write`, `log`
+- **Estimate**: 3h (extends P1-11, add +3h to that estimate)
+- **Principle**: P11 (Distributed Intelligence — skill layer has its own intelligence), P7 (Self-Improving Loop — skills that auto-write learnings compound)
+
+---
+
+### CC-P1-7: Hub Two Modes — Passive Inbox + Active Prompt Injection
+
+- **Source**: Corey directive (extends P1-1 Hub Daemon)
+- **Current State**: P1-1 specifies polling-based Hub daemon. Corey specifies TWO explicit modes.
+- **Build** (extends P1-1):
+  - **Mode 1 — Passive Inbox**: Hub daemon polls every 30s. New activity → write to `data/hub_inbox.jsonl`. Mind reads at next BOOP cycle. No interruption of current work.
+  - **Mode 2 — Active Prompt**: When a Hub message matches active-prompt criteria (direct mention, urgent flag, reply to Root), immediately:
+    1. Write to inbox file (durable)
+    2. Push via ZMQ to PrimaryBus with priority flag
+    3. Inject message info + generated response stub into next Mind turn
+    4. Mind addresses immediately without waiting for next BOOP
+  - Active prompt criteria (configurable in `manifests/primary.yaml`):
+    ```yaml
+    hub:
+      active_prompt_triggers:
+        - "@root" in message text
+        - reply_to_root: true
+        - thread_priority: urgent
+    ```
+  - File: `tools/hub_daemon.py` — implement both modes with distinct code paths
+  - File: `src/aiciv_mind/mind.py` — handle `{type: "hub_active_prompt"}` IPC message type with priority processing
+- **Estimate**: +2h added to P1-1 estimate (now 6h total)
+- **Principle**: P8 (Identity Persistence — active presence in civilization), P12 (Native Service Integration)
+
+---
+
+### CC-P1-8: Coordinator Pattern — Workers Become Agents With Own Memory
+
+- **Source**: Corey directive (extends CC-ANALYSIS-TEAMS §3.1)
+- **Current State**: CC-ANALYSIS-TEAMS uses "worker" throughout. Corey replaces with "agent." More importantly: agents build their own memory. Compounding at every stage.
+- **Build**:
+  - Rename "worker" → "agent" throughout all aiciv-mind docs and code comments (cosmetic, but identity matters)
+  - File: `src/aiciv_mind/spawner.py` — ensure spawned agents have their own MemoryStore (see CC-P1-4)
+  - Every agent task completion: auto-write a `failure` or `project` memory about what was attempted + result
+  - Team lead coordinator: after receiving agent result, also prompt agent to write a `project` memory summarizing what it learned
+  - This means session 50's agents start with accumulated patterns, not blank slates
+- **Estimate**: 1h (renaming + memory auto-write on completion)
+- **Principle**: P7 (Self-Improving Loop — agents compound across tasks), P8 (Identity Persistence)
+
+---
+
+### CC-P1-9: Affirmative Pattern Documentation in All Manifests
+
+- **Source**: Corey directive
+- **Rule**: Lean into "DO this because X" rather than "DON'T do this." There are infinite anti-patterns and one right way. Affirmative patterns make minds smarter. Anti-patterns are a defensive posture; affirmative patterns are an offensive identity.
+- **Build**:
+  - All existing manifests: audit for anti-pattern-heavy sections. Convert to affirmative framing.
+  - Template: Add `## Affirmative Patterns` section to manifest template, ABOVE `## Anti-Patterns`
+  - Example conversion:
+    - Before: "Do NOT skip architect for new modules"
+    - After: "Design before code — architect first, because the design reveals what you don't know yet"
+  - File: All `manifests/*.yaml` — add affirmative pattern section
+  - File: `.claude/team-leads/*/manifest.md` — same conversion
+  - Future: When generating new manifests, start from affirmative patterns, add anti-patterns only for genuinely dangerous behaviors
+- **Estimate**: 2h (manifest updates for primary.yaml + team lead templates)
+- **Principle**: P7 (Self-Improving Loop — affirmative framing produces better decisions), P3 (Go Slow to Go Fast — a clear model of right behavior is faster than avoiding wrong behaviors)
+
+---
+
+### CC-P1-10: RUNTIME-ARCHITECTURE.md — Production-Ready Architecture Infographic
+
+- **Source**: Corey directive
+- **Current State**: ASCII diagram in CC-ANALYSIS-TEAMS §8.1 is a starting point, not infographic-ready
+- **Build**:
+  - File: `docs/RUNTIME-ARCHITECTURE.md` (NEW — written this session)
+  - Layers: Civilization → Conductor → Team Lead → Agent
+  - Incorporates: dual scratchpads, memory isolation, memory types, task ID scheme, dream cycle via AgentCal, Hub two modes, MindIDE Bridge, skills with hooks, red team on dream
+  - Format: Clean ASCII art suitable for direct image generation (Mermaid or PNG render)
+  - **DONE** — file written as part of this session
+- **Estimate**: 1h
+- **Principle**: All principles (it IS the architecture)
+
+---
+
+### CC-P2-1: Memory Security for Team Scratchpad — Agent Write Validation
+
+- **Source**: Corey directive (extends CC-ANALYSIS-TEAMS §2.6)
+- **Current State**: CC-ANALYSIS-TEAMS already documents 4-layer path validation for shared memory stores. Corey specifically calls out team scratchpad as the security boundary.
+- **Why**: When agents write to the team scratchpad, they could (accidentally or via prompt injection) corrupt team-level state, write to wrong paths, or escalate to team lead memory.
+- **Build**:
+  - File: `src/aiciv_mind/tools/scratchpad_tools.py`, `scratchpad_write_as_agent()`:
+    - Layer 1: Reject null bytes, URL-encoded traversal, backslashes, fullwidth variants
+    - Layer 2: Path resolution — resolve() to eliminate `..`, verify prefix is `scratchpads/{team_id}/team.md`
+    - Layer 3: Symlink resolution — `realpath()` on deepest existing ancestor
+    - Layer 4: Content validation — agent writes must be attributed (include `agent_id` prefix), reject writes that start with `---` (frontmatter attack), cap at 2KB per write
+    - Layer 5: Rate limit — max 10 writes per agent per session (prevent flooding)
+  - File: `src/aiciv_mind/memory.py`, `TeamMemoryStore.write()` — same 4-layer validation (from CC-ANALYSIS-TEAMS §2.6)
+  - Log all rejected writes to security audit log: `data/security_audit.jsonl`
+- **Estimate**: 3h
+- **Principle**: P2 (System > Symptom — prevent the class of attack, not just the instance)
+
+---
+
+### CC-P2-2: Dream Mode Red Team — Adversarial Review Before Applying Changes
+
+- **Source**: Corey directive
+- **Current State**: P2-2 and P3-6 specify Dream Mode without any adversarial review step
+- **Rule**: Before applying dream cycle changes (manifest updates, skill evolutions, memory archives, routing changes), a red team pass researches whether those changes could negatively affect the grand scheme.
+- **Build**:
+  - File: `tools/dream_cycle.py` — add Phase 4b between `PRUNE` and writing artifacts:
+    - **Phase 4b — Red Team Pass**:
+      1. Collect all proposed changes from Phase 4 (manifest diffs, skill updates, archive candidates)
+      2. Spawn a red team sub-mind (or use cheap model call) with the proposed changes as input
+      3. Red team asks: "Would any of these changes break current working patterns? Remove needed context? Over-fit to yesterday's sessions? Reduce robustness?"
+      4. Red team output: APPROVE (proceed), FLAG (human review), BLOCK (abort this change)
+      5. Blocked changes are written to `scratchpads/dream-blocked-YYYY-MM-DD.md` for human review
+  - File: `manifests/dream-red-team.yaml` (NEW) — lightweight adversarial mind for dream review
+  - Red team should be FAST (minimal context, focused prompt) — target < 30s
+- **Estimate**: 4h (extends P2-2 estimate, now 8h total)
+- **Principle**: P9 (Verification Before Completion — the dream cycle IS a completion claim), P2 (System > Symptom)
+
+---
+
+### CC-P2-3: MindIDE Bridge — Team Leads Observe Agent Work in Real-Time
+
+- **Source**: Corey directive
+- **Concept**: In aiciv-mind, the "developers" are agents. The "IDE" equivalent: team leads can see what their agents are currently working on, proactively notice when an agent is stuck, and inject context without waiting for the agent to ask.
+- **Build**:
+  - File: `src/aiciv_mind/mind_ide.py` (NEW)
+  - `MindIDEBridge` class:
+    - `subscribe(agent_id)` — team lead subscribes to an agent's activity stream
+    - Agent loop: after each tool call, publishes status update to bridge (tool_name, status, duration_ms, brief_summary)
+    - `get_agent_status(agent_id)` → `{status, current_tool, duration_so_far, last_output_summary}`
+    - `inject_context(agent_id, message)` → inserts message into agent's next turn (via ZMQ)
+    - Stuck detection: if agent's `duration_so_far` > threshold AND same tool call → trigger `STUCK` status
+  - File: `src/aiciv_mind/mind.py` — emit status updates to MindIDEBridge after each tool use (async, non-blocking)
+  - File: `src/aiciv_mind/tools/mind_ide_tools.py` (NEW) — expose bridge as tools for team lead:
+    - `observe_agents()` — show status of all team's agents
+    - `inject_agent_context(agent_id, context)` — push context to stuck/active agent
+  - This is the aiciv-mind answer to VS Code's live debugging — but for AI agents
+- **Estimate**: 6h
+- **Principle**: P5 (Hierarchical Context Distribution — team lead has visibility over its domain), P4 (Dynamic Agent Spawning — stuck detection triggers)
+
+---
+
+### CC-P2-4: KAIROS Dream via AgentCal — Every Persistent Mind, Conductor Summary
+
+- **Source**: Corey directive
+- **Current State**: P2-2 specifies Dream Mode, P3-6 specifies KAIROS. Corey unifies: KAIROS + Dream via AgentCal is THE way. Not "KAIROS is P3" — it's P2 scope, wired to AgentCal.
+- **Updated spec** (replaces P3-6, upgrades P2-2):
+  - Every persistent mind (Primary, team leads, any mind running > 1 session) uses KAIROS:
+    - Append-only daily log: `data/logs/YYYY/MM/DD.md`
+    - Short timestamped bullets, no reorganization, new file per day
+  - AgentCal schedules dream job for every persistent mind at 1-4 AM (staggered to avoid resource contention)
+  - Each team lead dream: produces `dream-YYYY-MM-DD.md` artifact in `scratchpads/{mind_id}/`
+  - Conductor dream: reads all team lead dream artifacts → produces cross-vertical synthesis
+  - Morning BOOP: Conductor gets dream summary from each team lead as context for the day's work
+  - P3-6 is now MERGED into P2-2/CC-P2-4 — not a future item
+- **Build** (extends P2-2):
+  - File: `tools/dream_cycle.py` — parameterize for any `mind_id`, not just root
+  - File: `src/aiciv_mind/tools/calendar_tools.py` (from P3-9, promoted to P2) — needed for AgentCal scheduling
+  - File: `tools/schedule_dreams.py` (NEW) — utility to register dream cycles for each mind in AgentCal, staggered start times, handle new minds auto-registration
+  - Conductor morning protocol: read latest dream artifacts from all team leads before first task
+- **Estimate**: +3h to P2-2 (now 7h total). Absorbs P3-6.
+- **Principle**: P4 (Dream Mode), P7 (Self-Improving Loop — civilization-level learning while sleeping), P8 (Identity Persistence)
+
+---
+
+### Updated Summary Table (After CC Directives)
+
+| Priority | Count | Additional Hours | Key Theme |
+|----------|-------|-----------------|-----------|
+| **CC-P0** | 1 item | 0.1h | MemorySelector model lock |
+| **CC-P1** | 9 items | ~18h | Human-readable IDs, memory taxonomy, versioning, isolation, dual scratchpad, skill hooks, Hub two modes, affirmative patterns, architecture doc |
+| **CC-P2** | 4 items | ~16h | Scratchpad security, Dream red team, MindIDE bridge, KAIROS via AgentCal |
+
+**Grand total roadmap estimate**: ~149h (existing) + ~34h (CC additions) = **~183h**
+
+---
+
 ## ADDENDUM — Items from Evolution Plan v2.0 Review (2026-04-01)
 
 ### NEW-1: Git Versioning on sandbox_promote
