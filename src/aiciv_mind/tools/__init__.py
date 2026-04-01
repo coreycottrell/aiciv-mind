@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Callable, Awaitable
 
 
@@ -205,5 +206,13 @@ class ToolRegistry:
         if agentmail_inbox:
             from aiciv_mind.tools.email_tools import register_email_tools
             register_email_tools(registry, agentmail_inbox)
+
+        # system_health is always registered
+        from aiciv_mind.tools.health_tools import register_health_tools
+        register_health_tools(
+            registry,
+            memory_store=memory_store,
+            mind_root=str(Path(__file__).parent.parent.parent.parent) if memory_store else None,
+        )
 
         return registry
