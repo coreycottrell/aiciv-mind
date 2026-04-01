@@ -86,13 +86,20 @@ class Mind:
         task: str,
         task_id: str | None = None,
         inject_memories: bool = True,
+        fresh_context: bool = False,
     ) -> str:
         """
         Execute a single task through the tool-use loop.
         Returns final text response.
+
+        If fresh_context=True, conversation history is cleared before this task
+        runs (useful for scheduled BOOPs that don't need prior context).
         """
         self._session_id = self._session_id or str(uuid.uuid4())[:8]
         self._running = True
+
+        if fresh_context:
+            self._messages = []
 
         # Build system prompt in cache-optimal order:
         #   STATIC  (base prompt — identity, principles) ← ALWAYS first → always cached

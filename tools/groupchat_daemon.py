@@ -427,6 +427,7 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
                         reply = await mind.run_task(
                             f"[Scheduled BOOP: {name}]\n{prompt}",
                             inject_memories=True,
+                            fresh_context=True,
                         )
                         LOG.info(
                             "Scheduled task '%s' complete: %s",
