@@ -376,13 +376,20 @@ class Mind:
                     self.manifest.mind_id, name, str(args)[:100],
                 )
 
-        # Fallback: <minimax:tool_call> XML blocks (M2.7 XML format)
+        # Fallback: XML-style tool calls — permissive scanner.
+        # M2.7 emits several XML variants, often malformed:
+        #   <minimax:tool_call><invoke name="X">...</invoke></minimax:tool_call>
+        #   <invoke name="X">...</invoke>  (no wrapper)
+        #   <invoke name="X">\n</invoke>   (no params, missing closing)
+        # Rather than requiring exact format, we scan for ANY <invoke name="...">
+        # and extract whatever parameters follow before the next invoke or end.
         if not blocks:
-            xml_re = re.compile(
-                r'<minimax:tool_call>\s*<invoke\s+name="([^"]+)">\s*(.*?)</invoke>\s*</minimax:tool_call>',
+            # Find all <invoke name="tool_name"> occurrences
+            invoke_re = re.compile(
+                r'<invoke\s+name="([^"]+)">\s*(.*?)(?:</invoke>|(?=<invoke\s)|$)',
                 re.DOTALL,
             )
-            for match in xml_re.finditer(text):
+            for match in invoke_re.finditer(text):
                 name = match.group(1)
                 if name not in registered:
                     continue
@@ -394,7 +401,6 @@ class Mind:
                 )
                 for pm in param_re.finditer(match.group(2)):
                     val = pm.group(2).strip()
-                    # Try to parse as JSON value (bool, int, etc.)
                     try:
                         args[pm.group(1)] = json.loads(val)
                     except (json.JSONDecodeError, ValueError):
