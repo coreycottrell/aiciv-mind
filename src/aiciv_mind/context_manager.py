@@ -57,10 +57,12 @@ class ContextManager:
         self,
         max_context_memories: int = 10,
         model_max_tokens: int = 4096,
+        scratchpad_dir: str | None = None,
     ) -> None:
         self._max_memories = max_context_memories
         # Reserve 80% of token budget for memory injection
         self._budget_chars = int(model_max_tokens * 0.80) * _CHARS_PER_TOKEN
+        self._scratchpad_dir = scratchpad_dir
 
     # ------------------------------------------------------------------
     # Boot context formatting
@@ -101,6 +103,16 @@ class ContextManager:
             parts.append("## Pinned Context (always loaded)")
             for m in boot.pinned_memories[: self._max_memories]:
                 parts.append(f"### {m['title']}\n{m['content']}")
+
+        # Daily scratchpad — working notes from today
+        if self._scratchpad_dir:
+            from datetime import date
+            from pathlib import Path
+            scratchpad_path = Path(self._scratchpad_dir) / f"{date.today().isoformat()}.md"
+            if scratchpad_path.exists():
+                content = scratchpad_path.read_text().strip()
+                if content:
+                    parts.append(f"## Today's Scratchpad\n{content}")
 
         if len(parts) == 1:
             # Only the header — nothing meaningful to inject

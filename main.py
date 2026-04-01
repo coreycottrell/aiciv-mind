@@ -142,6 +142,9 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
         return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
 
     # Build tool registry
+    # Scratchpad directory (daily working notes)
+    scratchpad_dir = str(Path(__file__).parent / "scratchpads")
+
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
@@ -152,6 +155,7 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
         primary_bus=primary_bus,
         queue_path=queue_path,
         skills_dir=skills_dir_str,
+        scratchpad_dir=scratchpad_dir,
     )
 
     # Session lifecycle + context management
@@ -161,6 +165,7 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     ctx_mgr = ContextManager(
         max_context_memories=manifest.memory.max_context_memories,
         model_max_tokens=manifest.model.max_tokens,
+        scratchpad_dir=scratchpad_dir,
     )
     boot_str = ctx_mgr.format_boot_context(boot)
     if boot_str:

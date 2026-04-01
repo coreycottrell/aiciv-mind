@@ -107,6 +107,7 @@ class ToolRegistry:
         primary_bus=None,
         queue_path: str | None = None,
         skills_dir: str | None = None,
+        scratchpad_dir: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
@@ -151,5 +152,9 @@ class ToolRegistry:
         if skills_dir is not None and memory_store is not None:
             from aiciv_mind.tools.skill_tools import register_skill_tools
             register_skill_tools(registry, memory_store, skills_dir)
+
+        if scratchpad_dir is not None:
+            from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+            register_scratchpad_tools(registry, scratchpad_dir)
 
         return registry
