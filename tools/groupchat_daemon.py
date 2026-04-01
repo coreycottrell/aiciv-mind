@@ -346,7 +346,7 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     )
     try:
         LOG.info("Running boot turn...")
-        boot_reply = await mind.run(boot_task, inject_memories=False)
+        boot_reply = await mind.run_task(boot_task, inject_memories=False)
         LOG.info("Boot turn complete: %s", (boot_reply or "")[:200])
     except Exception as e:
         LOG.warning("Boot turn failed (non-fatal): %s", e)
