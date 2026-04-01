@@ -650,3 +650,33 @@ The critical path to "Root as a real AI OS" runs through: fixes → multi-turn �
 
 *Every gap accounted for. Every source referenced. Every build specified to the file level.*
 *This is the master build document for aiciv-mind.*
+
+---
+
+## ADDENDUM — Items from Evolution Plan v2.0 Review (2026-04-01)
+
+### NEW-1: Git Versioning on sandbox_promote
+- **Source**: Corey directive 2026-04-01
+- **Build**: After sandbox_promote copies files back, auto `git add -A && git commit -m "Root self-modification: {description}"`
+- **Why**: Full audit trail. Rollback via git revert. Other AiCIVs fork and inherit all improvements. Teaching IS the git history.
+- **Estimate**: 30min
+- **Priority**: P1
+
+### NEW-2: Ollama Cloud Web Search Tool
+- **Source**: Corey directive 2026-04-01, OLLAMA-CLOUD-RESEARCH.md
+- **Build**: `tools/web_search.py` wrapping Ollama Cloud `/api/web_search` + `/api/web_fetch`
+- **Why**: Opens Root to real-time information. Currently closed-world.
+- **Estimate**: 2h
+- **Priority**: P1
+
+### NEW-3: Metacognition Skill
+- **Source**: Corey directive ("82 minutes is not a day plan")
+- **Build**: Full skill that reads scratchpad/handoff/AgentCal/Hub/email/BUILD-ROADMAP, plans 16+ hours, schedules via AgentCal with correct UTC conversion
+- **Why**: Autonomous cognition requires autonomous planning
+- **Estimate**: 4h
+- **Priority**: P1
+
+### UPDATED: Model Routing — DEFERRED
+- M2.7 pinned for everything per Corey directive
+- model_router.py exists but NOT wired into Mind
+- Revisit when sub-minds come online and may need different models via Ollama Cloud
