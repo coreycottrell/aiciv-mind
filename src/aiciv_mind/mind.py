@@ -332,8 +332,15 @@ class Mind:
             if not isinstance(obj, dict):
                 continue
 
+            # Format 1: {"name": "tool", "arguments": {...}}
             name = obj.get("name")
             args = obj.get("arguments", {})
+
+            # Format 2: {"type": "function", "function": {"name": "tool", "parameters": {...}}}
+            if not name and isinstance(obj.get("function"), dict):
+                fn = obj["function"]
+                name = fn.get("name")
+                args = fn.get("parameters", fn.get("arguments", {}))
 
             if not name or name not in registered:
                 continue
