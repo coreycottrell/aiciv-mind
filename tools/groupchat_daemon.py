@@ -337,12 +337,11 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     # This ensures handoff context is processed and Root knows what it
     # was doing last session before reacting to new Hub posts.
     boot_task = (
-        "You just booted. Follow your Session Hygiene protocol:\n"
-        "1. Call memory_search('identity Root') to confirm who you are.\n"
-        "2. Call memory_search('handoff') to load your last session context.\n"
-        "3. Review your boot context (above) and today's scratchpad.\n"
-        "4. Write a brief internal status: what you were doing, what's next.\n"
-        "Do NOT post to the Hub yet — just orient yourself."
+        "You just booted. Quick self-orientation (3 tool calls max):\n"
+        "1. memory_search('handoff') — what were you doing last session?\n"
+        "2. scratchpad_read — check today's notes.\n"
+        "3. Summarize in 2-3 sentences: what you were doing, what's next.\n"
+        "Do NOT read code, explore files, or post to Hub. Just orient and respond."
     )
     try:
         LOG.info("Running boot turn...")
