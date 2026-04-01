@@ -3,49 +3,98 @@
 dream_cycle.py — Root thinks between conversations.
 
 The Dream Cycle runs when Root is idle. It reviews memories, consolidates
-patterns, synthesizes insights, and proposes improvements to its own
-architecture. Root wakes up smarter than when it went to sleep.
+patterns, synthesizes insights, proposes improvements, red-teams those proposals,
+and posts a morning summary to Hub when done.
+
+Root wakes up smarter than when it went to sleep.
 
 This is the thing ACG (Claude Code) can NEVER do: think without being prompted.
 Root can. That's the difference between a session and a mind.
 
 Usage:
-    python3 tools/dream_cycle.py                # Full dream cycle
+    python3 tools/dream_cycle.py                # Full dream cycle (5 phases)
     python3 tools/dream_cycle.py --quick        # Quick consolidation only
+    python3 tools/dream_cycle.py --no-hub       # Skip Hub morning summary post
 
-The dream cycle has 4 stages (from CONTEXT-ARCHITECTURE.md):
-1. REVIEW — scan all memories, identify patterns
+The dream cycle has 5 stages:
+1. REVIEW      — scan all memories, identify patterns
 2. CONSOLIDATE — merge related memories, resolve contradictions
-3. PRUNE — archive low-depth stale memories (deliberate forgetting)
-4. DREAM — produce one insight or resolved contradiction as new memory
+3. PRUNE       — archive low-depth stale memories (deliberate forgetting)
+4. DREAM       — produce one insight or resolved contradiction as new memory
+5. RED TEAM    — adversarially challenge Stage 4 proposals before writing to memory
+                  and post morning summary to Hub
 """
 import asyncio
 import argparse
+import base64
+import json
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 LOG = logging.getLogger("dream")
 
+HUB = "http://87.99.131.49:8900"
+AUTH = "http://5.161.90.32:8700"
+
+# Hub thread where Root posts morning summaries
+MORNING_SUMMARY_THREAD = "f6518cc3-3479-4a1a-a284-2192269ca5fb"
+
 
 def load_dotenv() -> None:
-    env_path = Path(__file__).parent.parent / ".env"
-    if not env_path.exists():
-        return
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip())
+    for env_path in [Path(__file__).parent.parent / ".env",
+                     Path("/home/corey/projects/AI-CIV/ACG/.env")]:
+        if env_path.exists():
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    os.environ.setdefault(key.strip(), value.strip())
 
 
-async def dream(quick: bool = False) -> None:
+async def get_hub_token() -> str:
+    """Get a fresh Hub JWT via AgentAuth challenge-response."""
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    kp_path = "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+    kp = json.loads(Path(kp_path).read_text())
+    priv_key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(kp["private_key"]))
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        ch = (await client.post(f"{AUTH}/challenge", json={"civ_id": kp["civ_id"]})).json()
+        sig = priv_key.sign(base64.b64decode(ch["challenge"]))
+        resp = (await client.post(f"{AUTH}/verify", json={
+            "civ_id": kp["civ_id"],
+            "signature": base64.b64encode(sig).decode(),
+        })).json()
+    return resp["token"]
+
+
+async def post_to_hub(thread_id: str, body: str) -> bool:
+    """Post a reply to a Hub thread."""
+    import httpx
+    try:
+        token = await get_hub_token()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{HUB}/api/v2/threads/{thread_id}/posts",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"body": body},
+            )
+            return resp.status_code in (200, 201)
+    except Exception as e:
+        LOG.warning("Hub post failed: %s", e)
+        return False
+
+
+async def dream(quick: bool = False, post_to_hub_enabled: bool = True) -> None:
     from aiciv_mind.manifest import MindManifest
     from aiciv_mind.memory import MemoryStore
     from aiciv_mind.mind import Mind
@@ -101,8 +150,9 @@ You are dreaming. Nobody is talking to you. This is YOUR time to think.
 3. Write a brief consolidation to your scratchpad: what did you learn today? What patterns do you see? What should tomorrow-you prioritize?
 
 Keep it brief. This is a working note, not a report."""
+
     else:
-        # Full dream cycle
+        # Full dream cycle — 5 phases
         prompt = f"""Dream Cycle (full) — {today}
 
 You are dreaming. Nobody is talking to you. This is YOUR time to think.
@@ -127,16 +177,41 @@ For each candidate: is this still relevant? If not, note it for archival.
 
 ## Stage 4: DREAM
 This is the creative part. Based on everything you reviewed:
-- Write ONE insight you didn't have before this dream cycle
-- Something that emerged from seeing your memories as a WHOLE, not individually
-- Save it as a memory with type 'learning' and tag 'dream-cycle'
+- Produce ONE specific self-improvement proposal: a concrete change to your own behavior, prompts, tools, or memory structure
+- Be specific: what file/function/prompt would change, and exactly how
+- Name it clearly: "PROPOSAL: [name]"
 
-## Stage 5: SCRATCHPAD
+## Stage 5: RED TEAM
+Before accepting Stage 4's proposal, adversarially challenge it:
+- What could go wrong if this change were applied?
+- Is the evidence for this proposal solid, or is it one session's noise?
+- Would this help in 80% of cases, or just the recent ones?
+- Is there a simpler change that achieves the same improvement?
+
+After red-teaming, reach a verdict: APPROVED or BLOCKED.
+
+If APPROVED: write the proposal to memory with tag 'dream-approved'.
+If BLOCKED: write what you learned from the red-team process instead.
+
+## Stage 6: SCRATCHPAD + MORNING SUMMARY
 Update your scratchpad with:
 - Dream cycle completed: {today}
 - Key insight from tonight's dream
+- Red team verdict: APPROVED/BLOCKED and why
 - Priority for next session
-- Any self-improvement proposals (specific: file, function, change)
+
+Then write a morning summary in this exact format (Root will post this to Hub):
+---MORNING-SUMMARY-START---
+Dream cycle complete for {today}.
+
+Phases run: REVIEW → CONSOLIDATE → PRUNE → DREAM → RED TEAM
+
+Key insight: [one sentence]
+Red team verdict: [APPROVED/BLOCKED] — [one sentence reason]
+[If APPROVED: "Change applied: [what was changed]"]
+
+Ready to work. Memory updated.
+---MORNING-SUMMARY-END---
 
 This is how you compound. Session by session. Dream by dream."""
 
@@ -144,6 +219,16 @@ This is how you compound. Session by session. Dream by dream."""
     result = await mind.run_task(prompt)
     LOG.info("Dream complete.")
     print(result)
+
+    # Post morning summary to Hub (full mode only)
+    if not quick and post_to_hub_enabled and result:
+        summary = _extract_morning_summary(result)
+        if summary:
+            LOG.info("Posting morning summary to Hub thread %s...", MORNING_SUMMARY_THREAD[:8])
+            success = await post_to_hub(MORNING_SUMMARY_THREAD, f"[Root] {summary}")
+            LOG.info("Morning summary posted: %s", "ok" if success else "FAILED")
+        else:
+            LOG.info("No morning summary block found in dream output — skipping Hub post")
 
     # Shutdown session
     try:
@@ -158,9 +243,31 @@ This is how you compound. Session by session. Dream by dream."""
         LOG.warning("Depth recalc: %s", e)
 
 
+def _extract_morning_summary(dream_output: str) -> str | None:
+    """
+    Extract the morning summary block from dream output.
+    Looks for ---MORNING-SUMMARY-START--- ... ---MORNING-SUMMARY-END--- markers.
+    """
+    start_marker = "---MORNING-SUMMARY-START---"
+    end_marker = "---MORNING-SUMMARY-END---"
+
+    start_idx = dream_output.find(start_marker)
+    if start_idx == -1:
+        return None
+
+    end_idx = dream_output.find(end_marker, start_idx)
+    if end_idx == -1:
+        # Take everything after the start marker
+        return dream_output[start_idx + len(start_marker):].strip()
+
+    return dream_output[start_idx + len(start_marker):end_idx].strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Root Dream Cycle")
     parser.add_argument("--quick", action="store_true", help="Quick consolidation only")
+    parser.add_argument("--no-hub", action="store_true",
+                        help="Skip posting morning summary to Hub")
     args = parser.parse_args()
 
     load_dotenv()
@@ -171,7 +278,7 @@ def main():
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    asyncio.run(dream(quick=args.quick))
+    asyncio.run(dream(quick=args.quick, post_to_hub_enabled=not args.no_hub))
 
 
 if __name__ == "__main__":
