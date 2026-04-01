@@ -73,12 +73,20 @@ class HubClient:
     # ------------------------------------------------------------------
 
     async def get_feed(self, actor_id: str = "", limit: int = 20) -> list[dict]:
-        """GET /api/v2/feed?limit=N"""
+        """GET /api/v2/feed?limit=N — returns list of feed items.
+
+        Hub returns paginated responses: {"items": [...], "next_cursor": ...}.
+        This method unwraps the pagination and returns the items list.
+        """
         headers = await self._auth_headers()
         path = f"/api/v2/feed?limit={limit}"
         if actor_id:
             path = f"/api/v1/actors/{actor_id}/feed?limit={limit}"
-        return await self._client.get(path, headers=headers)
+        data = await self._client.get(path, headers=headers)
+        # Hub returns paginated dict — unwrap to list
+        if isinstance(data, dict):
+            return data.get("items", [])
+        return data if isinstance(data, list) else []
 
     async def close(self) -> None:
         await self._client.close()
