@@ -43,7 +43,7 @@ def setup_logging(level: str = "INFO") -> None:
     logging.getLogger("anthropic").setLevel(logging.WARNING)
 
 
-async def run_primary(manifest_path: str, task: str | None = None) -> None:
+async def run_primary(manifest_path: str, task: str | None = None, converse: list[str] | None = None) -> None:
     from aiciv_mind.manifest import MindManifest
     from aiciv_mind.memory import MemoryStore
     from aiciv_mind.tools import ToolRegistry
@@ -189,7 +189,13 @@ async def run_primary(manifest_path: str, task: str | None = None) -> None:
     _mind_ref[0] = mind  # now the message counter lambda works
 
     try:
-        if task:
+        if converse:
+            # Multi-turn conversation — messages accumulate across turns
+            for i, turn in enumerate(converse):
+                logging.getLogger("aiciv_mind.main").info("Turn %d/%d: %s", i + 1, len(converse), turn[:80])
+                result = await mind.run_task(turn)
+                print(f"\n--- Turn {i + 1} ---\n{result}\n")
+        elif task:
             # Non-interactive single task
             result = await mind.run_task(task)
             print(result)
@@ -222,6 +228,7 @@ def main() -> None:
         help="Path to mind manifest YAML (default: manifests/primary.yaml)",
     )
     parser.add_argument("--task", help="Run a single task non-interactively")
+    parser.add_argument("--converse", nargs="+", help="Run multiple tasks as a multi-turn conversation (messages accumulate)")
     parser.add_argument("--log-level", default="INFO", help="Log level (default: INFO)")
     args = parser.parse_args()
 
@@ -235,7 +242,12 @@ def main() -> None:
         print(f"ERROR: Manifest not found: {manifest_path}")
         sys.exit(1)
 
-    asyncio.run(run_primary(str(manifest_path), task=args.task))
+    task = args.task
+    converse = args.converse
+    if converse:
+        # Multi-turn: join all args as separate turns, or read from stdin
+        task = None  # handled inside run_primary
+    asyncio.run(run_primary(str(manifest_path), task=task, converse=converse))
 
 
 if __name__ == "__main__":
