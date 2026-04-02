@@ -157,6 +157,20 @@ CREATE TABLE IF NOT EXISTS evolution_log (
 
 CREATE INDEX IF NOT EXISTS idx_evolution_agent ON evolution_log(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_evolution_type ON evolution_log(change_type);
+
+CREATE TABLE IF NOT EXISTS memory_links (
+    id          TEXT PRIMARY KEY,
+    source_id   TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    link_type   TEXT NOT NULL,  -- 'supersedes' | 'references' | 'conflicts' | 'compounds'
+    reason      TEXT,           -- Why this link exists
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(source_id, target_id, link_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
+CREATE INDEX IF NOT EXISTS idx_links_type ON memory_links(link_type);
 """
 
 # Columns added in v0.1.1 — applied via _migrate_schema() for existing DBs.
@@ -804,6 +818,130 @@ class MemoryStore:
             (outcome, evolution_id),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Memory graph (links between memories)
+    # ------------------------------------------------------------------
+
+    def link_memories(
+        self,
+        source_id: str,
+        target_id: str,
+        link_type: str,
+        reason: str | None = None,
+    ) -> str:
+        """
+        Create a directed link between two memories.
+
+        Link types:
+        - supersedes: source replaces target (target is outdated)
+        - references: source uses/cites target
+        - conflicts: source contradicts target (flagged for resolution)
+        - compounds: source + target together reveal a pattern
+        """
+        valid_types = ("supersedes", "references", "conflicts", "compounds")
+        if link_type not in valid_types:
+            raise ValueError(f"link_type must be one of {valid_types}, got: {link_type}")
+        lid = str(uuid.uuid4())
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO memory_links (id, source_id, target_id, link_type, reason)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (lid, source_id, target_id, link_type, reason),
+        )
+        self._conn.commit()
+        return lid
+
+    def get_links_from(self, memory_id: str) -> list[dict[str, Any]]:
+        """Get all outgoing links from a memory."""
+        cursor = self._conn.execute(
+            "SELECT * FROM memory_links WHERE source_id = ? ORDER BY created_at DESC",
+            (memory_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_links_to(self, memory_id: str) -> list[dict[str, Any]]:
+        """Get all incoming links to a memory."""
+        cursor = self._conn.execute(
+            "SELECT * FROM memory_links WHERE target_id = ? ORDER BY created_at DESC",
+            (memory_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_conflicts(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """Return all unresolved conflict links, with both memory titles."""
+        sql = """
+            SELECT ml.*,
+                   s.title as source_title, s.content as source_content,
+                   t.title as target_title, t.content as target_content
+            FROM memory_links ml
+            LEFT JOIN memories s ON ml.source_id = s.id
+            LEFT JOIN memories t ON ml.target_id = t.id
+            WHERE ml.link_type = 'conflicts'
+        """
+        params: list = []
+        if agent_id:
+            sql += " AND (s.agent_id = ? OR t.agent_id = ?)"
+            params.extend([agent_id, agent_id])
+        sql += " ORDER BY ml.created_at DESC"
+        cursor = self._conn.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_superseded(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """Return memories that have been superseded by newer ones."""
+        sql = """
+            SELECT m.*, ml.source_id as superseded_by
+            FROM memories m
+            JOIN memory_links ml ON m.id = ml.target_id AND ml.link_type = 'supersedes'
+        """
+        params: list = []
+        if agent_id:
+            sql += " WHERE m.agent_id = ?"
+            params.append(agent_id)
+        sql += " ORDER BY ml.created_at DESC"
+        cursor = self._conn.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_memory_graph(self, memory_id: str, depth: int = 1) -> dict[str, Any]:
+        """
+        Get a memory and its immediate graph neighborhood.
+        depth=1: direct links only. depth=2: links of links.
+        """
+        result: dict[str, Any] = {"memory_id": memory_id, "links_from": [], "links_to": []}
+
+        # Get the memory itself
+        row = self._conn.execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row:
+            result["memory"] = dict(row)
+
+        # Get outgoing links with target info
+        outgoing = self._conn.execute(
+            """
+            SELECT ml.*, m.title as target_title
+            FROM memory_links ml
+            LEFT JOIN memories m ON ml.target_id = m.id
+            WHERE ml.source_id = ?
+            """,
+            (memory_id,),
+        ).fetchall()
+        result["links_from"] = [dict(r) for r in outgoing]
+
+        # Get incoming links with source info
+        incoming = self._conn.execute(
+            """
+            SELECT ml.*, m.title as source_title
+            FROM memory_links ml
+            LEFT JOIN memories m ON ml.source_id = m.id
+            WHERE ml.target_id = ?
+            """,
+            (memory_id,),
+        ).fetchall()
+        result["links_to"] = [dict(r) for r in incoming]
+
+        return result
 
     # ------------------------------------------------------------------
     # Lifecycle

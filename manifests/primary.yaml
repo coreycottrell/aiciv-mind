@@ -103,6 +103,14 @@ tools:
     enabled: true
   - name: "evolution_update_outcome"
     enabled: true
+  - name: "memory_link"
+    enabled: true
+  - name: "memory_graph"
+    enabled: true
+  - name: "memory_conflicts"
+    enabled: true
+  - name: "memory_superseded"
+    enabled: true
 
 compaction:
   enabled: true

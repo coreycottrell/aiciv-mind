@@ -176,6 +176,9 @@ class ToolRegistry:
             from aiciv_mind.tools.continuity_tools import register_continuity_tools
             register_continuity_tools(registry, memory_store, agent_id=agent_id)
 
+            from aiciv_mind.tools.graph_tools import register_graph_tools
+            register_graph_tools(registry, memory_store)
+
         if suite_client is not None:
             from aiciv_mind.tools.hub_tools import register_hub_tools
             register_hub_tools(registry, suite_client, queue_path=queue_path)
