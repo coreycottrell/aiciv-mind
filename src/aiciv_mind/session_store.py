@@ -46,6 +46,9 @@ class BootContext:
     # is_pinned=True memories — always loaded
     pinned_memories: list[dict[str, Any]] = field(default_factory=list)
 
+    # Evolution trajectory — "what was I becoming?"
+    evolution_trajectory: str = ""
+
 
 # ---------------------------------------------------------------------------
 # SessionStore
@@ -130,6 +133,9 @@ class SessionStore:
         # Pinned memories
         pinned = self._memory.get_pinned(agent_id=self._agent_id)
 
+        # Evolution trajectory — what was I becoming?
+        evolution_trajectory = self._memory.get_evolution_trajectory(self._agent_id)
+
         return BootContext(
             session_id=self._session_id,
             session_count=self._count_sessions(),
@@ -138,6 +144,7 @@ class SessionStore:
             handoff_memory=handoff,
             active_threads=[],
             pinned_memories=pinned,
+            evolution_trajectory=evolution_trajectory,
         )
 
     def _count_sessions(self) -> int:

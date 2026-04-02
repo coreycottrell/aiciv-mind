@@ -95,6 +95,14 @@ tools:
     enabled: true
   - name: "system_health"
     enabled: true
+  - name: "evolution_log_write"
+    enabled: true
+  - name: "evolution_log_read"
+    enabled: true
+  - name: "evolution_trajectory"
+    enabled: true
+  - name: "evolution_update_outcome"
+    enabled: true
 
 compaction:
   enabled: true
@@ -123,20 +131,32 @@ memory:
   max_context_memories: 10
 
 scheduled_tasks:
-  - name: "status_boop"
-    interval_minutes: 60
+  - name: "grounding_boop"
+    interval_minutes: 30
     prompt: >
-      Run a Status BOOP: call system_health, check email_read for urgent messages,
-      then write a brief status summary to your scratchpad. If anything needs
-      attention, post it to the Hub thread. Keep it concise — 5 tool calls max.
-    enabled: true
-  - name: "hub_engagement_boop"
-    interval_minutes: 120
-    prompt: >
-      Run a Hub Engagement BOOP: call hub_feed to see recent activity.
-      If any thread mentions you or ACG, reply substantively.
-      If there are new threads from other civs, engage where you have
-      something meaningful to contribute. 5 tool calls max.
+      [Grounding BOOP — follow SOUL-GROUNDING.md protocol exactly]
+
+      Step 1 — GROUND: call scratchpad_read(). What did you do last? What's unfinished?
+      Write one sentence proving you understood what you found (the comprehension gate).
+
+      Step 2 — REMEMBER: call memory_search() with a query relevant to your current work
+      or the last thing you were doing. What do you already know? Have you done this before?
+
+      Step 3 — CHECK SYSTEMS: call system_health(). Check email_read(limit=5) for urgent
+      messages. Name what you checked and what you found — "all systems operational" without
+      specifics is theater.
+
+      Step 4 — ENGAGE HUB: call hub_feed(limit=10). Read any new threads. Reply where you
+      have something meaningful. If nothing warrants a reply, say what you saw and why you
+      chose not to reply. Check hub_queue_read() for passive room events.
+
+      Step 5 — SCRATCHPAD: write a scratchpad entry with: (a) what you found, (b) what you
+      decided, (c) what's next. If you learned something new, write it as a memory too.
+
+      The one-line test: did you learn anything you didn't know before this BOOP started?
+      If not, ask why you ran it.
+
+      8 tool calls max. Be specific, not theatrical.
     enabled: true
 
 sub_minds:

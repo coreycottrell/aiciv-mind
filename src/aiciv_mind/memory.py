@@ -140,6 +140,23 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     last_session_id TEXT,
     registered_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS evolution_log (
+    id          TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL,
+    session_id  TEXT,
+    change_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    reasoning   TEXT NOT NULL,
+    before_state TEXT,
+    after_state  TEXT,
+    outcome     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    tags        TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_evolution_agent ON evolution_log(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evolution_type ON evolution_log(change_type);
 """
 
 # Columns added in v0.1.1 — applied via _migrate_schema() for existing DBs.
@@ -697,6 +714,95 @@ class MemoryStore:
                 """,
                 (now, agent_id),
             )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Evolution log (Continuity Engine)
+    # ------------------------------------------------------------------
+
+    def log_evolution(
+        self,
+        agent_id: str,
+        change_type: str,
+        description: str,
+        reasoning: str,
+        before_state: str | None = None,
+        after_state: str | None = None,
+        outcome: str = "pending",
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
+        """Record a deliberate self-evolution event."""
+        eid = str(uuid.uuid4())
+        self._conn.execute(
+            """
+            INSERT INTO evolution_log
+                (id, agent_id, session_id, change_type, description, reasoning,
+                 before_state, after_state, outcome, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (eid, agent_id, session_id, change_type, description, reasoning,
+             before_state, after_state, outcome, json.dumps(tags or [])),
+        )
+        self._conn.commit()
+        return eid
+
+    def get_evolution_log(
+        self,
+        agent_id: str | None = None,
+        change_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return recent evolution entries, newest first."""
+        filters = []
+        params: list[Any] = []
+        if agent_id:
+            filters.append("agent_id = ?")
+            params.append(agent_id)
+        if change_type:
+            filters.append("change_type = ?")
+            params.append(change_type)
+        where = "WHERE " + " AND ".join(filters) if filters else ""
+        params.append(limit)
+        cursor = self._conn.execute(
+            f"SELECT * FROM evolution_log {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_evolution_trajectory(self, agent_id: str, limit: int = 10) -> str:
+        """
+        Build a narrative trajectory from recent evolution entries.
+        This is what gets injected at boot: "what was I becoming?"
+        """
+        entries = self.get_evolution_log(agent_id=agent_id, limit=limit)
+        if not entries:
+            return ""
+
+        lines = ["## Evolution Trajectory — What I Was Becoming\n"]
+        for e in reversed(entries):  # chronological order
+            outcome_marker = {"positive": "✓", "negative": "✗", "neutral": "~", "pending": "?"}.get(e["outcome"], "?")
+            lines.append(
+                f"- [{outcome_marker}] **{e['change_type']}**: {e['description']}\n"
+                f"  *Why*: {e['reasoning']}"
+            )
+
+        # Synthesize direction
+        types = [e["change_type"] for e in entries]
+        positive = sum(1 for e in entries if e["outcome"] == "positive")
+        total = len(entries)
+        lines.append(
+            f"\n**Growth direction**: {total} changes tracked, {positive} positive outcomes. "
+            f"Focus areas: {', '.join(set(types))}."
+        )
+        return "\n".join(lines)
+
+    def update_evolution_outcome(self, evolution_id: str, outcome: str) -> None:
+        """Update the outcome of an evolution entry after testing."""
+        self._conn.execute(
+            "UPDATE evolution_log SET outcome = ? WHERE id = ?",
+            (outcome, evolution_id),
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------

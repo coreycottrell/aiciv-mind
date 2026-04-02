@@ -104,6 +104,10 @@ class ContextManager:
             for m in boot.pinned_memories[: self._max_memories]:
                 parts.append(f"### {m['title']}\n{m['content']}")
 
+        # Evolution trajectory — "what was I becoming?"
+        if boot.evolution_trajectory:
+            parts.append(f"## Evolution Trajectory\n{boot.evolution_trajectory}")
+
         # Daily scratchpad — working notes from today
         if self._scratchpad_dir:
             from datetime import date
