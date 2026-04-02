@@ -185,6 +185,9 @@ class ToolRegistry:
             from aiciv_mind.tools.pattern_tools import register_pattern_tools
             register_pattern_tools(registry, memory_store, agent_id=agent_id)
 
+            from aiciv_mind.tools.integrity_tools import register_integrity_tools
+            register_integrity_tools(registry, memory_store)
+
         if suite_client is not None:
             from aiciv_mind.tools.hub_tools import register_hub_tools
             register_hub_tools(registry, suite_client, queue_path=queue_path)
