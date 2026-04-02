@@ -206,7 +206,20 @@ class Mind:
                 )
 
             iter_start = time.monotonic()
-            response = await self._call_model(system_prompt, tools_list)
+            try:
+                response = await self._call_model(system_prompt, tools_list)
+            except Exception as e:
+                logger.error(
+                    "[%s] _call_model failed (iter %d): %s — popping orphaned user message",
+                    self.manifest.mind_id, iteration, e,
+                )
+                # Pop the user message we just appended to keep _messages
+                # in valid alternating user/assistant order. Without this,
+                # every subsequent API call fails with "messages must alternate"
+                # creating an infinite error loop that eventually kills the daemon.
+                if self._messages and self._messages[-1].get("role") == "user":
+                    self._messages.pop()
+                raise  # let the daemon's handler decide retry/skip
             iter_latency = int((time.monotonic() - iter_start) * 1000)
 
             # Append assistant response to history
@@ -873,7 +886,14 @@ class Mind:
                 })
 
         for b in write_ops:
-            result = await self._execute_one_tool(b)
+            try:
+                result = await self._execute_one_tool(b)
+            except Exception as e:
+                logger.error(
+                    "[%s] Write tool %s failed: %s",
+                    self.manifest.mind_id, b.name, e,
+                )
+                result = f"ERROR: Tool {b.name} failed: {e}"
             results.append({
                 "type": "tool_result",
                 "tool_use_id": b.id,

@@ -391,13 +391,45 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     if scheduled_tasks:
         LOG.info("Scheduled tasks: %s", [t.get("name", t) if isinstance(t, dict) else t for t in scheduled_tasks])
 
+    poll_count = 0
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 20  # safety valve: if 20 polls in a row fail, something is deeply wrong
+
     while True:
         try:
+            poll_count += 1
+
+            # ── Heartbeat: log every 60 poll cycles (~5 min at 5s interval)
+            if poll_count % 60 == 0:
+                msg_count = len(mind._messages) if hasattr(mind, '_messages') else -1
+                LOG.info(
+                    "HEARTBEAT: poll=%d, messages=%d, errors_streak=%d, targets=%d",
+                    poll_count, msg_count, consecutive_errors, len(all_targets),
+                )
+
+            # ── Message consistency check: ensure _messages alternates correctly
+            # If a previous error left _messages in a broken state (e.g. two
+            # consecutive user messages), repair it now so the next API call
+            # doesn't fail with "messages must alternate user/assistant".
+            if hasattr(mind, '_messages') and len(mind._messages) >= 2:
+                last_role = mind._messages[-1].get("role")
+                prev_role = mind._messages[-2].get("role")
+                if last_role == prev_role == "user":
+                    LOG.warning(
+                        "Message consistency repair: found consecutive user messages "
+                        "(%d total). Popping stale user message.",
+                        len(mind._messages),
+                    )
+                    mind._messages.pop()
+
             # Refresh token every 50 minutes
             if time.time() - token_acquired > 3000:
-                hub_token = await get_hub_token()
-                token_acquired = time.time()
-                LOG.info("Hub token refreshed")
+                try:
+                    hub_token = await get_hub_token()
+                    token_acquired = time.time()
+                    LOG.info("Hub token refreshed")
+                except Exception as e:
+                    LOG.error("Token refresh failed (using stale token): %s", e)
 
             for target in all_targets:
                 try:
@@ -442,8 +474,35 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
                     except Exception as e:
                         LOG.error("Scheduled task '%s' failed: %s", name, e)
 
+            # Successful poll cycle — reset error counter
+            consecutive_errors = 0
+
         except Exception as e:
-            LOG.error("Poll loop error: %s", e)
+            consecutive_errors += 1
+            LOG.error(
+                "Poll loop error (streak=%d/%d): %s",
+                consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
+            )
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                LOG.critical(
+                    "FATAL: %d consecutive poll errors — daemon is broken, exiting "
+                    "so the wrapper can restart us. Last error: %s",
+                    MAX_CONSECUTIVE_ERRORS, e,
+                )
+                # Exit with non-zero so the wrapper knows to restart
+                sys.exit(1)
+        except BaseException as e:
+            # Catches asyncio.CancelledError, KeyboardInterrupt, SystemExit, etc.
+            # These are NOT Exception subclasses and would otherwise kill the
+            # daemon silently. Log them and continue unless it's SystemExit.
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                LOG.info("Received %s — shutting down gracefully", type(e).__name__)
+                raise  # let these actually terminate
+            LOG.error(
+                "BaseException in poll loop (NOT Exception): %s: %s — continuing",
+                type(e).__name__, e,
+            )
+            consecutive_errors += 1
 
         await asyncio.sleep(POLL_INTERVAL)
 
