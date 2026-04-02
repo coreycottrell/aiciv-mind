@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -80,6 +82,19 @@ class Mind:
         self._session_cached_tokens: int = 0
         self._session_cache_writes: int = 0
         self._session_total_input_tokens: int = 0
+
+        # Token usage tracking — JSONL log at data/token_usage.jsonl
+        self._mind_root = Path(__file__).parent.parent.parent
+        self._token_log_path = self._mind_root / "data" / "token_usage.jsonl"
+        self._session_log_dir = self._mind_root / "data" / "sessions"
+        # Ensure directories exist
+        self._token_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._session_log_dir.mkdir(parents=True, exist_ok=True)
+        # Session-level token accumulators
+        self._session_total_output_tokens: int = 0
+        self._session_total_thinking_tokens: int = 0
+        self._session_total_cost_usd: float = 0.0
+        self._session_api_calls: int = 0
 
     async def run_task(
         self,
@@ -147,6 +162,12 @@ class Mind:
 
         self._messages.append({"role": "user", "content": task})
 
+        # Log the user turn to session JSONL
+        self._log_session_turn(
+            turn_number=len(self._messages),
+            turn_type="user",
+        )
+
         tools_list = self._tools.build_anthropic_tools(
             enabled=self.manifest.enabled_tool_names()
         )
@@ -154,6 +175,7 @@ class Mind:
         final_text = ""
         max_iterations = 30
         iteration = 0
+        task_start_time = time.monotonic()
 
         # Loop 1 telemetry — collected during tool execution, consumed after
         tool_call_count = 0
@@ -183,10 +205,20 @@ class Mind:
                     len(self._compacted_summary),
                 )
 
+            iter_start = time.monotonic()
             response = await self._call_model(system_prompt, tools_list)
+            iter_latency = int((time.monotonic() - iter_start) * 1000)
 
             # Append assistant response to history
             self._messages.append({"role": "assistant", "content": response.content})
+
+            # Log assistant turn to session JSONL
+            self._log_session_turn(
+                turn_number=len(self._messages),
+                turn_type="assistant",
+                response=response,
+                duration_ms=iter_latency,
+            )
 
             # Extract thinking blocks (M2.7 with reasoning_split=true)
             thinking_blocks = [
@@ -226,7 +258,18 @@ class Mind:
             if not synthetic_calls and response.stop_reason == "end_turn":
                 break
 
+            tool_exec_start = time.monotonic()
             tool_results = await self._execute_tool_calls(tool_use_blocks)
+            tool_exec_ms = int((time.monotonic() - tool_exec_start) * 1000)
+
+            # Log tool calls to session JSONL
+            iter_tool_names = [b.name for b in tool_use_blocks]
+            self._log_session_turn(
+                turn_number=len(self._messages) + 1,
+                turn_type="tool_call",
+                tools_used=iter_tool_names,
+                duration_ms=tool_exec_ms,
+            )
 
             # Collect Loop 1 telemetry from this batch of tool calls
             for b, r in zip(tool_use_blocks, tool_results):
@@ -347,8 +390,12 @@ class Mind:
         if tools_list:
             kwargs["tools"] = tools_list
 
+        t0 = time.monotonic()
         response = await self._client.messages.create(**kwargs)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
         self._log_cache_stats(response)
+        self._log_token_usage(response, latency_ms)
         return response
 
     def _log_cache_stats(self, response: Any) -> None:
@@ -397,6 +444,157 @@ class Mind:
                 self._session_total_input_tokens += total_in + created
             elif total_in > 0:
                 self._session_total_input_tokens += total_in
+        except Exception:
+            pass  # telemetry never crashes the loop
+
+    # ------------------------------------------------------------------
+    # Model pricing table (USD per 1M tokens)
+    # Updated as of 2026-04-02. Add new models as they come online.
+    # ------------------------------------------------------------------
+    _MODEL_PRICING: dict[str, dict[str, float]] = {
+        # model_id → {"input": $/1M, "output": $/1M}
+        "minimax-m27":          {"input": 0.50, "output": 1.50},
+        "kimi-k2":              {"input": 0.60, "output": 0.60},
+        "qwen2.5-coder":        {"input": 0.00, "output": 0.00},  # local Ollama
+        "qwen2.5-coder:14b":    {"input": 0.00, "output": 0.00},  # local Ollama
+        "phi3":                 {"input": 0.00, "output": 0.00},  # local Ollama
+        "llama3.1":             {"input": 0.00, "output": 0.00},  # local Ollama
+        "deepseek-r1":          {"input": 0.00, "output": 0.00},  # local Ollama
+    }
+
+    def _estimate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """Estimate cost in USD based on model pricing. Returns 0.0 for unknown models."""
+        # Strip LiteLLM prefixes (e.g. "ollama/qwen2.5-coder:14b" → "qwen2.5-coder:14b")
+        bare_model = model.split("/")[-1] if "/" in model else model
+        pricing = self._MODEL_PRICING.get(bare_model)
+        if not pricing:
+            # Try partial match (e.g. "minimax-m27-01232" → "minimax-m27")
+            for key in self._MODEL_PRICING:
+                if key in bare_model or bare_model in key:
+                    pricing = self._MODEL_PRICING[key]
+                    break
+        if not pricing:
+            return 0.0
+        return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+
+    def _log_token_usage(self, response: Any, latency_ms: int) -> None:
+        """
+        Extract token counts from the API response and append to data/token_usage.jsonl.
+
+        LiteLLM surfaces usage as:
+          response.usage.input_tokens
+          response.usage.output_tokens
+        Some backends also include cache_read_input_tokens.
+        Thinking tokens are detected from thinking content blocks.
+
+        This is telemetry — it must NEVER crash the agent loop.
+        """
+        try:
+            usage = getattr(response, "usage", None)
+            if usage is None:
+                return
+
+            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+
+            # Thinking tokens: check for thinking blocks in the response content
+            thinking_tokens = 0
+            if hasattr(response, "content"):
+                for block in response.content:
+                    if getattr(block, "type", None) == "thinking":
+                        thinking_text = getattr(block, "thinking", "")
+                        # Approximate: 1 token ≈ 4 chars for thinking blocks
+                        thinking_tokens += len(thinking_text) // 4
+
+            model = self.manifest.model.preferred
+            estimated_cost = self._estimate_cost(model, input_tokens, output_tokens)
+
+            # Build the last user message summary (first 100 chars)
+            task_summary = ""
+            for msg in reversed(self._messages):
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        task_summary = content[:100]
+                    elif isinstance(content, list):
+                        # Tool results — summarize
+                        task_summary = f"[{len(content)} tool result(s)]"
+                    break
+
+            record = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session_id": self._session_id or "unknown",
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "thinking_tokens": thinking_tokens,
+                "latency_ms": latency_ms,
+                "estimated_cost_usd": round(estimated_cost, 6),
+                "task_summary": task_summary,
+            }
+
+            # Append to JSONL file
+            with open(self._token_log_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+
+            # Accumulate session-level stats
+            self._session_total_output_tokens += output_tokens
+            self._session_total_thinking_tokens += thinking_tokens
+            self._session_total_cost_usd += estimated_cost
+            self._session_api_calls += 1
+
+            logger.info(
+                "[%s] Tokens: in=%d out=%d think=%d cost=$%.4f latency=%dms",
+                self.manifest.mind_id, input_tokens, output_tokens,
+                thinking_tokens, estimated_cost, latency_ms,
+            )
+        except Exception:
+            pass  # telemetry never crashes the loop
+
+    def _log_session_turn(
+        self,
+        turn_number: int,
+        turn_type: str,
+        response: Any | None = None,
+        tools_used: list[str] | None = None,
+        duration_ms: int = 0,
+    ) -> None:
+        """
+        Append a structured turn record to data/sessions/{session_id}.jsonl.
+
+        This provides Claude-Code-style structured session logging — every turn
+        in every session gets a JSONL record for later analysis and replay.
+
+        This is telemetry — it must NEVER crash the agent loop.
+        """
+        try:
+            if not self._session_id:
+                return
+
+            tokens = {}
+            if response is not None:
+                usage = getattr(response, "usage", None)
+                if usage:
+                    tokens = {
+                        "input": int(getattr(usage, "input_tokens", 0) or 0),
+                        "output": int(getattr(usage, "output_tokens", 0) or 0),
+                        "cached": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+                    }
+
+            record = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session_id": self._session_id,
+                "turn": turn_number,
+                "type": turn_type,
+                "model": self.manifest.model.preferred,
+                "tokens": tokens,
+                "tools_used": tools_used or [],
+                "duration_ms": duration_ms,
+            }
+
+            session_log = self._session_log_dir / f"{self._session_id}.jsonl"
+            with open(session_log, "a") as f:
+                f.write(json.dumps(record) + "\n")
         except Exception:
             pass  # telemetry never crashes the loop
 
@@ -706,6 +904,30 @@ class Mind:
                 if total_calls > 0 else 0.0
             ),
         }
+
+    @property
+    def token_usage_stats(self) -> dict:
+        """Accumulated token usage statistics for this session."""
+        return {
+            "session_id": self._session_id or "unknown",
+            "api_calls": self._session_api_calls,
+            "total_input_tokens": self._session_total_input_tokens,
+            "total_output_tokens": self._session_total_output_tokens,
+            "total_thinking_tokens": self._session_total_thinking_tokens,
+            "estimated_cost_usd": round(self._session_total_cost_usd, 6),
+            "token_log_path": str(self._token_log_path),
+            "session_log_dir": str(self._session_log_dir),
+        }
+
+    @property
+    def token_log_path(self) -> Path:
+        """Path to the token usage JSONL log."""
+        return self._token_log_path
+
+    @property
+    def session_log_dir(self) -> Path:
+        """Path to the session logs directory."""
+        return self._session_log_dir
 
     def clear_history(self) -> None:
         """Clear conversation history (keeps session_id)."""

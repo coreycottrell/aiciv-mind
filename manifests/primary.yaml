@@ -129,6 +129,12 @@ tools:
     enabled: true
   - name: "handoff_context"
     enabled: true
+  - name: "resource_usage"
+    enabled: true
+  - name: "token_stats"
+    enabled: true
+  - name: "session_stats"
+    enabled: true
 
 compaction:
   enabled: true

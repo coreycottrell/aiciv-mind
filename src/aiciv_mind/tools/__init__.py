@@ -238,6 +238,13 @@ class ToolRegistry:
             mind_root=str(Path(__file__).parent.parent.parent.parent) if memory_store else None,
         )
 
+        # resource tracking tools — always registered
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+        register_resource_tools(
+            registry,
+            mind_root=str(Path(__file__).parent.parent.parent.parent),
+        )
+
         if keypair_path is not None and calendar_id is not None:
             from aiciv_mind.tools.calendar_tools import register_calendar_tools
             register_calendar_tools(registry, keypair_path, calendar_id)
