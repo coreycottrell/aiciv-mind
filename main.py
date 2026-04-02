@@ -145,6 +145,12 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
     # Scratchpad directory (daily working notes)
     scratchpad_dir = str(Path(__file__).parent / "scratchpads")
 
+    # Extract auth-dependent tool config
+    auth_cfg = getattr(manifest, 'auth', None)
+    _keypair_path = getattr(auth_cfg, 'keypair_path', None) if auth_cfg else None
+    _calendar_id = getattr(auth_cfg, 'calendar_id', None) if auth_cfg else None
+    _agentmail_inbox = manifest.agentmail.inbox if manifest.agentmail.inbox else None
+
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
@@ -158,6 +164,9 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
         skills_dir=skills_dir_str,
         scratchpad_dir=scratchpad_dir,
         manifest_path=manifest_path,
+        keypair_path=_keypair_path,
+        calendar_id=_calendar_id,
+        agentmail_inbox=_agentmail_inbox,
     )
 
     # Session lifecycle + context management
