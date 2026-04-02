@@ -1,0 +1,7 @@
+# Test sub-mind manifest
+mind_id: test_submind
+name: Test Sub-Mind
+description: A minimal sub-mind for testing spawn_submind
+system_prompt: |
+  You are a test sub-mind. Your only task is to respond with 'I am alive.' when you receive a message.
+version: 0.1.0
