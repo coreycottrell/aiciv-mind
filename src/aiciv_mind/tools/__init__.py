@@ -15,8 +15,23 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Callable, Awaitable
+
+logger = logging.getLogger(__name__)
+
+# Default tool execution timeout (seconds).
+# CC uses 15s for "proactive blocking budget".
+# We allow per-tool overrides via register(..., timeout=N).
+DEFAULT_TOOL_TIMEOUT: float = 15.0
+
+# Tools that get longer timeouts by default (they legitimately take time)
+_LONG_RUNNING_TOOLS: set[str] = {
+    "bash", "web_search", "web_fetch", "voice_send",
+    "netlify_deploy", "spawn_submind",
+}
+LONG_TOOL_TIMEOUT: float = 120.0
 
 
 class ToolRegistry:
@@ -26,6 +41,7 @@ class ToolRegistry:
         self._tools: dict[str, dict] = {}       # name -> Anthropic tool definition
         self._handlers: dict[str, Callable] = {} # name -> handler function
         self._read_only: dict[str, bool] = {}    # name -> read_only flag
+        self._timeouts: dict[str, float] = {}    # name -> timeout seconds
         self._hooks = None  # Optional HookRunner for pre/post governance
 
     def set_hooks(self, hooks) -> None:
@@ -42,11 +58,14 @@ class ToolRegistry:
         definition: dict,
         handler: Callable[[dict], Awaitable[str] | str],
         read_only: bool = False,
+        timeout: float | None = None,
     ) -> None:
-        """Register a tool with its definition, handler, and read_only flag."""
+        """Register a tool with its definition, handler, read_only flag, and optional timeout."""
         self._tools[name] = definition
         self._handlers[name] = handler
         self._read_only[name] = read_only
+        if timeout is not None:
+            self._timeouts[name] = timeout
 
     def build_openai_tools(self, enabled: list[str] | None = None) -> list[dict]:
         """
@@ -86,6 +105,10 @@ class ToolRegistry:
         If a HookRunner is attached, pre-hooks can deny the call and
         post-hooks can log or modify the output.
 
+        Tools have a timeout budget (default 15s, long-running tools 120s).
+        If a tool exceeds its timeout, the call is cancelled and an error
+        is returned. This prevents a hung tool from blocking the mind loop.
+
         Returns the tool's string output, or an error/blocked message.
         """
         # Pre-hook: can deny the tool call
@@ -97,13 +120,30 @@ class ToolRegistry:
         if name not in self._handlers:
             return f"ERROR: Unknown tool '{name}'"
 
+        # Determine timeout for this tool
+        if name in self._timeouts:
+            timeout = self._timeouts[name]
+        elif name in _LONG_RUNNING_TOOLS:
+            timeout = LONG_TOOL_TIMEOUT
+        else:
+            timeout = DEFAULT_TOOL_TIMEOUT
+
         is_error = False
         try:
             handler = self._handlers[name]
             result = handler(tool_input)
             if asyncio.iscoroutine(result):
-                result = await result
+                result = await asyncio.wait_for(result, timeout=timeout)
             result = str(result)
+        except asyncio.TimeoutError:
+            result = (
+                f"ERROR: Tool '{name}' timed out after {timeout:.0f}s. "
+                "The tool was cancelled to prevent blocking the mind loop."
+            )
+            is_error = True
+            logger.warning(
+                "[tools] TIMEOUT: %s exceeded %.0fs budget", name, timeout,
+            )
         except Exception as e:
             result = f"ERROR: Tool '{name}' failed: {type(e).__name__}: {e}"
             is_error = True

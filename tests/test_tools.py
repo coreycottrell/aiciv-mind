@@ -331,3 +331,180 @@ def test_tool_registry_definitions_have_required_keys():
         schema = tool_def["input_schema"]
         assert schema.get("type") == "object"
         assert "properties" in schema
+
+
+# ---------------------------------------------------------------------------
+# Proactive blocking budget (tool timeout) tests
+# ---------------------------------------------------------------------------
+
+
+from aiciv_mind.tools import DEFAULT_TOOL_TIMEOUT, LONG_TOOL_TIMEOUT, _LONG_RUNNING_TOOLS
+
+
+def test_timeout_constants():
+    """Verify timeout constants have the expected CC-parity values."""
+    assert DEFAULT_TOOL_TIMEOUT == 15.0
+    assert LONG_TOOL_TIMEOUT == 120.0
+    assert "bash" in _LONG_RUNNING_TOOLS
+    assert "web_search" in _LONG_RUNNING_TOOLS
+    assert "web_fetch" in _LONG_RUNNING_TOOLS
+
+
+def test_register_custom_timeout():
+    """register() with timeout= stores the custom timeout."""
+    registry = ToolRegistry()
+    registry.register(
+        "fast_tool",
+        {"name": "fast_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=lambda inp: "ok",
+        timeout=5.0,
+    )
+    # The tool should have its custom timeout stored
+    assert registry._timeouts["fast_tool"] == 5.0
+
+
+def test_register_without_timeout():
+    """register() without timeout= does not add to _timeouts dict."""
+    registry = ToolRegistry()
+    registry.register(
+        "normal_tool",
+        {"name": "normal_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=lambda inp: "ok",
+    )
+    assert "normal_tool" not in registry._timeouts
+
+
+@pytest.mark.asyncio
+async def test_execute_sync_handler_no_timeout():
+    """Synchronous tool handlers return immediately (no asyncio.wait_for)."""
+    registry = ToolRegistry()
+    registry.register(
+        "sync_tool",
+        {"name": "sync_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=lambda inp: "sync_result",
+    )
+    result = await registry.execute("sync_tool", {})
+    assert result == "sync_result"
+
+
+@pytest.mark.asyncio
+async def test_execute_async_handler_within_timeout():
+    """Async tool that completes within timeout returns normally."""
+    async def fast_handler(inp):
+        await asyncio.sleep(0.01)
+        return "fast_done"
+
+    registry = ToolRegistry()
+    registry.register(
+        "fast_async",
+        {"name": "fast_async", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=fast_handler,
+        timeout=5.0,
+    )
+    result = await registry.execute("fast_async", {})
+    assert result == "fast_done"
+
+
+@pytest.mark.asyncio
+async def test_execute_async_handler_exceeds_timeout():
+    """Async tool that exceeds its timeout returns a TIMEOUT error."""
+    async def slow_handler(inp):
+        await asyncio.sleep(10)  # Way over the 0.1s timeout
+        return "never_reached"
+
+    registry = ToolRegistry()
+    registry.register(
+        "slow_tool",
+        {"name": "slow_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=slow_handler,
+        timeout=0.1,  # Very short timeout for testing
+    )
+    result = await registry.execute("slow_tool", {})
+    assert "timed out" in result
+    assert "slow_tool" in result
+    assert result.startswith("ERROR:")
+
+
+@pytest.mark.asyncio
+async def test_execute_handler_exception():
+    """Tool handler that raises returns an error string."""
+    def bad_handler(inp):
+        raise ValueError("something broke")
+
+    registry = ToolRegistry()
+    registry.register(
+        "broken_tool",
+        {"name": "broken_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=bad_handler,
+    )
+    result = await registry.execute("broken_tool", {})
+    assert result.startswith("ERROR:")
+    assert "ValueError" in result
+    assert "something broke" in result
+
+
+@pytest.mark.asyncio
+async def test_timeout_cascade_custom_overrides_long_running():
+    """Custom timeout takes precedence over long-running default."""
+    async def handler(inp):
+        await asyncio.sleep(0.01)
+        return "ok"
+
+    registry = ToolRegistry()
+    # Register a tool with the same name as a long-running tool
+    registry.register(
+        "bash",  # bash is in _LONG_RUNNING_TOOLS (120s default)
+        {"name": "bash", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=handler,
+        timeout=3.0,  # Custom override: 3s instead of 120s
+    )
+    # Custom timeout should be used, not the long-running default
+    assert registry._timeouts["bash"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_timeout_post_hook_fires_on_timeout():
+    """Post-hook should fire with is_error=True when tool times out."""
+    from aiciv_mind.tools.hooks import HookRunner
+
+    async def slow_handler(inp):
+        await asyncio.sleep(10)
+        return "never"
+
+    hooks = HookRunner(log_all=True)
+    registry = ToolRegistry()
+    registry.set_hooks(hooks)
+    registry.register(
+        "timeout_tool",
+        {"name": "timeout_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=slow_handler,
+        timeout=0.1,
+    )
+    result = await registry.execute("timeout_tool", {})
+    assert "timed out" in result
+    # Post-hook should have logged the error
+    assert any(
+        r.tool_name == "timeout_tool" and r.is_error
+        for r in hooks.call_log
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocked_tool_skips_timeout():
+    """Blocked tools should be denied before any timeout logic runs."""
+    from aiciv_mind.tools.hooks import HookRunner
+
+    async def handler(inp):
+        await asyncio.sleep(10)
+        return "never"
+
+    hooks = HookRunner(blocked_tools=["forbidden"])
+    registry = ToolRegistry()
+    registry.set_hooks(hooks)
+    registry.register(
+        "forbidden",
+        {"name": "forbidden", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+        handler=handler,
+    )
+    result = await registry.execute("forbidden", {})
+    assert result.startswith("BLOCKED:")
