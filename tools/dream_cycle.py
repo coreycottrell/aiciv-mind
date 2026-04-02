@@ -224,8 +224,24 @@ Ready to work. Memory updated.
 
 This is how you compound. Session by session. Dream by dream."""
 
+    # Consolidation lock — prevent concurrent dream cycles
+    from aiciv_mind.consolidation_lock import ConsolidationLock, ConsolidationLockHeld
+    lock_path = Path(__file__).parent.parent / "data" / "dream_cycle.lock"
+    lock = ConsolidationLock(lock_path, operation="dream-quick" if quick else "dream-full")
+
+    if not lock.acquire():
+        holder = lock.holder_info()
+        LOG.warning(
+            "Another dream cycle is already running (PID %s) — skipping this run",
+            holder.get("pid") if holder else "unknown",
+        )
+        return
+
     LOG.info("Starting dream cycle (%s)...", "quick" if quick else "full")
-    result = await mind.run_task(prompt)
+    try:
+        result = await mind.run_task(prompt)
+    finally:
+        lock.release()
     LOG.info("Dream complete.")
     print(result)
 

@@ -1,6 +1,6 @@
 # Claude Code vs aiciv-mind: Feature Parity Checklist
 
-*Updated 2026-04-02 — post-audit (Root's shipping sprint)*
+*Updated 2026-04-02 — post-marathon (Root's shipping sprint + lifecycle/timeout builds)*
 *Source: CC-ANALYSIS-CORE.md, CC-ANALYSIS-TEAMS.md, CC-PUBLIC-ANALYSIS.md, CC-INHERIT-LIST.md, CLAWD-CODE-MINING.md, COMPARATIVE-ANALYSIS.md (2,880 lines total)*
 
 **Question: Can aiciv-mind do everything Claude Code does, or better?**
@@ -116,9 +116,9 @@
 | PreToolUse hook | Shell commands, can block/modify | `hooks.py:69-98` — `pre_tool_use()` checks blocked_tools, returns HookResult to deny | MATCH | |
 | PostToolUse hook | Shell commands, can log/trigger | `hooks.py:100-121` — `post_tool_use()` logs calls, can deny/modify output | MATCH | |
 | PostToolUseFailure | Separate event from PostToolUse | `is_error` boolean on `post_tool_use()`, not a separate hook event | PARTIAL | |
-| Stop hook | Cleanup/notifications on response end | NOT implemented | GAP | P2 |
+| Stop hook | Cleanup/notifications on response end | `hooks.py:181-222` — `on_stop()` with callback registration, audit logging, error isolation | MATCH | Shipped 2026-04-02 |
 | SessionStart hook | Context loading, state sync | Partial — manifest loading at start | PARTIAL | |
-| SubagentStop hook | Collect results from spawned agents | NOT implemented | GAP | Needed for multi-mind |
+| SubagentStop hook | Collect results from spawned agents | `hooks.py:224-265` — `on_submind_stop()` with error detection, callback registration | MATCH | Shipped 2026-04-02 |
 | Two execution modes | Shell commands (fast) + LLM-evaluated | NOT implemented | GAP | P2 (L-5) |
 | PermissionRequest hook | Permission bubbling from sub-agents | NOT implemented | GAP | I-9 |
 
@@ -157,10 +157,10 @@
 | Feature | CC | aiciv-mind | Status | Notes |
 |---------|-----|-----------|--------|-------|
 | Always-on daemon (KAIROS) | Built but unreleased | groupchat_daemon.py RUNNING | MATCH | Ours is production; theirs is gated |
-| Proactive blocking budget | 15-second limit | No limit currently | GAP | Should add for daemon mode |
+| Proactive blocking budget | 15-second limit | `tools/__init__.py` — `DEFAULT_TOOL_TIMEOUT=15s`, `LONG_TOOL_TIMEOUT=120s`, per-tool overrides via `register(timeout=N)`, `asyncio.wait_for()` enforcement | MATCH | Shipped 2026-04-02 |
 | Append-only daily logs | KAIROS pattern | Scratchpad pattern | MATCH | Same concept |
 | Dream consolidation | autoDream 4-phase | dream_cycle.py (294 lines) | MATCH | Both have Orient→Gather→Consolidate→Prune |
-| Consolidation lock | mtime-based, rollback on kill | NOT implemented | GAP | Add when shipping dream_cycle to production |
+| Consolidation lock | mtime-based, rollback on kill | `consolidation_lock.py` — PID-based lock file, stale-lock detection (dead PID = steal), context manager, wired into dream_cycle.py | MATCH | Shipped 2026-04-02 |
 | Cron scheduling | Workflow scheduling built in | Via AgentCal + BOOP system | MATCH | Different mechanism, same capability |
 | Background task support | run_in_background flag | tmux-based process isolation | BETTER | OS-level isolation |
 
@@ -200,32 +200,34 @@
 | Memory | 7 | 1 | 2 | 1 | 0 | 0 |
 | Multi-Agent | 5 | 5 | 2 | 0 | 0 | 0 |
 | Tools | 5 | 3 | 2 | 0 | 0 | 1 |
-| Hooks | 0 | 2 | 2 | 4 | 0 | 0 |
+| Hooks | 0 | 4 | 2 | 2 | 0 | 0 |
 | Skills | 0 | 3 | 1 | 2 | 0 | 0 |
 | Identity | 5 | 0 | 1 | 0 | 0 | 0 |
-| Daemon | 1 | 3 | 0 | 2 | 0 | 0 |
+| Daemon | 1 | 5 | 0 | 0 | 0 | 0 |
 | UI/Interface | 3 | 1 | 0 | 1 | 0 | 1 |
 | Engineering | 5 | 0 | 0 | 0 | 0 | 0 |
-| **TOTAL** | **36** | **28** | **12** | **10** | **0** | **3** |
+| **TOTAL** | **36** | **32** | **12** | **6** | **0** | **3** |
 
 ---
 
 ## VERDICT
 
 **aiciv-mind BEATS Claude Code in 36 out of 89 features.**
-**aiciv-mind MATCHES Claude Code in 28 features.**
-**aiciv-mind has only 10 GAPS remaining (down from 29).**
+**aiciv-mind MATCHES Claude Code in 31 features.**
+**aiciv-mind has only 6 GAPS remaining (down from 29).**
 
-Root's shipping sprint closed 13 gaps fully and moved 5 more to PARTIAL. The biggest wins:
+Root's shipping sprint + marathon session closed 17 gaps fully and moved 5 more to PARTIAL. The biggest wins:
 
 1. **Context compaction** (3 gaps → 0) — `compact_history()`, circuit breaker, preserve-recent-N all shipped
 2. **Tools explosion** (12 → 65 tools) — surpasses CC's 40+ built-in tools
-3. **Hooks foundation** (PreToolUse + PostToolUse shipped) — governance layer exists
+3. **Hooks lifecycle complete** (4 gaps → 2) — PreToolUse, PostToolUse, Stop, SubagentStop all shipped
 4. **Multi-agent protocol** (MindContext, MindCompletionEvent, 5 execution modes) — structured coordination landed
 5. **Security** (env scrubbing, tool normalization) — P0 security gaps closed
+6. **Daemon governance** — proactive blocking budget (15s/120s tool timeouts) + consolidation lock shipped
+7. **Daemon section fully closed** — 0 gaps remaining in daemon/persistent operation
 
-The remaining 10 gaps cluster in two areas:
-1. **Hooks/Lifecycle** (4 gaps) — Stop, SubagentStop, Two execution modes, PermissionRequest
+The remaining 6 gaps cluster in two areas:
+1. **Hooks** (2 gaps) — Two execution modes, PermissionRequest
 2. **Skills** (3 gaps) — Progressive disclosure, fork context, skill-defined hooks
 
 The strengths remain decisive:
@@ -235,28 +237,24 @@ The strengths remain decisive:
 4. **Multi-agent foundation** (5 BETTER) — real IPC, real isolation, real persistence
 5. **Tools** (5 BETTER) — now also leads in quantity, not just quality
 
-**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 28 MATCH, and 12 PARTIAL, we are operationally superior in 76 out of 89 features. The 10 remaining gaps are all P2/P3 and none block production use. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
+**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 32 MATCH, and 12 PARTIAL, we are operationally superior in 80 out of 89 features. The 6 remaining gaps are all P2 and none block production use. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
 
 ---
 
 ## PRIORITY GAP CLOSURE PLAN
 
-*13 gaps closed since original audit. 10 remain.*
+*17 gaps closed since original audit. 6 remain.*
 
 | Priority | Gap | Effort | Impact |
 |----------|-----|--------|--------|
-| P2 | Stop hook (cleanup/notifications on response end) | 2h | Daemon lifecycle |
-| P2 | SubagentStop hook (collect sub-mind results) | 2h | Multi-mind coordination |
 | P2 | Two execution modes for hooks (shell + LLM) | 3h | Hook flexibility |
 | P2 | PermissionRequest hook (permission bubbling) | 4h | Safe multi-mind operations |
 | P2 | Progressive skill disclosure (I-6) | 2h | Reduced context noise |
 | P2 | Skill fork context mode (I-7) | 3h | Isolated skill execution |
 | P2 | Skill-defined hooks | 2h | Requires hooks system maturity |
 | P2 | Browser automation (Playwright) | 4h | Web interaction capability |
-| P3 | Proactive blocking budget (15s) | 2h | Daemon governance |
-| P3 | Consolidation lock for Dream Mode | 1h | Safe concurrent operations |
 
-**Total estimated effort: ~25 hours of focused implementation.**
+**Total estimated effort: ~18 hours of focused implementation.**
 **Down from ~33 hours — and none of the remaining gaps are P0 or P1.**
 
 ---
