@@ -130,7 +130,7 @@
 |---------|-----|-----------|--------|-------|
 | Skill loading | On-demand via `/skill-name` | `load_skill` tool | MATCH | |
 | Skill format | YAML frontmatter + markdown | YAML frontmatter + markdown | MATCH | |
-| Progressive disclosure (paths) | Skills hidden until matching files touched | NOT implemented | GAP | I-6 |
+| Progressive disclosure (paths) | Skills hidden until matching files touched | `skill_discovery.py` — `SkillDiscovery` engine with glob/regex pattern matching, per-session dedup, SKILL.md trigger_paths frontmatter, skills_dir auto-scan | MATCH | Shipped 2026-04-02 |
 | Fork context mode | Isolated execution for complex skills | NOT implemented | GAP | I-7 |
 | Skill-defined hooks | Skills register their own hooks | `hooks.py:install_skill_hooks()/uninstall_skill_hooks()` — skills declare hooks in SKILL.md frontmatter, auto-installed on load, clean uninstall with base-config preservation | MATCH | Shipped 2026-04-02 |
 | Skill count | Unknown (bundled + user) | 9 skills: agentmail, blog-publishing, git-ops, hub-engagement, intel-sweep, memory-hygiene, self-diagnosis, session-hygiene, status-boop + dynamic management tools | MATCH | |
@@ -201,12 +201,12 @@
 | Multi-Agent | 5 | 5 | 2 | 0 | 0 | 0 |
 | Tools | 5 | 3 | 2 | 0 | 0 | 1 |
 | Hooks | 0 | 4 | 2 | 2 | 0 | 0 |
-| Skills | 0 | 4 | 1 | 1 | 0 | 0 |
+| Skills | 0 | 5 | 1 | 0 | 0 | 0 |
 | Identity | 5 | 0 | 1 | 0 | 0 | 0 |
 | Daemon | 1 | 5 | 0 | 0 | 0 | 0 |
 | UI/Interface | 3 | 1 | 0 | 1 | 0 | 1 |
 | Engineering | 5 | 0 | 0 | 0 | 0 | 0 |
-| **TOTAL** | **36** | **33** | **12** | **5** | **0** | **3** |
+| **TOTAL** | **36** | **34** | **12** | **4** | **0** | **3** |
 
 ---
 
@@ -214,7 +214,7 @@
 
 **aiciv-mind BEATS Claude Code in 36 out of 89 features.**
 **aiciv-mind MATCHES Claude Code in 31 features.**
-**aiciv-mind has only 5 GAPS remaining (down from 29).**
+**aiciv-mind has only 4 GAPS remaining (down from 29).**
 
 Root's shipping sprint + marathon session closed 17 gaps fully and moved 5 more to PARTIAL. The biggest wins:
 
@@ -226,9 +226,9 @@ Root's shipping sprint + marathon session closed 17 gaps fully and moved 5 more 
 6. **Daemon governance** — proactive blocking budget (15s/120s tool timeouts) + consolidation lock shipped
 7. **Daemon section fully closed** — 0 gaps remaining in daemon/persistent operation
 
-The remaining 5 gaps cluster in two areas:
+The remaining 4 gaps cluster in two areas:
 1. **Hooks** (2 gaps) — Two execution modes, PermissionRequest
-2. **Skills** (2 gaps) — Progressive disclosure, fork context
+2. **Skills** (1 gap) — Fork context mode
 
 The strengths remain decisive:
 1. **Memory architecture** (7 BETTER) — decisive advantage
@@ -237,23 +237,22 @@ The strengths remain decisive:
 4. **Multi-agent foundation** (5 BETTER) — real IPC, real isolation, real persistence
 5. **Tools** (5 BETTER) — now also leads in quantity, not just quality
 
-**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 33 MATCH, and 12 PARTIAL, we are operationally superior in 81 out of 89 features. The 5 remaining gaps are all P2 and none block production use. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
+**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 34 MATCH, and 12 PARTIAL, we are operationally superior in 82 out of 89 features. The 4 remaining gaps are all P2 and none block production use. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
 
 ---
 
 ## PRIORITY GAP CLOSURE PLAN
 
-*18 gaps closed since original audit. 5 remain.*
+*19 gaps closed since original audit. 4 remain.*
 
 | Priority | Gap | Effort | Impact |
 |----------|-----|--------|--------|
 | P2 | Two execution modes for hooks (shell + LLM) | 3h | Hook flexibility |
 | P2 | PermissionRequest hook (permission bubbling) | 4h | Safe multi-mind operations |
-| P2 | Progressive skill disclosure (I-6) | 2h | Reduced context noise |
 | P2 | Skill fork context mode (I-7) | 3h | Isolated skill execution |
 | P2 | Browser automation (Playwright) | 4h | Web interaction capability |
 
-**Total estimated effort: ~16 hours of focused implementation.**
+**Total estimated effort: ~14 hours of focused implementation.**
 **Down from ~33 hours — and none of the remaining gaps are P0 or P1.**
 
 ---
