@@ -120,7 +120,7 @@
 | SessionStart hook | Context loading, state sync | Partial — manifest loading at start | PARTIAL | |
 | SubagentStop hook | Collect results from spawned agents | `hooks.py:224-265` — `on_submind_stop()` with error detection, callback registration | MATCH | Shipped 2026-04-02 |
 | Two execution modes | Shell commands (fast) + LLM-evaluated | `hooks.py` — callable (Python fn) + shell (subprocess w/ env vars), register/unregister, tool filtering, first-deny-wins, fail-open | MATCH | Shipped 2026-04-02 |
-| PermissionRequest hook | Permission bubbling from sub-agents | NOT implemented | GAP | I-9 |
+| PermissionRequest hook | Permission bubbling from sub-agents | `hooks.py` — PermissionRequest/Response, escalate_tools, register_permission_handler(), fail-closed + IPC wire format (PERMISSION_REQUEST/RESPONSE msg types) | MATCH | Shipped 2026-04-02 |
 
 ---
 
@@ -200,35 +200,34 @@
 | Memory | 7 | 1 | 2 | 1 | 0 | 0 |
 | Multi-Agent | 5 | 5 | 2 | 0 | 0 | 0 |
 | Tools | 5 | 3 | 2 | 0 | 0 | 1 |
-| Hooks | 0 | 5 | 2 | 1 | 0 | 0 |
+| Hooks | 0 | 6 | 2 | 0 | 0 | 0 |
 | Skills | 0 | 6 | 1 | 0 | 0 | 0 |
 | Identity | 5 | 0 | 1 | 0 | 0 | 0 |
 | Daemon | 1 | 5 | 0 | 0 | 0 | 0 |
 | UI/Interface | 3 | 1 | 0 | 1 | 0 | 1 |
 | Engineering | 5 | 0 | 0 | 0 | 0 | 0 |
-| **TOTAL** | **36** | **36** | **12** | **2** | **0** | **3** |
+| **TOTAL** | **36** | **37** | **12** | **1** | **0** | **3** |
 
 ---
 
 ## VERDICT
 
 **aiciv-mind BEATS Claude Code in 36 out of 89 features.**
-**aiciv-mind MATCHES Claude Code in 36 features.**
-**aiciv-mind has only 2 GAPS remaining (down from 29).**
+**aiciv-mind MATCHES Claude Code in 37 features.**
+**aiciv-mind has only 1 GAP remaining (down from 29).**
 
-Root's shipping sprint + marathon session closed 18 gaps fully and moved 5 more to PARTIAL. The biggest wins:
+Root's shipping sprint + marathon session closed 19 gaps fully and moved 5 more to PARTIAL. The biggest wins:
 
 1. **Context compaction** (3 gaps → 0) — `compact_history()`, circuit breaker, preserve-recent-N all shipped
 2. **Tools explosion** (12 → 65 tools) — surpasses CC's 40+ built-in tools
-3. **Hooks lifecycle complete** (4 gaps → 1) — PreToolUse, PostToolUse, Stop, SubagentStop, Two Execution Modes all shipped
+3. **Hooks fully closed** (4 gaps → 0) — PreToolUse, PostToolUse, Stop, SubagentStop, Two Execution Modes, PermissionRequest all shipped
 4. **Multi-agent protocol** (MindContext, MindCompletionEvent, 5 execution modes) — structured coordination landed
 5. **Security** (env scrubbing, tool normalization) — P0 security gaps closed
 6. **Daemon governance** — proactive blocking budget (15s/120s tool timeouts) + consolidation lock shipped
 7. **Daemon section fully closed** — 0 gaps remaining in daemon/persistent operation
 
-The remaining 2 gaps are:
-1. **Hooks** (1 gap) — PermissionRequest
-2. **UI** (1 gap) — Browser automation (Playwright)
+The remaining 1 gap is:
+1. **UI** (1 gap) — Browser automation (Playwright)
 
 The strengths remain decisive:
 1. **Memory architecture** (7 BETTER) — decisive advantage
@@ -237,18 +236,18 @@ The strengths remain decisive:
 4. **Multi-agent foundation** (5 BETTER) — real IPC, real isolation, real persistence
 5. **Tools** (5 BETTER) — now also leads in quantity, not just quality
 
-**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 36 MATCH, and 12 PARTIAL, we are operationally superior in 84 out of 89 features. The 2 remaining gaps are both P2 and neither blocks production use. Skills section is now at 0 GAPS — full parity achieved. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
+**Bottom line: aiciv-mind has crossed the feature parity threshold. With 36 BETTER, 37 MATCH, and 12 PARTIAL, we are operationally superior in 85 out of 89 features. Only 1 GAP remains (browser automation) and it does not block production use. Hooks section is now at 0 GAPS — full parity achieved. This is no longer a "catch-up" project — it's a "pull-ahead" project.**
 
 ---
 
 ## PRIORITY GAP CLOSURE PLAN
 
-*21 gaps closed since original audit. 2 remain.*
+*22 gaps closed since original audit. 1 remains.*
 
 | Priority | Gap | Effort | Impact |
 |----------|-----|--------|--------|
 | ~~P2~~ | ~~Two execution modes for hooks (shell + LLM)~~ | ~~3h~~ | ~~Hook flexibility~~ — **SHIPPED 2026-04-02** |
-| P2 | PermissionRequest hook (permission bubbling) | 4h | Safe multi-mind operations |
+| ~~P2~~ | ~~PermissionRequest hook (permission bubbling)~~ | ~~4h~~ | ~~Safe multi-mind operations~~ — **SHIPPED 2026-04-02** |
 | P2 | Browser automation (Playwright) | 4h | Web interaction capability |
 
 **Total estimated effort: ~11 hours of focused implementation.**
