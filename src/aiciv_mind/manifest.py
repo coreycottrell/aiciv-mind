@@ -51,6 +51,15 @@ class MemoryConfig(BaseModel):
     max_context_memories: int = 10
 
 
+class PlanningConfig(BaseModel):
+    """Planning gate configuration — Principle 3: Go Slow to Go Fast."""
+
+    enabled: bool = True
+    # Minimum complexity level to inject planning context into the prompt.
+    # Tasks classified below this level get no planning text.
+    min_gate_level: str = "simple"  # trivial|simple|medium|complex|variable
+
+
 class CompactionConfig(BaseModel):
     """Context compaction configuration — preserves recent messages, summarizes older ones."""
 
@@ -103,6 +112,7 @@ class MindManifest(BaseModel):
     auth: AuthConfig
     agentmail: AgentMailConfig = AgentMailConfig()
     memory: MemoryConfig
+    planning: PlanningConfig = PlanningConfig()
     compaction: CompactionConfig = CompactionConfig()
     hooks: HooksConfig = HooksConfig()
     sub_minds: list[SubMindRef] = []

@@ -27,6 +27,7 @@ import anthropic
 from aiciv_mind.context import mind_context
 from aiciv_mind.manifest import MindManifest
 from aiciv_mind.memory import MemoryStore
+from aiciv_mind.planning import PlanningGate, TaskComplexity
 from aiciv_mind.tools import ToolRegistry
 from aiciv_mind.session_store import SessionStore
 from aiciv_mind.context_manager import ContextManager
@@ -74,6 +75,13 @@ class Mind:
         self._context_manager = context_manager
         # Boot context injected once at startup (identity + handoff)
         self._boot_context_str = boot_context_str
+
+        # Planning gate (Principle 3: Go Slow to Go Fast)
+        self._planning_gate = PlanningGate(
+            memory_store=memory,
+            agent_id=manifest.mind_id,
+            enabled=manifest.planning.enabled,
+        )
 
         # Compaction state (preserve-recent-N pattern)
         self._compacted_summary: str = ""
@@ -125,10 +133,26 @@ class Mind:
 
     async def _run_task_body(self, task: str, inject_memories: bool) -> str:
         """Task execution body — always runs inside a mind_context scope."""
+
+        # ── Planning Gate (P3) ─────────────────────────────────────────
+        # Fires BEFORE execution.  Classifies task complexity, searches
+        # memory for prior similar tasks, and builds planning context
+        # proportional to complexity.
+        planning_result = self._planning_gate.run(task)
+        planning_context = ""
+        if planning_result.plan:
+            min_level = self.manifest.planning.min_gate_level
+            try:
+                min_complexity = TaskComplexity(min_level)
+            except ValueError:
+                min_complexity = TaskComplexity.SIMPLE
+            if planning_result.complexity.gate_depth >= min_complexity.gate_depth:
+                planning_context = planning_result.plan
+
         # Build system prompt in cache-optimal order:
         #   STATIC  (base prompt — identity, principles) ← ALWAYS first → always cached
         #   STABLE  (boot context — handoff, pinned)     ← stable across turns → cached
-        #   SEMI-STABLE (search results)                 ← changes with query → tail only
+        #   SEMI-STABLE (planning + search results)      ← changes with query → tail only
         #
         # Rule: never put dynamic content before static content.
         # LiteLLM/OpenRouter caches the stable prefix; a flip in ordering breaks the cache.
@@ -139,6 +163,10 @@ class Mind:
             system_prompt = base_prompt + "\n\n" + self._boot_context_str
         else:
             system_prompt = base_prompt
+
+        # Planning context (SEMI-STABLE — changes per task)
+        if planning_context:
+            system_prompt = system_prompt + "\n\n" + planning_context
 
         # SEMI-STABLE: per-turn search results appended last
         if inject_memories and self.manifest.memory.auto_search_before_task:
