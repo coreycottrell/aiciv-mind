@@ -25,6 +25,7 @@ from typing import Any
 import anthropic
 
 from aiciv_mind.context import mind_context
+from aiciv_mind.learning import SessionLearner, TaskOutcome
 from aiciv_mind.manifest import MindManifest
 from aiciv_mind.memory import MemoryStore
 from aiciv_mind.planning import PlanningGate, TaskComplexity
@@ -89,6 +90,11 @@ class Mind:
             memory_store=memory,
             agent_id=manifest.mind_id,
             enabled=manifest.verification.enabled,
+        )
+
+        # Session learner (Principle 7: Self-Improving Loop)
+        self._session_learner = SessionLearner(
+            agent_id=manifest.mind_id,
         )
 
         # Compaction state (preserve-recent-N pattern)
@@ -497,7 +503,58 @@ class Mind:
             except Exception:
                 pass  # Loop 1 must NEVER crash the task return
 
+        # ── Session Learner (P7 Loop 2 accumulator) ───────────────────
+        # Feed TaskOutcome to the session learner so it can produce
+        # cross-task insights at session end.
+        try:
+            task_elapsed = time.monotonic() - task_start_time
+            outcome = TaskOutcome(
+                task=task[:200],
+                result=final_text[:300] if final_text else "",
+                tools_used=sorted(tools_used),
+                tool_errors=tool_errors[:5],
+                tool_call_count=tool_call_count,
+                elapsed_s=round(task_elapsed, 2),
+                planned_complexity=planning_result.complexity.value,
+                memories_consulted=planning_result.memories_consulted,
+            )
+            self._session_learner.record(outcome)
+        except Exception:
+            pass  # Learner must NEVER crash the task return
+
         return final_text
+
+    def session_wrapup(self) -> dict[str, Any]:
+        """
+        Session wrapup — triggers Loop 2 learning.
+
+        Call at session end to:
+        1. Produce session-level summary (cross-task patterns, insights)
+        2. Write session learning to memory
+        3. Return summary for logging/handoff
+
+        Returns the session summary as a dict.
+        """
+        summary = self._session_learner.summarize()
+        mem_id = self._session_learner.write_session_learning(self.memory)
+
+        result = summary.to_dict()
+        result["learning_memory_id"] = mem_id
+
+        # Also include verification stats from P9
+        result["verification_session_stats"] = self._completion_protocol.get_session_stats()
+
+        logger.info(
+            "[%s] Session wrapup: %d tasks, %.0f%% success, %d insights, "
+            "learning_id=%s",
+            self.manifest.mind_id,
+            summary.task_count,
+            summary.success_rate * 100,
+            len(summary.insights),
+            mem_id,
+        )
+
+        return result
 
     async def _call_model(self, system_prompt: str, tools_list: list[dict]) -> Any:
         """Single API call with current message history."""
