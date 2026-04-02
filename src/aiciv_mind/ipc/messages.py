@@ -26,6 +26,8 @@ class MsgType:
     SHUTDOWN = "shutdown"
     SHUTDOWN_ACK = "shutdown_ack"
     LOG = "log"
+    PERMISSION_REQUEST = "permission_request"
+    PERMISSION_RESPONSE = "permission_response"
 
 
 @dataclass
@@ -213,6 +215,60 @@ class MindMessage:
             sender=sender,
             recipient=recipient,
             payload=event.to_dict(),
+        )
+
+    @classmethod
+    def permission_request(
+        cls,
+        sender: str,
+        recipient: str,
+        tool_name: str,
+        tool_input: dict,
+        reason: str = "",
+    ) -> "MindMessage":
+        """
+        Create a PERMISSION_REQUEST message.
+
+        Sent by a sub-mind to its parent when it encounters a tool in its
+        escalate_tools list and needs approval to proceed.
+        """
+        return cls(
+            type=MsgType.PERMISSION_REQUEST,
+            sender=sender,
+            recipient=recipient,
+            payload={
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "reason": reason,
+            },
+        )
+
+    @classmethod
+    def permission_response(
+        cls,
+        sender: str,
+        recipient: str,
+        request_id: str,
+        approved: bool,
+        message: str = "",
+        modified_input: dict | None = None,
+    ) -> "MindMessage":
+        """
+        Create a PERMISSION_RESPONSE message.
+
+        Sent by the parent mind back to the requesting sub-mind with
+        the approval decision. Optionally includes modified tool input.
+        """
+        return cls(
+            type=MsgType.PERMISSION_RESPONSE,
+            sender=sender,
+            recipient=recipient,
+            payload={
+                "request_id": request_id,
+                "approved": approved,
+                "message": message,
+                "modified_input": modified_input,
+            },
         )
 
 

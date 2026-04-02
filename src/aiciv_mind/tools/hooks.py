@@ -44,6 +44,37 @@ class HookResult:
     allowed: bool = True
     message: str = ""
     modified_output: str | None = None
+    modified_input: dict | None = None
+
+
+@dataclass
+class PermissionRequest:
+    """
+    Request from a sub-mind to its parent for permission to execute a tool.
+
+    When a sub-mind encounters a tool in its escalate_tools list, it creates
+    a PermissionRequest and sends it to the parent mind via the registered handler.
+    """
+
+    tool_name: str
+    tool_input: dict
+    requesting_mind_id: str
+    reason: str = ""
+
+
+@dataclass
+class PermissionResponse:
+    """
+    Parent mind's response to a PermissionRequest.
+
+    approved=True → sub-mind proceeds with tool call.
+    approved=False → sub-mind skips tool call, returns message.
+    modified_input → if set, sub-mind uses this instead of original input.
+    """
+
+    approved: bool
+    message: str = ""
+    modified_input: dict | None = None
 
 
 @dataclass
@@ -71,13 +102,53 @@ class HookRunner:
         self,
         blocked_tools: list[str] | None = None,
         log_all: bool = True,
+        escalate_tools: list[str] | None = None,
     ) -> None:
         self._blocked_tools: set[str] = set(blocked_tools or [])
         self._base_blocked_tools: set[str] = set(self._blocked_tools)  # snapshot of base config
+        self._escalate_tools: set[str] = set(escalate_tools or [])
+        self._permission_handler: Callable[[PermissionRequest], PermissionResponse] | None = None
+        self._permission_mind_id: str = ""
         self._log_all = log_all
         self._call_log: list[ToolCallRecord] = []
         self._deny_count: int = 0
         self._total_calls: int = 0
+
+    # ------------------------------------------------------------------
+    # Permission escalation — sub-minds request parent approval
+    # ------------------------------------------------------------------
+
+    def register_permission_handler(
+        self,
+        handler: Callable[[PermissionRequest], PermissionResponse],
+        mind_id: str = "",
+    ) -> None:
+        """
+        Register a handler for permission escalation.
+
+        When a tool in escalate_tools is called, the handler receives a
+        PermissionRequest and returns a PermissionResponse.
+
+        Args:
+            handler: Callable that decides whether to approve the tool call.
+            mind_id: The mind_id of this mind (used in PermissionRequest.requesting_mind_id).
+        """
+        self._permission_handler = handler
+        self._permission_mind_id = mind_id
+        logger.info("[hooks] Registered permission handler (mind_id=%s)", mind_id)
+
+    def add_escalate_tool(self, tool_name: str) -> None:
+        """Add a tool to the escalation list."""
+        self._escalate_tools.add(tool_name)
+
+    def remove_escalate_tool(self, tool_name: str) -> None:
+        """Remove a tool from the escalation list."""
+        self._escalate_tools.discard(tool_name)
+
+    @property
+    def escalate_tools(self) -> set[str]:
+        """Return the set of tools requiring permission escalation."""
+        return set(self._escalate_tools)
 
     # ------------------------------------------------------------------
     # Custom hook registration — shell and callable modes
@@ -160,16 +231,91 @@ class HookRunner:
             names.append(f"post:{h['name']}")
         return names
 
+    def _handle_permission_escalation(self, tool_name: str, tool_input: dict) -> HookResult:
+        """
+        Handle a tool that requires permission escalation.
+
+        Creates a PermissionRequest and sends it to the registered handler.
+        If no handler is registered, fails closed (denies).
+        If the handler raises, fails closed (denies).
+        """
+        if self._permission_handler is None:
+            self._deny_count += 1
+            reason = (
+                f"Tool '{tool_name}' requires permission escalation but "
+                "no permission handler is registered. Denied (fail-closed)."
+            )
+            logger.warning("[hooks] DENIED (no permission handler): %s", tool_name)
+            if self._log_all:
+                self._call_log.append(ToolCallRecord(
+                    timestamp=datetime.now().isoformat(),
+                    tool_name=tool_name,
+                    input_preview=str(tool_input)[:200],
+                    output_preview="",
+                    is_error=False,
+                    blocked=True,
+                    block_reason=f"Permission escalation: {reason}",
+                ))
+            return HookResult(allowed=False, message=reason)
+
+        request = PermissionRequest(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            requesting_mind_id=self._permission_mind_id,
+        )
+
+        try:
+            response = self._permission_handler(request)
+        except Exception as e:
+            self._deny_count += 1
+            reason = f"Permission handler error: {e}. Denied (fail-closed)."
+            logger.error("[hooks] Permission handler error for %s: %s", tool_name, e)
+            if self._log_all:
+                self._call_log.append(ToolCallRecord(
+                    timestamp=datetime.now().isoformat(),
+                    tool_name=tool_name,
+                    input_preview=str(tool_input)[:200],
+                    output_preview="",
+                    is_error=False,
+                    blocked=True,
+                    block_reason=f"Permission escalation: {reason}",
+                ))
+            return HookResult(allowed=False, message=reason)
+
+        if not response.approved:
+            self._deny_count += 1
+            logger.warning(
+                "[hooks] Permission DENIED for %s: %s", tool_name, response.message,
+            )
+            if self._log_all:
+                self._call_log.append(ToolCallRecord(
+                    timestamp=datetime.now().isoformat(),
+                    tool_name=tool_name,
+                    input_preview=str(tool_input)[:200],
+                    output_preview="",
+                    is_error=False,
+                    blocked=True,
+                    block_reason=f"Permission denied: {response.message}",
+                ))
+            return HookResult(allowed=False, message=response.message)
+
+        # Approved
+        logger.info("[hooks] Permission APPROVED for %s", tool_name)
+        return HookResult(
+            allowed=True,
+            modified_input=response.modified_input,
+        )
+
     def pre_tool_use(self, tool_name: str, tool_input: dict) -> HookResult:
         """
         Evaluate whether a tool call should proceed.
 
-        Checks blocked_tools first, then runs all registered custom pre-hooks.
-        Any hook returning allowed=False will deny the call.
+        Check order: blocked_tools → escalate_tools → custom pre-hooks.
+        Any check returning denied will short-circuit the rest.
         """
         self._total_calls += 1
 
-        # Built-in: blocked tools check
+        # 1. Built-in: blocked tools check (hard deny, no escalation)
         if tool_name in self._blocked_tools:
             self._deny_count += 1
             reason = (
@@ -191,7 +337,11 @@ class HookRunner:
 
             return HookResult(allowed=False, message=reason)
 
-        # Custom pre-hooks
+        # 2. Permission escalation: tools that need parent approval
+        if tool_name in self._escalate_tools:
+            return self._handle_permission_escalation(tool_name, tool_input)
+
+        # 3. Custom pre-hooks
         for hook in getattr(self, "_custom_pre_hooks", []):
             if hook["tools"] is not None and tool_name not in hook["tools"]:
                 continue  # Skip — this hook doesn't apply to this tool
