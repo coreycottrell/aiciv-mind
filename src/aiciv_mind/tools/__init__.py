@@ -205,6 +205,7 @@ class ToolRegistry:
         from aiciv_mind.tools.web_fetch_tools import register_web_fetch
         from aiciv_mind.tools.netlify_tools import register_netlify_tools
         from aiciv_mind.tools.voice_tools import register_voice_tools
+        from aiciv_mind.tools.browser_tools import register_browser_tools
 
         registry = cls()
         register_bash(registry)
@@ -215,6 +216,7 @@ class ToolRegistry:
         register_web_fetch(registry)
         register_netlify_tools(registry)
         register_voice_tools(registry)
+        register_browser_tools(registry)
 
         if memory_store is not None:
             from aiciv_mind.tools.memory_tools import register_memory_tools
