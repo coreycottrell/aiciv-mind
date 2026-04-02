@@ -92,6 +92,10 @@ class Mind:
             enabled=manifest.verification.enabled,
         )
 
+        # Register verify_completion tool
+        from aiciv_mind.tools.verification_tools import register_verification_tools
+        register_verification_tools(self._tools, self._completion_protocol)
+
         # Session learner (Principle 7: Self-Improving Loop)
         self._session_learner = SessionLearner(
             agent_id=manifest.mind_id,
@@ -422,6 +426,43 @@ class Mind:
                 self._messages.append({"role": "user", "content": tool_results})
 
         self._running = False
+
+        # P9 — Auto-verify completion claims
+        if final_text and self._completion_protocol._enabled:
+            from aiciv_mind.tools.verification_tools import auto_verify_response, format_challenge_injection
+
+            # Collect tool result strings for evidence extraction
+            _tool_result_strs = []
+            for msg in self._messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "tool_result":
+                            _tool_result_strs.append(str(item.get("content", "")))
+                elif isinstance(content, str) and "[Tool result:" in content:
+                    _tool_result_strs.append(content)
+
+            _complexity = getattr(self, "_current_complexity", "simple")
+            _verification = auto_verify_response(
+                protocol=self._completion_protocol,
+                response_text=final_text,
+                task=task,
+                tool_results=_tool_result_strs,
+                complexity=_complexity,
+            )
+
+            if _verification and not _verification["passed"]:
+                _challenge_text = format_challenge_injection(_verification)
+                if _challenge_text:
+                    logger.info(
+                        "[P9] Injecting %d challenges back into context",
+                        len(_verification.get("challenges", [])),
+                    )
+                    # Inject challenges as a system note in messages
+                    self._messages.append({
+                        "role": "user",
+                        "content": _challenge_text,
+                    })
 
         # Loop 1 — store structured learning from this task
         #
