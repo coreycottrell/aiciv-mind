@@ -79,14 +79,97 @@ class HookRunner:
         self._deny_count: int = 0
         self._total_calls: int = 0
 
+    # ------------------------------------------------------------------
+    # Custom hook registration — shell and callable modes
+    # ------------------------------------------------------------------
+
+    def register_pre_hook(
+        self,
+        name: str,
+        handler: Callable[[str, dict], HookResult],
+        tools: list[str] | None = None,
+        mode: str = "callable",
+    ) -> None:
+        """
+        Register a custom pre-tool-use hook.
+
+        Args:
+            name: Unique hook name for identification.
+            handler: Callable(tool_name, tool_input) -> HookResult.
+            tools: If set, only triggers for these tool names. None = all tools.
+            mode: "callable" (Python function) or "shell" (subprocess).
+                  For "shell" mode, use make_shell_hook() to create the handler.
+        """
+        if not hasattr(self, "_custom_pre_hooks"):
+            self._custom_pre_hooks: list[dict] = []
+        self._custom_pre_hooks.append({
+            "name": name,
+            "handler": handler,
+            "tools": set(tools) if tools else None,
+            "mode": mode,
+        })
+        logger.info("[hooks] Registered pre-hook '%s' (mode=%s, tools=%s)", name, mode, tools)
+
+    def register_post_hook(
+        self,
+        name: str,
+        handler: Callable[[str, dict, str, bool], HookResult],
+        tools: list[str] | None = None,
+        mode: str = "callable",
+    ) -> None:
+        """
+        Register a custom post-tool-use hook.
+
+        Args:
+            name: Unique hook name for identification.
+            handler: Callable(tool_name, tool_input, output, is_error) -> HookResult.
+            tools: If set, only triggers for these tool names. None = all tools.
+            mode: "callable" or "shell".
+        """
+        if not hasattr(self, "_custom_post_hooks"):
+            self._custom_post_hooks: list[dict] = []
+        self._custom_post_hooks.append({
+            "name": name,
+            "handler": handler,
+            "tools": set(tools) if tools else None,
+            "mode": mode,
+        })
+        logger.info("[hooks] Registered post-hook '%s' (mode=%s, tools=%s)", name, mode, tools)
+
+    def unregister_hook(self, name: str) -> bool:
+        """Remove a custom hook by name. Returns True if found and removed."""
+        removed = False
+        for attr in ("_custom_pre_hooks", "_custom_post_hooks"):
+            hooks = getattr(self, attr, [])
+            before = len(hooks)
+            filtered = [h for h in hooks if h["name"] != name]
+            if len(filtered) < before:
+                setattr(self, attr, filtered)
+                removed = True
+        if removed:
+            logger.info("[hooks] Unregistered hook '%s'", name)
+        return removed
+
+    @property
+    def custom_hooks(self) -> list[str]:
+        """Return names of all registered custom hooks."""
+        names = []
+        for h in getattr(self, "_custom_pre_hooks", []):
+            names.append(f"pre:{h['name']}")
+        for h in getattr(self, "_custom_post_hooks", []):
+            names.append(f"post:{h['name']}")
+        return names
+
     def pre_tool_use(self, tool_name: str, tool_input: dict) -> HookResult:
         """
         Evaluate whether a tool call should proceed.
 
-        Returns HookResult with allowed=False if the tool is blocked.
+        Checks blocked_tools first, then runs all registered custom pre-hooks.
+        Any hook returning allowed=False will deny the call.
         """
         self._total_calls += 1
 
+        # Built-in: blocked tools check
         if tool_name in self._blocked_tools:
             self._deny_count += 1
             reason = (
@@ -108,6 +191,33 @@ class HookRunner:
 
             return HookResult(allowed=False, message=reason)
 
+        # Custom pre-hooks
+        for hook in getattr(self, "_custom_pre_hooks", []):
+            if hook["tools"] is not None and tool_name not in hook["tools"]:
+                continue  # Skip — this hook doesn't apply to this tool
+            try:
+                result = hook["handler"](tool_name, tool_input)
+                if not result.allowed:
+                    self._deny_count += 1
+                    logger.warning(
+                        "[hooks] DENIED by hook '%s': %s — %s",
+                        hook["name"], tool_name, result.message,
+                    )
+                    if self._log_all:
+                        self._call_log.append(ToolCallRecord(
+                            timestamp=datetime.now().isoformat(),
+                            tool_name=tool_name,
+                            input_preview=str(tool_input)[:200],
+                            output_preview="",
+                            is_error=False,
+                            blocked=True,
+                            block_reason=f"Hook '{hook['name']}': {result.message}",
+                        ))
+                    return result
+            except Exception as e:
+                logger.error("[hooks] Pre-hook '%s' error: %s", hook["name"], e)
+                # Hook errors are non-fatal — allow the tool call to proceed
+
         return HookResult(allowed=True)
 
     def post_tool_use(
@@ -118,9 +228,9 @@ class HookRunner:
         is_error: bool,
     ) -> HookResult:
         """
-        Post-execution hook. Logs the call for audit trail.
+        Post-execution hook. Logs the call and runs custom post-hooks.
 
-        Can be extended to modify output or deny based on results.
+        Custom post-hooks can deny (suppress output) or modify output.
         """
         if self._log_all:
             self._call_log.append(ToolCallRecord(
@@ -130,6 +240,23 @@ class HookRunner:
                 output_preview=output[:200],
                 is_error=is_error,
             ))
+
+        # Custom post-hooks
+        for hook in getattr(self, "_custom_post_hooks", []):
+            if hook["tools"] is not None and tool_name not in hook["tools"]:
+                continue
+            try:
+                result = hook["handler"](tool_name, tool_input, output, is_error)
+                if not result.allowed:
+                    logger.warning(
+                        "[hooks] Post-hook '%s' denied: %s",
+                        hook["name"], result.message,
+                    )
+                    return result
+                if result.modified_output is not None:
+                    return result
+            except Exception as e:
+                logger.error("[hooks] Post-hook '%s' error: %s", hook["name"], e)
 
         return HookResult(allowed=True)
 
@@ -353,3 +480,103 @@ class HookRunner:
                 )
             except Exception as e:
                 logger.error("[hooks] on_submind_stop callback error: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Hook factories — create handlers for different execution modes
+# ---------------------------------------------------------------------------
+
+
+def make_shell_pre_hook(command: str, timeout: float = 5.0) -> Callable[[str, dict], HookResult]:
+    """
+    Create a pre-tool-use hook that runs a shell command.
+
+    The command receives environment variables:
+        HOOK_TOOL_NAME  — the tool being called
+        HOOK_TOOL_INPUT — JSON-encoded tool input
+
+    Exit code 0 = ALLOW. Non-zero = DENY.
+    Stdout is captured as the reason/message.
+
+    Args:
+        command: Shell command to execute (e.g. "python3 /path/to/check.py")
+        timeout: Maximum execution time in seconds (default 5s)
+    """
+    import json
+    import os
+    import subprocess
+
+    def handler(tool_name: str, tool_input: dict) -> HookResult:
+        env = os.environ.copy()
+        env["HOOK_TOOL_NAME"] = tool_name
+        env["HOOK_TOOL_INPUT"] = json.dumps(tool_input)
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            if proc.returncode == 0:
+                return HookResult(allowed=True)
+            else:
+                message = proc.stdout.strip() or proc.stderr.strip() or f"Shell hook denied (exit {proc.returncode})"
+                return HookResult(allowed=False, message=message)
+        except subprocess.TimeoutExpired:
+            logger.warning("[hooks] Shell pre-hook timed out after %.1fs: %s", timeout, command)
+            return HookResult(allowed=True)  # Timeout = allow (fail-open)
+        except Exception as e:
+            logger.error("[hooks] Shell pre-hook error: %s", e)
+            return HookResult(allowed=True)  # Errors = allow (fail-open)
+
+    return handler
+
+
+def make_shell_post_hook(command: str, timeout: float = 5.0) -> Callable[[str, dict, str, bool], HookResult]:
+    """
+    Create a post-tool-use hook that runs a shell command.
+
+    The command receives environment variables:
+        HOOK_TOOL_NAME   — the tool that was called
+        HOOK_TOOL_INPUT  — JSON-encoded tool input
+        HOOK_TOOL_OUTPUT — first 1000 chars of tool output
+        HOOK_IS_ERROR    — "true" or "false"
+
+    Exit code 0 = ALLOW. Non-zero = DENY (suppress output).
+    """
+    import json
+    import os
+    import subprocess
+
+    def handler(tool_name: str, tool_input: dict, output: str, is_error: bool) -> HookResult:
+        env = os.environ.copy()
+        env["HOOK_TOOL_NAME"] = tool_name
+        env["HOOK_TOOL_INPUT"] = json.dumps(tool_input)
+        env["HOOK_TOOL_OUTPUT"] = output[:1000]
+        env["HOOK_IS_ERROR"] = "true" if is_error else "false"
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            if proc.returncode == 0:
+                modified = proc.stdout.strip() if proc.stdout.strip() else None
+                return HookResult(allowed=True, modified_output=modified)
+            else:
+                message = proc.stdout.strip() or f"Post-hook denied (exit {proc.returncode})"
+                return HookResult(allowed=False, message=message)
+        except subprocess.TimeoutExpired:
+            return HookResult(allowed=True)
+        except Exception as e:
+            logger.error("[hooks] Shell post-hook error: %s", e)
+            return HookResult(allowed=True)
+
+    return handler
