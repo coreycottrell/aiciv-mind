@@ -131,7 +131,7 @@ hooks:
 auth:
   civ_id: "acg"
   keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
-  calendar_id: "cal_b576313e639e4ce2809179943341a6c1"
+  calendar_id: "cal_fd6cf6a4e17643c69a249db598edcc92"
 
 agentmail:
   inbox: "root-aiciv@agentmail.to"

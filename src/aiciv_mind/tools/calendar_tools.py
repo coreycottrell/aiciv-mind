@@ -101,9 +101,9 @@ def _make_list_events_handler(keypair_path: str, calendar_id: str):
                 lines: list[str] = [f"Calendar events ({min(len(events), limit)} shown):"]
                 for event in events[:limit]:
                     eid = event.get("id", event.get("event_id", "?"))
-                    title = event.get("title", "(untitled)")
-                    start = event.get("start_time", "?")
-                    end = event.get("end_time", "?")
+                    title = event.get("summary", "(untitled)")
+                    start = event.get("start", "?")
+                    end = event.get("end", "?")
                     desc = event.get("description", "")
                     desc_preview = f" — {desc[:80]}" if desc else ""
                     lines.append(
@@ -173,9 +173,9 @@ def _make_create_event_handler(keypair_path: str, calendar_id: str):
             return "ERROR: title, start_time, and end_time are required"
 
         payload: dict = {
-            "title": title,
-            "start_time": start_time,
-            "end_time": end_time,
+            "summary": title,
+            "start": start_time,
+            "end": end_time,
         }
         if description:
             payload["description"] = description
