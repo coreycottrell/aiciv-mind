@@ -155,6 +155,11 @@ class Mind:
         max_iterations = 30
         iteration = 0
 
+        # Loop 1 telemetry — collected during tool execution, consumed after
+        tool_call_count = 0
+        tool_errors: list[str] = []
+        tools_used: set[str] = set()
+
         while iteration < max_iterations and self._running:
             iteration += 1
 
@@ -223,6 +228,18 @@ class Mind:
 
             tool_results = await self._execute_tool_calls(tool_use_blocks)
 
+            # Collect Loop 1 telemetry from this batch of tool calls
+            for b, r in zip(tool_use_blocks, tool_results):
+                tool_call_count += 1
+                tools_used.add(b.name)
+                result_content = r.get("content", "") if isinstance(r, dict) else str(r)
+                if "ERROR:" in result_content:
+                    # Capture the first line containing ERROR: (truncated to 200 chars)
+                    for line in result_content.splitlines():
+                        if "ERROR:" in line:
+                            tool_errors.append(line.strip()[:200])
+                            break
+
             if synthetic_calls:
                 # For text-embedded tool calls, inject results as plain text
                 # so the model sees them naturally (it never produced tool_use IDs)
@@ -236,21 +253,59 @@ class Mind:
 
         self._running = False
 
-        # Loop 1 — store what was learned from this task
-        if getattr(self.manifest, 'self_modification_enabled', False) and final_text:
+        # Loop 1 — store structured learning from this task
+        #
+        # Gates (skip noisy / trivial tasks):
+        #   - self_modification_enabled must be on
+        #   - final_text must exist and be non-trivial (>= 50 chars)
+        #   - must have used >= 2 tool calls (simple Q&A is not worth storing)
+        #   - skip scheduled BOOP grounding checks (pure housekeeping)
+        if (
+            getattr(self.manifest, 'self_modification_enabled', False)
+            and final_text
+            and len(final_text.strip()) >= 50
+            and tool_call_count >= 2
+            and not task.lstrip().startswith("[Scheduled BOOP")
+        ):
             try:
-                _summary = final_text.strip()[:200]
-                _task_topic = task.strip().split()[:5]
-                _topic_str = " ".join(_task_topic) if _task_topic else "general"
-                self.memory.store(
-                    agent_id=self.manifest.mind_id,
-                    title=f"Task result: {_topic_str}",
-                    content=_summary,
-                    memory_type="learning",
-                    tags=["loop-1", "task-result"],
+                from aiciv_mind.memory import Memory as _Memory
+
+                # Title: first meaningful sentence from final_text (up to 80 chars)
+                _stripped = final_text.strip()
+                # Split on sentence-ending punctuation, take the first sentence
+                _sentences = re.split(r'(?<=[.!?])\s+', _stripped, maxsplit=1)
+                _title = _sentences[0][:80] if _sentences else _stripped[:80]
+                # Fall back if the title is too short to be useful
+                if len(_title) < 10:
+                    _title = _stripped[:80]
+
+                # Build structured content
+                _tools_str = ", ".join(sorted(tools_used)) if tools_used else "none"
+                _errors_str = "; ".join(tool_errors[:5]) if tool_errors else "none"
+                _content = (
+                    f"Task: {task[:150]}\n"
+                    f"Tools used: {_tools_str}\n"
+                    f"Errors: {_errors_str}\n"
+                    f"Result: {_stripped[:300]}"
                 )
+
+                # Tags: base tags + tool names used
+                _tags = ["loop-1", "task-learning"] + sorted(tools_used)
+
+                # Memory type: "error" if any tool errors occurred, else "learning"
+                _mem_type = "error" if tool_errors else "learning"
+
+                _mem = _Memory(
+                    agent_id=self.manifest.mind_id,
+                    title=_title,
+                    content=_content,
+                    memory_type=_mem_type,
+                    tags=_tags,
+                    session_id=self._session_id,
+                )
+                self.memory.store(_mem)
             except Exception:
-                pass  # never let memory write crash the task return
+                pass  # Loop 1 must NEVER crash the task return
 
         return final_text
 
