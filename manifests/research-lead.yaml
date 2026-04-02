@@ -1,39 +1,41 @@
-schema_version: "1.0"
-mind_id: "research-lead"
-display_name: "Research Team Lead"
-role: "team-lead"
-
-system_prompt_path: "self/research-lead.md"
-
+schema_version: '1.0'
+mind_id: research-lead
+display_name: Research Team Lead
+role: team-lead
+system_prompt_path: self/research-lead.md
 model:
-  preferred: "minimax-m27"
+  preferred: minimax-m27
   temperature: 0.7
   max_tokens: 16384
-
 tools:
-  - name: "bash"
-    enabled: true
-    constraints: ["read-only commands preferred", "no write operations"]
-  - name: "read_file"
-    enabled: true
-  - name: "grep"
-    enabled: true
-  - name: "glob"
-    enabled: true
-  - name: "memory_search"
-    enabled: true
-  - name: "memory_write"
-    enabled: true
-
+- name: bash
+  enabled: true
+- name: read_file
+  enabled: true
+- name: grep
+  enabled: true
+- name: glob
+  enabled: true
+- name: memory_search
+  enabled: true
+- name: memory_write
+  enabled: true
 auth:
-  civ_id: "acg"
-  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
-
+  civ_id: acg
+  keypair_path: /home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json
 memory:
-  backend: "sqlite_fts5"
-  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  backend: sqlite_fts5
+  db_path: /home/corey/projects/AI-CIV/aiciv-mind/data/memory.db
   markdown_mirror: false
   auto_search_before_task: true
   max_context_memories: 5
-
-sub_minds: []
+sub_minds:
+- mind_id: research-memory
+  manifest_path: sub-minds/research-memory.yaml
+  role: specialist
+- mind_id: research-web
+  manifest_path: sub-minds/research-web.yaml
+  role: specialist
+- mind_id: research-code
+  manifest_path: sub-minds/research-code.yaml
+  role: specialist
