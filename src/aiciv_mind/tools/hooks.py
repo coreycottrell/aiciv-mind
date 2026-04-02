@@ -73,6 +73,7 @@ class HookRunner:
         log_all: bool = True,
     ) -> None:
         self._blocked_tools: set[str] = set(blocked_tools or [])
+        self._base_blocked_tools: set[str] = set(self._blocked_tools)  # snapshot of base config
         self._log_all = log_all
         self._call_log: list[ToolCallRecord] = []
         self._deny_count: int = 0
@@ -141,6 +142,95 @@ class HookRunner:
         """Dynamically unblock a tool at runtime."""
         self._blocked_tools.discard(tool_name)
         logger.info("[hooks] Unblocked tool: %s", tool_name)
+
+    # ------------------------------------------------------------------
+    # Skill-defined hooks — skills register their own governance rules
+    # ------------------------------------------------------------------
+
+    def install_skill_hooks(self, skill_id: str, hooks_config: dict) -> None:
+        """
+        Install hooks declared by a skill.
+
+        hooks_config format:
+            {
+                "blocked_tools": ["git_push", "netlify_deploy"],
+                "pre_tool_use": [
+                    {"tool": "bash", "action": "warn", "reason": "..."},
+                ],
+            }
+
+        Tracked per skill_id so they can be cleanly uninstalled later.
+        """
+        if not hasattr(self, "_skill_hooks"):
+            self._skill_hooks: dict[str, dict] = {}
+
+        # Store the config for later uninstall
+        self._skill_hooks[skill_id] = hooks_config
+
+        # Apply blocked_tools
+        for tool_name in hooks_config.get("blocked_tools", []):
+            self._blocked_tools.add(tool_name)
+            logger.info("[hooks] Skill '%s' blocked tool: %s", skill_id, tool_name)
+
+        # Apply pre_tool_use warn rules (stored for pre_tool_use to check)
+        if not hasattr(self, "_skill_warn_rules"):
+            self._skill_warn_rules: dict[str, list[dict]] = {}
+        for rule in hooks_config.get("pre_tool_use", []):
+            if rule.get("action") == "warn":
+                tool = rule.get("tool", "")
+                if tool:
+                    self._skill_warn_rules.setdefault(tool, []).append({
+                        "skill_id": skill_id,
+                        "reason": rule.get("reason", f"Warning from skill '{skill_id}'"),
+                    })
+
+        logger.info(
+            "[hooks] Installed hooks for skill '%s': %d blocked, %d warn rules",
+            skill_id,
+            len(hooks_config.get("blocked_tools", [])),
+            len(hooks_config.get("pre_tool_use", [])),
+        )
+
+    def uninstall_skill_hooks(self, skill_id: str) -> None:
+        """
+        Remove all hooks installed by a skill.
+
+        Only unblocks tools that were blocked by THIS skill (not by other
+        skills or the base blocked_tools list).
+        """
+        if not hasattr(self, "_skill_hooks"):
+            return
+
+        config = self._skill_hooks.pop(skill_id, None)
+        if config is None:
+            return
+
+        # Unblock tools that this skill blocked (but only if no OTHER skill
+        # also blocks them AND it's not in the base blocked set)
+        other_blocked: set[str] = set(self._base_blocked_tools)
+        for other_id, other_config in self._skill_hooks.items():
+            other_blocked.update(other_config.get("blocked_tools", []))
+
+        for tool_name in config.get("blocked_tools", []):
+            if tool_name not in other_blocked:
+                self._blocked_tools.discard(tool_name)
+                logger.info("[hooks] Skill '%s' unblocked tool: %s", skill_id, tool_name)
+
+        # Remove warn rules
+        if hasattr(self, "_skill_warn_rules"):
+            for tool_name, rules in list(self._skill_warn_rules.items()):
+                self._skill_warn_rules[tool_name] = [
+                    r for r in rules if r.get("skill_id") != skill_id
+                ]
+                if not self._skill_warn_rules[tool_name]:
+                    del self._skill_warn_rules[tool_name]
+
+        logger.info("[hooks] Uninstalled hooks for skill '%s'", skill_id)
+
+    @property
+    def active_skill_hooks(self) -> dict[str, dict]:
+        """Return a copy of all active skill hook configurations."""
+        return dict(getattr(self, "_skill_hooks", {}))
 
     @property
     def blocked_tools(self) -> set[str]:
