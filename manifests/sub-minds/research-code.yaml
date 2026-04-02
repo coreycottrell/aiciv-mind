@@ -11,8 +11,8 @@ role: "specialist"
 system_prompt_path: "../self/sub-minds/research-code.md"
 
 model:
-  preferred: "devstral-free"        # code specialist model
-  fallback: "qwen3-next-free"       # fallback: general purpose with large context
+  preferred: "kimi-k2"              # code specialist model (free OpenRouter models unavailable)
+  fallback: "phi3"                  # fallback: local Ollama, always available
   temperature: 0.2                  # low temperature — code reading is factual work
   max_tokens: 8192                  # larger for reading file contents
 

@@ -11,8 +11,8 @@ role: "specialist"
 system_prompt_path: "../self/sub-minds/research-memory.md"
 
 model:
-  preferred: "qwen3-next-free"      # 262K context — room for large memory search results
-  fallback: "nemotron-super-free"   # fallback: 262K context
+  preferred: "kimi-k2"              # large context (free OpenRouter models unavailable)
+  fallback: "phi3"                  # fallback: local Ollama, always available
   temperature: 0.3                  # precision matters more than creativity for memory retrieval
   max_tokens: 4096
 

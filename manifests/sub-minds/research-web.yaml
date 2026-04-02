@@ -11,8 +11,8 @@ role: "specialist"
 system_prompt_path: "../self/sub-minds/research-web.md"
 
 model:
-  preferred: "gemini-flash-free"    # 1M context, good for synthesizing search results
-  fallback: "qwen3-next-free"       # fallback if flash unavailable
+  preferred: "kimi-k2"              # good for synthesis (free OpenRouter models unavailable)
+  fallback: "phi3"                  # fallback: local Ollama, always available
   temperature: 0.4
   max_tokens: 4096
 
