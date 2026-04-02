@@ -11,10 +11,16 @@ Registered only when both spawner and primary_bus are provided to ToolRegistry.d
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from pathlib import Path
 
 from aiciv_mind.ipc.messages import MindMessage, MsgType
 from aiciv_mind.tools import ToolRegistry
+
+# Sub-minds persist results here before sending ZMQ RESULT so that primary
+# can recover them when the ZMQ message is lost (crash, timeout, etc.).
+_RESULTS_DIR = Path(__file__).resolve().parents[3] / "data" / "submind_results"
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +135,15 @@ def _make_send_handler(bus, primary_mind_id: str):
             result = await asyncio.wait_for(result_future, timeout=timeout)
             return result
         except asyncio.TimeoutError:
+            # Fallback: sub-mind may have written its result to disk before
+            # crashing or before the ZMQ RESULT could be delivered.
+            result_file = _RESULTS_DIR / f"{task_id}.json"
+            if result_file.exists():
+                try:
+                    data = json.loads(result_file.read_text())
+                    return data.get("result", "")
+                except (json.JSONDecodeError, OSError):
+                    pass
             return f"ERROR: Timeout waiting for {mind_id} (task: {task_id})"
         except Exception as e:
             return f"ERROR: send_to_submind failed: {type(e).__name__}: {e}"

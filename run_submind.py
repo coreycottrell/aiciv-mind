@@ -10,9 +10,11 @@ Usage (internal -- don't call directly):
 """
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -26,6 +28,21 @@ def setup_logging(mind_id: str, level: str = "INFO") -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("anthropic").setLevel(logging.WARNING)
+
+
+_RESULTS_DIR = Path(__file__).parent / "data" / "submind_results"
+
+
+def _persist_result(task_id: str, mind_id: str, result: str, logger: logging.Logger) -> None:
+    """Write result to disk so primary can recover it on ZMQ timeout."""
+    try:
+        _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        (_RESULTS_DIR / f"{task_id}.json").write_text(json.dumps({
+            "task_id": task_id, "mind_id": mind_id,
+            "result": result, "timestamp": time.time(),
+        }))
+    except Exception as exc:
+        logger.warning("Failed to persist result for %s: %s", task_id, exc)
 
 
 async def run_submind(manifest_path: str, mind_id: str) -> None:
@@ -83,6 +100,9 @@ async def run_submind(manifest_path: str, mind_id: str) -> None:
 
         try:
             result = await mind.run_task(objective, task_id=task_id)
+            # Persist result to file BEFORE ZMQ send so primary can
+            # recover it if this process crashes before the send completes.
+            _persist_result(task_id, manifest.mind_id, result, logger)
             await bus.send(MindMessage.result(
                 sender=manifest.mind_id,
                 recipient="primary",
@@ -92,6 +112,7 @@ async def run_submind(manifest_path: str, mind_id: str) -> None:
             ))
         except Exception as e:
             logger.exception("Task %s failed", task_id)
+            _persist_result(task_id, manifest.mind_id, f"ERROR: {e}", logger)
             await bus.send(MindMessage.result(
                 sender=manifest.mind_id,
                 recipient="primary",
