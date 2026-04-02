@@ -968,10 +968,11 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the SQLite connection and optimize the FTS5 index."""
+        """Close the SQLite connection, run PRAGMA optimize, and optimize FTS5."""
         try:
             self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+            self._conn.execute("PRAGMA optimize")
             self._conn.commit()
         except Exception:
-            pass  # FTS5 optimize is best-effort; never crash on close
+            pass  # Optimize is best-effort; never crash on close
         self._conn.close()
