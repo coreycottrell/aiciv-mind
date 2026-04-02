@@ -60,6 +60,15 @@ class PlanningConfig(BaseModel):
     min_gate_level: str = "simple"  # trivial|simple|medium|complex|variable
 
 
+class VerificationConfig(BaseModel):
+    """Verification protocol configuration — Principle 9: Red Team Everything."""
+
+    enabled: bool = True
+    # Minimum complexity level to inject Red Team questions.
+    # Light verification runs for all levels; full Red Team for medium+.
+    min_redteam_level: str = "medium"  # trivial|simple|medium|complex|variable
+
+
 class CompactionConfig(BaseModel):
     """Context compaction configuration — preserves recent messages, summarizes older ones."""
 
@@ -113,6 +122,7 @@ class MindManifest(BaseModel):
     agentmail: AgentMailConfig = AgentMailConfig()
     memory: MemoryConfig
     planning: PlanningConfig = PlanningConfig()
+    verification: VerificationConfig = VerificationConfig()
     compaction: CompactionConfig = CompactionConfig()
     hooks: HooksConfig = HooksConfig()
     sub_minds: list[SubMindRef] = []

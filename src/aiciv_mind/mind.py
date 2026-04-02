@@ -28,6 +28,7 @@ from aiciv_mind.context import mind_context
 from aiciv_mind.manifest import MindManifest
 from aiciv_mind.memory import MemoryStore
 from aiciv_mind.planning import PlanningGate, TaskComplexity
+from aiciv_mind.verification import CompletionProtocol
 from aiciv_mind.tools import ToolRegistry
 from aiciv_mind.session_store import SessionStore
 from aiciv_mind.context_manager import ContextManager
@@ -81,6 +82,13 @@ class Mind:
             memory_store=memory,
             agent_id=manifest.mind_id,
             enabled=manifest.planning.enabled,
+        )
+
+        # Verification protocol (Principle 9: Red Team Everything)
+        self._completion_protocol = CompletionProtocol(
+            memory_store=memory,
+            agent_id=manifest.mind_id,
+            enabled=manifest.verification.enabled,
         )
 
         # Compaction state (preserve-recent-N pattern)
@@ -167,6 +175,14 @@ class Mind:
         # Planning context (SEMI-STABLE — changes per task)
         if planning_context:
             system_prompt = system_prompt + "\n\n" + planning_context
+
+        # Verification protocol (P9) — inject Red Team questions proportional to complexity
+        verification_prompt = self._completion_protocol.build_verification_prompt(
+            task=task,
+            complexity=planning_result.complexity.value,
+        )
+        if verification_prompt:
+            system_prompt = system_prompt + "\n" + verification_prompt
 
         # SEMI-STABLE: per-turn search results appended last
         if inject_memories and self.manifest.memory.auto_search_before_task:
