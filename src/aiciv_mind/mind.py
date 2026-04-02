@@ -304,6 +304,32 @@ class Mind:
                     session_id=self._session_id,
                 )
                 self.memory.store(_mem)
+
+                # Auto-hint: if this was an error, check for repeated tool failures
+                if _mem_type == "error" and tools_used:
+                    try:
+                        _primary_tool = sorted(tools_used)[0]
+                        _recent_errors = self.memory.by_type(
+                            "error",
+                            agent_id=self.manifest.mind_id,
+                            limit=10,
+                        )
+                        # Filter to Loop 1 errors mentioning the same tool
+                        _matching = [
+                            e for e in _recent_errors
+                            if _primary_tool in e.get("tags", "")
+                            and "loop-1" in e.get("tags", "")
+                        ]
+                        if len(_matching) >= 3:
+                            _hint = (
+                                f"\n\n---\n**Pattern detected**: {len(_matching)} recent "
+                                f"task errors involving `{_primary_tool}`. Consider running "
+                                f"`loop1_pattern_scan` to review and potentially log this "
+                                f"as a systemic issue.\n---"
+                            )
+                            final_text = final_text + _hint
+                    except Exception:
+                        pass  # hint is best-effort, never crashes
             except Exception:
                 pass  # Loop 1 must NEVER crash the task return
 
