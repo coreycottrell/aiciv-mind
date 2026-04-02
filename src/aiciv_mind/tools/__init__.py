@@ -225,6 +225,11 @@ class ToolRegistry:
             from aiciv_mind.tools.email_tools import register_email_tools
             register_email_tools(registry, agentmail_inbox)
 
+        if memory_store is not None:
+            from aiciv_mind.tools.handoff_tools import register_handoff_tools
+            mind_root_path = str(Path(__file__).parent.parent.parent.parent)
+            register_handoff_tools(registry, memory_store, mind_root=mind_root_path)
+
         # system_health is always registered
         from aiciv_mind.tools.health_tools import register_health_tools
         register_health_tools(

@@ -127,6 +127,8 @@ tools:
     enabled: true
   - name: "daemon_health"
     enabled: true
+  - name: "handoff_context"
+    enabled: true
 
 compaction:
   enabled: true

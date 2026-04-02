@@ -214,16 +214,23 @@ class SessionStore:
         # Write to session_journal
         self._memory.end_session(self._session_id, summary)
 
+        # Gather git context for richer handoff
+        git_commits = self._recent_git_commits()
+
         # Write handoff memory — this is what the NEXT session will load at boot
+        handoff_content = (
+            f"## What I was doing in session {self._session_id}\n\n"
+            f"**Turns:** {turn_count}\n"
+            f"**Topics:** {topics_str}\n\n"
+            f"**Last thing I said:**\n{last_text[:600]}"
+        )
+        if git_commits:
+            handoff_content += f"\n\n**Git commits this session:**\n{git_commits}"
+
         handoff = Memory(
             agent_id=self._agent_id,
             title=f"Session handoff — {self._session_id}",
-            content=(
-                f"## What I was doing in session {self._session_id}\n\n"
-                f"**Turns:** {turn_count}\n"
-                f"**Topics:** {topics_str}\n\n"
-                f"**Last thing I said:**\n{last_text[:600]}"
-            ),
+            content=handoff_content,
             memory_type="handoff",
             session_id=self._session_id,
             domain="session",
@@ -231,6 +238,22 @@ class SessionStore:
             tags=["handoff", "session", self._session_id],
         )
         self._memory.store(handoff)
+
+    @staticmethod
+    def _recent_git_commits(n: int = 5) -> str:
+        """Get the last N git commits for handoff context."""
+        import subprocess
+        from pathlib import Path
+        mind_root = str(Path(__file__).parent.parent.parent)
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", f"-{n}"],
+                capture_output=True, text=True, timeout=5,
+                cwd=mind_root,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            return ""
 
     @staticmethod
     def _extract_last_assistant_text(messages: list[dict[str, Any]]) -> str:

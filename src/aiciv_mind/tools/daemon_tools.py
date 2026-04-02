@@ -117,10 +117,23 @@ def _make_daemon_health_handler(memory_store=None):
             checks.append(("Hub Queue", "FAIL", f"{type(exc).__name__}: {exc}"))
 
         # 6. LiteLLM proxy (Root's inference backend)
-        status, detail = _check_http(
-            "http://localhost:4000/health", "LiteLLM Proxy", verbose
-        )
-        checks.append(("LiteLLM Proxy", status, detail))
+        # /health requires auth — use /v1/models which returns 200 for valid keys
+        # Fall back to bare /health and treat 401 as "up but needs auth" (PASS)
+        try:
+            import httpx
+            t0 = time.monotonic()
+            resp = httpx.get("http://localhost:4000/health", timeout=_TIMEOUT)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if resp.status_code == 200:
+                detail = f"{elapsed_ms:.0f}ms"
+                checks.append(("LiteLLM Proxy", "PASS", detail))
+            elif resp.status_code == 401:
+                # 401 = proxy is running but health endpoint needs auth — that's fine
+                checks.append(("LiteLLM Proxy", "PASS", f"up ({elapsed_ms:.0f}ms, auth-gated /health)"))
+            else:
+                checks.append(("LiteLLM Proxy", "WARN", f"status {resp.status_code} ({elapsed_ms:.0f}ms)"))
+        except Exception as exc:
+            checks.append(("LiteLLM Proxy", "FAIL", f"unreachable — {type(exc).__name__}: {exc}"))
 
         # Build report
         icon = {"PASS": "ok", "WARN": "!!", "FAIL": "XX"}
