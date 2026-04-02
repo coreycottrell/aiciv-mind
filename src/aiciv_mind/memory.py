@@ -18,12 +18,15 @@ Design notes:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +206,7 @@ class MemoryStore:
     Pass db_path=":memory:" for in-process tests — each instance is isolated.
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, auto_link: bool = True) -> None:
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -211,6 +214,7 @@ class MemoryStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
         self._touched_this_session: set[str] = set()  # track for depth score update
+        self._auto_link = auto_link  # P1: auto-create graph links on write
 
     # ------------------------------------------------------------------
     # Schema
@@ -275,6 +279,14 @@ class MemoryStore:
                 (memory.id, tag),
             )
         self._conn.commit()
+
+        # P1 auto-linking: find similar memories and create graph links
+        if self._auto_link:
+            try:
+                self._auto_link_memory(memory)
+            except Exception as e:
+                logger.debug("Auto-link failed for %s: %s", memory.id, e)
+
         return memory.id
 
     # ------------------------------------------------------------------
@@ -349,6 +361,148 @@ class MemoryStore:
         """
         cursor = self._conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
+
+    def search_with_graph(
+        self,
+        query: str,
+        agent_id: str | None = None,
+        limit: int = 5,
+        use_depth: bool = True,
+    ) -> list[dict[str, Any]]:
+        """
+        Search memories with 1-hop graph expansion (P1).
+
+        Returns FTS5 results augmented with linked memories. Each result dict
+        gets a ``_linked`` key containing its direct graph neighbors (incoming
+        + outgoing). Linked memories that are already in the direct result set
+        are de-duplicated.
+        """
+        direct = self.search(
+            query=query, agent_id=agent_id, limit=limit, use_depth=use_depth,
+        )
+        if not direct:
+            return direct
+
+        direct_ids = {m["id"] for m in direct}
+
+        for mem in direct:
+            # 1-hop: get links from and to this memory
+            links_from = self.get_links_from(mem["id"])
+            links_to = self.get_links_to(mem["id"])
+
+            linked_ids = set()
+            for link in links_from:
+                tid = link.get("target_id")
+                if tid and tid not in direct_ids and tid not in linked_ids:
+                    linked_ids.add(tid)
+            for link in links_to:
+                sid = link.get("source_id")
+                if sid and sid not in direct_ids and sid not in linked_ids:
+                    linked_ids.add(sid)
+
+            # Fetch linked memories (batch)
+            linked_memories = []
+            for lid in linked_ids:
+                row = self._conn.execute(
+                    "SELECT * FROM memories WHERE id = ?", (lid,)
+                ).fetchone()
+                if row:
+                    linked_memories.append(dict(row))
+
+            mem["_linked"] = linked_memories
+            mem["_links_from"] = [dict(l) for l in links_from]
+            mem["_links_to"] = [dict(l) for l in links_to]
+
+        return direct
+
+    # ------------------------------------------------------------------
+    # Auto-linking (P1)
+    # ------------------------------------------------------------------
+
+    def _auto_link_memory(
+        self,
+        memory: Memory,
+        max_links: int = 3,
+        min_results: int = 1,
+    ) -> list[str]:
+        """
+        Auto-link a newly stored memory to similar existing memories.
+
+        Uses FTS5 similarity (BM25) to find related memories, then creates
+        'references' links for strong matches and 'compounds' links when
+        memories share the same domain or tags.
+
+        Returns list of created link IDs.
+        """
+        # Build a query from the memory's title + first 200 chars of content
+        # FTS5 MATCH uses AND by default — use OR for similarity matching
+        query_text = f"{memory.title} {memory.content[:200]}"
+        words = re.findall(r"\w+", query_text)
+        if not words:
+            return []
+        # Take up to 8 unique words, join with OR for broad matching
+        unique_words = list(dict.fromkeys(words))[:8]
+        clean_query = " OR ".join(unique_words)
+        if not clean_query:
+            return []
+
+        # Search for similar memories (excluding self)
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT m.id, m.title, m.domain, m.tags, m.agent_id,
+                       rank AS bm25_rank
+                FROM memories m
+                JOIN memories_fts fts ON m.rowid = fts.rowid
+                WHERE memories_fts MATCH ?
+                  AND m.id != ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (clean_query, memory.id, max_links + 2),
+            ).fetchall()
+        except Exception:
+            return []
+
+        if len(rows) < min_results:
+            return []
+
+        link_ids = []
+        for row in rows[:max_links]:
+            row_dict = dict(row)
+            target_id = row_dict["id"]
+
+            # Determine link type
+            target_tags = json.loads(row_dict.get("tags", "[]") or "[]")
+            shared_domain = (
+                row_dict.get("domain") == memory.domain
+                and memory.domain != "general"
+            )
+            shared_tags = bool(set(memory.tags) & set(target_tags))
+
+            if shared_domain or shared_tags:
+                link_type = "compounds"
+                reason = "Auto-linked: shared " + (
+                    f"domain '{memory.domain}'" if shared_domain
+                    else f"tags {set(memory.tags) & set(target_tags)}"
+                )
+            else:
+                link_type = "references"
+                reason = "Auto-linked: FTS5 similarity"
+
+            try:
+                lid = self.link_memories(memory.id, target_id, link_type, reason)
+                link_ids.append(lid)
+            except Exception:
+                pass  # UNIQUE constraint = link already exists
+
+        if link_ids:
+            logger.info(
+                "[P1] Auto-linked memory '%s' → %d links created",
+                memory.title[:50], len(link_ids),
+            )
+
+        return link_ids
 
     def by_type(
         self,
