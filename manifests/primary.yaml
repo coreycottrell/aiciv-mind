@@ -117,6 +117,16 @@ tools:
     enabled: true
   - name: "calendar_delete_event"
     enabled: true
+  - name: "scratchpad_append"
+    enabled: true
+  - name: "shared_scratchpad_read"
+    enabled: true
+  - name: "loop1_pattern_scan"
+    enabled: true
+  - name: "memory_selfcheck"
+    enabled: true
+  - name: "daemon_health"
+    enabled: true
 
 compaction:
   enabled: true
