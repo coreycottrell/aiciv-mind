@@ -247,18 +247,44 @@ def test_context_manager_empty_on_fresh_db(memory_store):
 
 
 def test_context_manager_formats_search_results():
-    """format_search_results returns formatted memory context."""
+    """format_search_results returns formatted memory context with hints caveat."""
     from aiciv_mind.context_manager import ContextManager
 
     ctx = ContextManager()
     results = [
-        {"title": "FTS5 fix", "content": "Strip punctuation before FTS5 MATCH."},
-        {"title": "LiteLLM key", "content": "Master key is sk-aiciv-dev-masterkey-changeme."},
+        {
+            "title": "FTS5 fix",
+            "content": "Strip punctuation before FTS5 MATCH.",
+            "created_at": "2026-04-01T10:00:00Z",
+        },
+        {
+            "title": "LiteLLM key",
+            "content": "Master key is sk-aiciv-dev-masterkey-changeme.",
+            "created_at": "2026-03-30T08:15:00Z",
+        },
     ]
     formatted = ctx.format_search_results(results)
     assert "FTS5 fix" in formatted
     assert "LiteLLM key" in formatted
     assert "Relevant memories" in formatted
+    # Must include the memory-as-hint caveat
+    assert "HINTS, not facts" in formatted
+    # Must surface created_at timestamps
+    assert "2026-04-01T10:00:00Z" in formatted
+    assert "2026-03-30T08:15:00Z" in formatted
+
+
+def test_context_manager_search_results_missing_created_at():
+    """format_search_results handles memories without created_at gracefully."""
+    from aiciv_mind.context_manager import ContextManager
+
+    ctx = ContextManager()
+    results = [
+        {"title": "Old memory", "content": "No timestamp on this one."},
+    ]
+    formatted = ctx.format_search_results(results)
+    assert "Old memory" in formatted
+    assert "unknown" in formatted  # fallback when created_at missing
 
 
 def test_context_manager_empty_results_returns_empty():
@@ -267,6 +293,67 @@ def test_context_manager_empty_results_returns_empty():
 
     ctx = ContextManager()
     assert ctx.format_search_results([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Compaction circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_compaction_circuit_breaker_trips_after_consecutive_failures():
+    """After MAX_CONSECUTIVE_COMPACTION_FAILURES, compaction is disabled."""
+    from aiciv_mind.context_manager import ContextManager
+
+    ctx = ContextManager()
+
+    # Build a message list that's large enough to trigger compaction
+    messages = [
+        {"role": "user", "content": f"msg-{i}"}
+        if i % 2 == 0
+        else {"role": "assistant", "content": f"reply-{i}"}
+        for i in range(20)
+    ]
+
+    # Monkey-patch _do_compact to always raise
+    def failing_compact(*args, **kwargs):
+        raise RuntimeError("compaction engine failed")
+
+    ctx._do_compact = failing_compact
+
+    # Call compact_history 3 times — should trip the circuit breaker
+    for i in range(ctx.MAX_CONSECUTIVE_COMPACTION_FAILURES):
+        result_msgs, _ = ctx.compact_history(messages)
+        assert result_msgs is messages  # unchanged on failure
+
+    assert ctx._compaction_disabled is True
+    assert ctx._consecutive_compaction_failures == ctx.MAX_CONSECUTIVE_COMPACTION_FAILURES
+
+    # should_compact now returns False even when messages exceed threshold
+    assert ctx.should_compact(messages, max_tokens=10) is False
+
+
+def test_compaction_success_resets_failure_counter():
+    """A successful compaction resets the consecutive failure counter."""
+    from aiciv_mind.context_manager import ContextManager
+
+    ctx = ContextManager()
+    ctx._consecutive_compaction_failures = 2  # 1 away from tripping
+
+    # Build enough messages for compaction to actually work
+    messages = []
+    for i in range(12):
+        if i % 2 == 0:
+            messages.append({"role": "user", "content": f"Question {i}: " + "x" * 200})
+        else:
+            messages.append({"role": "assistant", "content": f"Answer {i}: " + "y" * 200})
+
+    result_msgs, summary = ctx.compact_history(messages, preserve_recent=4)
+
+    # Success: counter should be reset
+    assert ctx._consecutive_compaction_failures == 0
+    assert ctx._compaction_disabled is False
+    # Compaction should have reduced message count
+    assert len(result_msgs) < len(messages)
 
 
 # ---------------------------------------------------------------------------

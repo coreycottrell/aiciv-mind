@@ -450,6 +450,30 @@ class MemoryStore:
             )
         return [dict(row) for row in cursor.fetchall()]
 
+    def top_by_depth(
+        self,
+        agent_id: str,
+        limit: int = 5,
+        exclude_types: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return top memories by depth_score for boot context injection."""
+        exclude = exclude_types or ["identity", "handoff"]
+        placeholders = ",".join("?" for _ in exclude)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, agent_id, title, content, domain, memory_type, created_at,
+                   depth_score, access_count, is_pinned
+            FROM memories
+            WHERE agent_id = ?
+              AND memory_type NOT IN ({placeholders})
+              AND is_pinned = 0
+            ORDER BY depth_score DESC
+            LIMIT ?
+            """,
+            (agent_id, *exclude, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def search_by_depth(
         self, agent_id: str | None = None, limit: int = 10
     ) -> list[dict[str, Any]]:

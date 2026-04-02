@@ -19,6 +19,7 @@ class MsgType:
 
     TASK = "task"
     RESULT = "result"
+    COMPLETION = "completion"
     STATUS = "status"
     HEARTBEAT = "heartbeat"
     HEARTBEAT_ACK = "heartbeat_ack"
@@ -197,4 +198,96 @@ class MindMessage:
             sender=sender,
             recipient=recipient,
             payload={"level": level, "message": message},
+        )
+
+    @classmethod
+    def completion(
+        cls,
+        sender: str,
+        recipient: str,
+        event: "MindCompletionEvent",
+    ) -> "MindMessage":
+        """Create a COMPLETION message wrapping a MindCompletionEvent."""
+        return cls(
+            type=MsgType.COMPLETION,
+            sender=sender,
+            recipient=recipient,
+            payload=event.to_dict(),
+        )
+
+
+@dataclass
+class MindCompletionEvent:
+    """
+    Structured result format emitted when a sub-mind finishes a task.
+
+    The coordinator receives summaries, not floods (Principle P5).
+    This is the information architecture for hierarchical context distribution.
+
+    Fields:
+        mind_id      — which mind completed the task
+        task_id      — the task that was completed
+        status       — "success", "error", or "partial"
+        summary      — 5-15 word human-readable summary (the ONLY thing the
+                        coordinator needs to inject into its context)
+        result       — full result text (stored but not necessarily injected)
+        tokens_used  — total tokens consumed by this task
+        tool_calls   — number of tool calls made
+        duration_ms  — wall-clock execution time in milliseconds
+        tools_used   — list of distinct tool names invoked
+        error        — error message if status != "success"
+    """
+
+    mind_id: str
+    task_id: str
+    status: str  # "success", "error", "partial"
+    summary: str
+    result: str = ""
+    tokens_used: int = 0
+    tool_calls: int = 0
+    duration_ms: int = 0
+    tools_used: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict for embedding in MindMessage payload."""
+        return {
+            "mind_id": self.mind_id,
+            "task_id": self.task_id,
+            "status": self.status,
+            "summary": self.summary,
+            "result": self.result,
+            "tokens_used": self.tokens_used,
+            "tool_calls": self.tool_calls,
+            "duration_ms": self.duration_ms,
+            "tools_used": self.tools_used,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MindCompletionEvent":
+        """Deserialize from dict (e.g., from MindMessage payload)."""
+        return cls(
+            mind_id=d["mind_id"],
+            task_id=d["task_id"],
+            status=d["status"],
+            summary=d["summary"],
+            result=d.get("result", ""),
+            tokens_used=d.get("tokens_used", 0),
+            tool_calls=d.get("tool_calls", 0),
+            duration_ms=d.get("duration_ms", 0),
+            tools_used=d.get("tools_used", []),
+            error=d.get("error"),
+        )
+
+    def context_line(self) -> str:
+        """
+        One-line context entry for the coordinator's system prompt.
+
+        Format: [mind_id] STATUS: summary (Nt, Tc tools, Dms)
+        Example: [research-lead] SUCCESS: Found 3 relevant papers (1240t, 5 tools, 3200ms)
+        """
+        return (
+            f"[{self.mind_id}] {self.status.upper()}: {self.summary} "
+            f"({self.tokens_used}t, {self.tool_calls} tools, {self.duration_ms}ms)"
         )

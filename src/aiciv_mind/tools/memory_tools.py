@@ -10,6 +10,7 @@ so each mind instance writes memories tagged to its own identity.
 
 from __future__ import annotations
 
+from aiciv_mind.context import current_mind_id
 from aiciv_mind.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -59,7 +60,10 @@ def _make_search_handler(memory_store):
 
     def memory_search_handler(tool_input: dict) -> str:
         query: str = tool_input.get("query", "").strip()
-        agent_id: str | None = tool_input.get("agent_id")
+        # If the agent didn't specify an agent_id, auto-detect from contextvar.
+        # This means concurrent sub-minds automatically scope their searches
+        # to their own identity without the LLM needing to know its own ID.
+        agent_id: str | None = tool_input.get("agent_id") or current_mind_id()
         limit: int = int(tool_input.get("limit", 5))
         use_depth: bool = tool_input.get("use_depth", True)
 
@@ -166,13 +170,17 @@ def _make_write_handler(memory_store, agent_id: str):
         if not content:
             return "ERROR: No content provided"
 
+        # Resolve effective agent_id: prefer contextvar (accurate for concurrent
+        # sub-minds) over the closure-bound default.
+        effective_agent_id = current_mind_id() or agent_id
+
         # Support both the real MemoryStore (uses Memory dataclass) and a simple
         # callable store (for testing or lighter implementations).
         try:
             # Try real MemoryStore API first.
             from aiciv_mind.memory import Memory
             memory = Memory(
-                agent_id=agent_id,
+                agent_id=effective_agent_id,
                 title=title,
                 content=content,
                 memory_type=memory_type,
@@ -185,7 +193,7 @@ def _make_write_handler(memory_store, agent_id: str):
                 result = memory_store.store(
                     title=title,
                     content=content,
-                    agent_id=agent_id,
+                    agent_id=effective_agent_id,
                     memory_type=memory_type,
                     tags=tags,
                 )

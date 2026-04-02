@@ -53,6 +53,12 @@ class ContextManager:
         # prepend per_turn_str to system prompt each turn
     """
 
+    # Circuit breaker: after this many consecutive compaction failures,
+    # disable compaction for the rest of the session.  Stolen from CC
+    # (CC-INHERIT I-3) — they discovered this the hard way (250K wasted
+    # API calls/day from runaway compaction loops).
+    MAX_CONSECUTIVE_COMPACTION_FAILURES: int = 3
+
     def __init__(
         self,
         max_context_memories: int = 10,
@@ -63,6 +69,9 @@ class ContextManager:
         # Reserve 80% of token budget for memory injection
         self._budget_chars = int(model_max_tokens * 0.80) * _CHARS_PER_TOKEN
         self._scratchpad_dir = scratchpad_dir
+        # Circuit breaker state
+        self._consecutive_compaction_failures: int = 0
+        self._compaction_disabled: bool = False
 
     # ------------------------------------------------------------------
     # Boot context formatting
@@ -108,6 +117,13 @@ class ContextManager:
         if boot.evolution_trajectory:
             parts.append(f"## Evolution Trajectory\n{boot.evolution_trajectory}")
 
+        # Core knowledge — highest-depth memories
+        if boot.top_by_depth_memories:
+            parts.append("## Core Knowledge (most relied-upon memories)")
+            for m in boot.top_by_depth_memories:
+                access_count = m.get("access_count", 0)
+                parts.append(f"### {m['title']}  *(accessed {access_count}x)*\n{m['content']}")
+
         # Daily scratchpad — working notes from today
         if self._scratchpad_dir:
             from datetime import date
@@ -133,22 +149,37 @@ class ContextManager:
         Format FTS5 search results for per-turn injection.
 
         Injects up to max_memories results or until token budget is reached.
+        Each memory includes its created_at timestamp so the mind can judge
+        staleness.  A caveat header reminds the mind that memories are hints,
+        not facts — verify before asserting.
+
         Returns empty string if no results.
         """
         if not results:
             return ""
 
-        lines: list[str] = ["## Relevant memories from prior sessions:"]
-        chars_used = len(lines[0])
+        lines: list[str] = [
+            "## Relevant memories from prior sessions:",
+            (
+                "*These memories are HINTS, not facts. They may be outdated, "
+                "incomplete, or wrong. Before asserting something from memory, "
+                "verify it directly (check the file, call the tool, test the claim). "
+                "Timestamps show when each memory was written — older = higher "
+                "staleness risk.*"
+            ),
+        ]
+        chars_used = sum(len(ln) for ln in lines)
 
         for m in results[: self._max_memories]:
-            entry = f"\n### {m['title']}\n{m['content']}\n"
+            created = m.get("created_at", "unknown")
+            entry = f"\n### {m['title']}  *(written {created})*\n{m['content']}\n"
             if chars_used + len(entry) > self._budget_chars:
                 break
             lines.append(entry)
             chars_used += len(entry)
 
-        if len(lines) == 1:
+        if len(lines) <= 2:
+            # Only the header + caveat — no actual memories fit
             return ""
 
         return "\n".join(lines) + "\n"
@@ -161,10 +192,13 @@ class ContextManager:
         """
         Check if messages should be compacted.
 
-        Both conditions must be true:
-        1. More messages than preserve_recent + 2 (room for summary pair)
-        2. Estimated token count exceeds threshold
+        All conditions must be true:
+        1. Circuit breaker not tripped (fewer than MAX_CONSECUTIVE_COMPACTION_FAILURES)
+        2. More messages than preserve_recent + 2 (room for summary pair)
+        3. Estimated token count exceeds threshold
         """
+        if self._compaction_disabled:
+            return False
         if len(messages) <= 6:  # minimum: need old messages + summary pair + recent
             return False
         total_chars = sum(self._message_chars(m) for m in messages)
@@ -184,8 +218,30 @@ class ContextManager:
         - Build heuristic summary from old messages, merging with prior summaries
         - Return [summary_user, summary_assistant] + recent (maintains alternation)
 
+        Circuit breaker: tracks consecutive failures. After
+        MAX_CONSECUTIVE_COMPACTION_FAILURES, disables compaction for the session.
+
         Returns (compacted_messages, updated_summary_text).
         """
+        try:
+            result = self._do_compact(messages, preserve_recent, existing_summary)
+            # Success — reset the failure counter
+            self._consecutive_compaction_failures = 0
+            return result
+        except Exception:
+            self._consecutive_compaction_failures += 1
+            if self._consecutive_compaction_failures >= self.MAX_CONSECUTIVE_COMPACTION_FAILURES:
+                self._compaction_disabled = True
+            # On failure, return messages unchanged
+            return messages, existing_summary
+
+    def _do_compact(
+        self,
+        messages: list[dict],
+        preserve_recent: int,
+        existing_summary: str,
+    ) -> tuple[list[dict], str]:
+        """Core compaction logic — called by compact_history with circuit breaker wrapper."""
         if len(messages) <= preserve_recent + 2:
             return messages, existing_summary
 

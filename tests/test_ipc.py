@@ -14,7 +14,7 @@ import uuid
 
 import pytest
 
-from aiciv_mind.ipc import MindMessage, MsgType, PrimaryBus, SubMindBus
+from aiciv_mind.ipc import MindCompletionEvent, MindMessage, MsgType, PrimaryBus, SubMindBus
 
 
 # ---------------------------------------------------------------------------
@@ -374,3 +374,125 @@ def test_mindmessage_shutdown_ack_factory() -> None:
     )
     assert msg.type == MsgType.SHUTDOWN_ACK
     assert msg.payload["mind_id"] == "research-lead"
+
+
+# ---------------------------------------------------------------------------
+# MindCompletionEvent tests
+# ---------------------------------------------------------------------------
+
+
+def test_completion_event_to_dict() -> None:
+    """MindCompletionEvent.to_dict() serializes all fields."""
+    event = MindCompletionEvent(
+        mind_id="research-lead",
+        task_id="task-42",
+        status="success",
+        summary="Found 3 relevant papers",
+        result="Detailed analysis of papers...",
+        tokens_used=1240,
+        tool_calls=5,
+        duration_ms=3200,
+        tools_used=["web_search", "memory_write"],
+        error=None,
+    )
+    d = event.to_dict()
+    assert d["mind_id"] == "research-lead"
+    assert d["task_id"] == "task-42"
+    assert d["status"] == "success"
+    assert d["summary"] == "Found 3 relevant papers"
+    assert d["tokens_used"] == 1240
+    assert d["tool_calls"] == 5
+    assert d["duration_ms"] == 3200
+    assert d["tools_used"] == ["web_search", "memory_write"]
+    assert d["error"] is None
+
+
+def test_completion_event_from_dict() -> None:
+    """MindCompletionEvent.from_dict() round-trips through to_dict()."""
+    original = MindCompletionEvent(
+        mind_id="infra-lead",
+        task_id="deploy-99",
+        status="error",
+        summary="Deploy failed on step 3",
+        result="",
+        tokens_used=500,
+        tool_calls=2,
+        duration_ms=8000,
+        tools_used=["bash"],
+        error="Connection refused",
+    )
+    restored = MindCompletionEvent.from_dict(original.to_dict())
+    assert restored.mind_id == original.mind_id
+    assert restored.task_id == original.task_id
+    assert restored.status == original.status
+    assert restored.summary == original.summary
+    assert restored.error == original.error
+    assert restored.tools_used == original.tools_used
+
+
+def test_completion_event_from_dict_defaults() -> None:
+    """from_dict() fills defaults for optional fields."""
+    minimal = {
+        "mind_id": "test-mind",
+        "task_id": "t1",
+        "status": "success",
+        "summary": "Done",
+    }
+    event = MindCompletionEvent.from_dict(minimal)
+    assert event.result == ""
+    assert event.tokens_used == 0
+    assert event.tool_calls == 0
+    assert event.duration_ms == 0
+    assert event.tools_used == []
+    assert event.error is None
+
+
+def test_completion_event_context_line() -> None:
+    """context_line() produces a compact one-liner for coordinator injection."""
+    event = MindCompletionEvent(
+        mind_id="memory-lead",
+        task_id="t5",
+        status="success",
+        summary="Consolidated 12 stale memories",
+        tokens_used=800,
+        tool_calls=3,
+        duration_ms=1500,
+    )
+    line = event.context_line()
+    assert "[memory-lead]" in line
+    assert "SUCCESS" in line
+    assert "Consolidated 12 stale memories" in line
+    assert "800t" in line
+    assert "3 tools" in line
+    assert "1500ms" in line
+
+
+def test_mindmessage_completion_factory() -> None:
+    """MindMessage.completion() wraps a MindCompletionEvent in a COMPLETION message."""
+    event = MindCompletionEvent(
+        mind_id="research-lead",
+        task_id="task-77",
+        status="partial",
+        summary="Found 2 of 5 requested items",
+        tokens_used=600,
+        tool_calls=4,
+        duration_ms=2000,
+    )
+    msg = MindMessage.completion(
+        sender="research-lead",
+        recipient="primary",
+        event=event,
+    )
+    assert msg.type == MsgType.COMPLETION
+    assert msg.sender == "research-lead"
+    assert msg.recipient == "primary"
+    assert msg.payload["mind_id"] == "research-lead"
+    assert msg.payload["task_id"] == "task-77"
+    assert msg.payload["status"] == "partial"
+
+    # Verify round-trip through MindMessage serialization
+    wire = msg.to_bytes()
+    restored_msg = MindMessage.from_bytes(wire)
+    restored_event = MindCompletionEvent.from_dict(restored_msg.payload)
+    assert restored_event.mind_id == "research-lead"
+    assert restored_event.summary == "Found 2 of 5 requested items"

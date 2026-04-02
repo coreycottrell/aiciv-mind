@@ -24,6 +24,7 @@ from typing import Any
 
 import anthropic
 
+from aiciv_mind.context import mind_context
 from aiciv_mind.manifest import MindManifest
 from aiciv_mind.memory import MemoryStore
 from aiciv_mind.tools import ToolRegistry
@@ -116,6 +117,14 @@ class Mind:
         if fresh_context:
             self._messages = []
 
+        # Wrap entire task execution in mind_context so that any code
+        # in the call stack can call current_mind_id() to identify which
+        # mind is executing (critical for concurrent sub-minds).
+        async with mind_context(self.manifest.mind_id):
+            return await self._run_task_body(task, inject_memories)
+
+    async def _run_task_body(self, task: str, inject_memories: bool) -> str:
+        """Task execution body — always runs inside a mind_context scope."""
         # Build system prompt in cache-optimal order:
         #   STATIC  (base prompt — identity, principles) ← ALWAYS first → always cached
         #   STABLE  (boot context — handoff, pinned)     ← stable across turns → cached
@@ -133,11 +142,42 @@ class Mind:
 
         # SEMI-STABLE: per-turn search results appended last
         if inject_memories and self.manifest.memory.auto_search_before_task:
+            # Phase 1: Direct search on task text
+            max_memories = self.manifest.memory.max_context_memories
             memories = self.memory.search(
                 query=task,
                 agent_id=self.manifest.mind_id,
-                limit=self.manifest.memory.max_context_memories,
+                limit=max_memories,
             )
+            seen_ids = {m["id"] for m in memories}
+
+            # Phase 2: If we have budget remaining, broaden search with extracted keywords
+            if len(memories) < max_memories:
+                _STOP_WORDS = {
+                    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+                    "being", "have", "has", "had", "do", "does", "did", "will",
+                    "would", "could", "should", "may", "might", "can", "shall",
+                    "to", "of", "in", "for", "on", "with", "at", "by", "from",
+                    "and", "or", "not", "no", "but", "if", "then", "so", "as",
+                    "this", "that", "it", "its", "my", "your", "our", "their",
+                    "what", "which", "who", "whom", "how", "when", "where", "why",
+                    "all", "each", "every", "any", "some", "i", "you", "we", "they",
+                }
+                words = [w for w in task.lower().split() if w not in _STOP_WORDS and len(w) > 2]
+                # Take up to 5 significant words as a broadened query
+                if words:
+                    broad_query = " ".join(words[:5])
+                    if broad_query != task.lower().strip():
+                        extra = self.memory.search(
+                            query=broad_query,
+                            agent_id=self.manifest.mind_id,
+                            limit=max_memories - len(memories),
+                        )
+                        for m in extra:
+                            if m["id"] not in seen_ids:
+                                memories.append(m)
+                                seen_ids.add(m["id"])
+
             if memories:
                 # Touch accessed memories (update depth signals)
                 for m in memories:
@@ -145,9 +185,13 @@ class Mind:
                 if self._context_manager:
                     memory_context = self._context_manager.format_search_results(memories)
                 else:
-                    memory_context = "\n\n## Relevant memories from prior sessions:\n"
+                    memory_context = (
+                        "\n\n## Relevant memories from prior sessions:\n"
+                        "*These memories are HINTS, not facts. Verify before asserting.*\n"
+                    )
                     for m in memories:
-                        memory_context += f"\n### {m['title']}\n{m['content']}\n"
+                        created = m.get("created_at", "unknown")
+                        memory_context += f"\n### {m['title']}  *(written {created})*\n{m['content']}\n"
                 system_prompt = system_prompt + memory_context
 
         # Record this turn in the session journal
@@ -204,6 +248,26 @@ class Mind:
                     self.manifest.mind_id, len(self._messages),
                     len(self._compacted_summary),
                 )
+
+            # Token budget awareness: warn when context pressure is high
+            if self._context_manager and iteration == 1:
+                est_tokens = self._context_manager.estimate_tokens(
+                    system_prompt + str(self._messages)
+                )
+                model_max = self.manifest.model.max_tokens
+                if model_max > 0:
+                    pct = est_tokens / model_max
+                    if pct > 0.85:
+                        logger.warning(
+                            "[%s] Context pressure CRITICAL: ~%d tokens (%.0f%% of %d). "
+                            "Compaction should trigger.",
+                            self.manifest.mind_id, est_tokens, pct * 100, model_max,
+                        )
+                    elif pct > 0.70:
+                        logger.info(
+                            "[%s] Context pressure HIGH: ~%d tokens (%.0f%% of %d)",
+                            self.manifest.mind_id, est_tokens, pct * 100, model_max,
+                        )
 
             iter_start = time.monotonic()
             try:
@@ -628,6 +692,17 @@ class Mind:
         """
         blocks = []
         registered = set(self._tools.names())
+        # Build a case-insensitive lookup: lowered name → canonical name
+        # This handles M2.7 emitting "Memory_Search" instead of "memory_search"
+        name_lookup = {n.lower().replace("-", "_"): n for n in registered}
+
+        def _normalize_tool_name(raw: str | None) -> str | None:
+            """Normalize a tool name to its registered canonical form."""
+            if not raw:
+                return None
+            if raw in registered:
+                return raw
+            return name_lookup.get(raw.lower().replace("-", "_"))
 
         # Extract all JSON objects from the text (handles nested braces)
         for candidate in self._extract_json_objects(text):
@@ -640,16 +715,16 @@ class Mind:
                 continue
 
             # Format 1: {"name": "tool", "arguments": {...}}
-            name = obj.get("name")
+            name = _normalize_tool_name(obj.get("name"))
             args = obj.get("arguments", {})
 
             # Format 2: {"type": "function", "function": {"name": "tool", "parameters": {...}}}
             if not name and isinstance(obj.get("function"), dict):
                 fn = obj["function"]
-                name = fn.get("name")
+                name = _normalize_tool_name(fn.get("name"))
                 args = fn.get("parameters", fn.get("arguments", {}))
 
-            if not name or name not in registered:
+            if not name:
                 continue
             if not isinstance(args, dict):
                 continue
@@ -685,8 +760,8 @@ class Mind:
                 name_match = re.search(r'tool\s*=>\s*"([^"]+)"', block_text)
                 if not name_match:
                     continue
-                name = name_match.group(1)
-                if name not in registered:
+                name = _normalize_tool_name(name_match.group(1))
+                if not name:
                     continue
 
                 # Find args => { ... } using brace-counting
@@ -751,8 +826,8 @@ class Mind:
                 re.DOTALL,
             )
             for match in invoke_re.finditer(text):
-                name = match.group(1)
-                if name not in registered:
+                name = _normalize_tool_name(match.group(1))
+                if not name:
                     continue
                 # Parse <parameter name="key">value</parameter> pairs
                 args = {}

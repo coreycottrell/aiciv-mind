@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from aiciv_mind.registry import MindHandle, MindRegistry, MindState
+from aiciv_mind.security import scrub_env_for_submind
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +74,22 @@ class SubMindSpawner:
         python_bin = sys.executable
         run_script = self._mind_root / "run_submind.py"
 
-        # Source .env so sub-minds inherit MIND_API_KEY and other config
-        env_file = self._mind_root / ".env"
-        env_source = f"set -a && source {env_file} && set +a && " if env_file.exists() else ""
+        # Security: build a scrubbed environment for the sub-mind.
+        # Sub-minds need MIND_API_KEY but should not inherit all parent credentials.
+        mind_api_key = os.environ.get("MIND_API_KEY")
+        safe_env = scrub_env_for_submind(mind_api_key=mind_api_key)
+
+        # Build env export prefix for the tmux shell command.
+        # Only export the scrubbed vars, not the full parent environment.
+        env_exports = " ".join(
+            f'{k}="{v}"' for k, v in safe_env.items()
+            if k in ("MIND_API_KEY", "PYTHONPATH", "VIRTUAL_ENV", "PATH", "HOME")
+        )
+        env_prefix = f"export {env_exports} && " if env_exports else ""
 
         cmd = (
             f"cd {self._mind_root} && "
-            f"{env_source}"
+            f"{env_prefix}"
             f"{python_bin} {run_script} "
             f"--manifest {manifest_path} "
             f"--id {mind_id}"

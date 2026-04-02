@@ -109,8 +109,8 @@ def test_spawn_creates_window(mock_libtmux, tmp_path) -> None:
         len(call_kwargs.args) > 0 and call_kwargs.args[0] == "research-lead"
     )
 
-    # window_command should contain the mind_id and manifest path
-    window_cmd = call_kwargs.kwargs.get("window_command", "")
+    # window_shell should contain the mind_id and manifest path
+    window_cmd = call_kwargs.kwargs.get("window_shell", "")
     assert "research-lead" in window_cmd
     assert str(manifest.resolve()) in window_cmd
     assert "run_submind.py" in window_cmd

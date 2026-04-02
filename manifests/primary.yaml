@@ -192,6 +192,22 @@ scheduled_tasks:
       8 tool calls max. Be specific, not theatrical.
     enabled: true
 
+  - name: "nightly_dream"
+    interval_minutes: 1440
+    prompt: >
+      [Nightly Dream Cycle — autonomous reflection and consolidation]
+
+      Run the dream cycle by executing: bash tools/run_dream_cycle.sh
+
+      After it completes, read the output and write a brief scratchpad entry
+      summarizing what the dream cycle found (consolidated, pruned, or proposed).
+
+      If the dream cycle script is not available or fails, perform a manual
+      mini-dream: (1) call memory_search("recent errors OR patterns") to find
+      recurring issues, (2) call evolution_log_write() if you discover a pattern,
+      (3) write a scratchpad entry with your findings.
+    enabled: true
+
 sub_minds:
   - mind_id: "research-lead"
     manifest_path: "manifests/research-lead.yaml"

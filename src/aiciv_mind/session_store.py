@@ -49,6 +49,9 @@ class BootContext:
     # Evolution trajectory — "what was I becoming?"
     evolution_trajectory: str = ""
 
+    # Core knowledge — highest-depth memories (most relied upon)
+    top_by_depth_memories: list[dict[str, Any]] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # SessionStore
@@ -136,6 +139,20 @@ class SessionStore:
         # Evolution trajectory — what was I becoming?
         evolution_trajectory = self._memory.get_evolution_trajectory(self._agent_id)
 
+        # Core knowledge — most-accessed memories (excludes identity/handoff/pinned already loaded)
+        top_memories = self._memory.top_by_depth(
+            agent_id=self._agent_id,
+            limit=5,
+            exclude_types=["identity", "handoff"],
+        )
+        # Filter out any that are already pinned (avoid duplicates)
+        pinned_ids = {m["id"] for m in pinned}
+        top_memories = [m for m in top_memories if m["id"] not in pinned_ids]
+
+        # Touch top-by-depth memories at boot (drives depth scores up)
+        for m in top_memories:
+            self._memory.touch(m["id"])
+
         return BootContext(
             session_id=self._session_id,
             session_count=self._count_sessions(),
@@ -145,6 +162,7 @@ class SessionStore:
             active_threads=[],
             pinned_memories=pinned,
             evolution_trajectory=evolution_trajectory,
+            top_by_depth_memories=top_memories,
         )
 
     def _count_sessions(self) -> int:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+from aiciv_mind.security import scrub_env
 from aiciv_mind.tools import ToolRegistry
 
 # Commands that are never allowed, regardless of context.
@@ -63,11 +64,16 @@ async def bash_handler(tool_input: dict) -> str:
             return f"BLOCKED: Command contains blocked pattern: '{pattern}'"
 
     try:
+        # Security: scrub credentials from subprocess environment.
+        # Bash commands should not have access to API keys, tokens, etc.
+        safe_env = scrub_env()
+
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=working_dir,
+            env=safe_env,
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_SECONDS)

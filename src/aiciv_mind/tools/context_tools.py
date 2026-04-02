@@ -309,6 +309,87 @@ def _make_snapshot_handler(memory_store, agent_id: str, get_message_count=None):
 
 
 # ---------------------------------------------------------------------------
+# compact_context
+# ---------------------------------------------------------------------------
+
+_COMPACT_DEFINITION: dict = {
+    "name": "compact_context",
+    "description": (
+        "Manually trigger context compaction. Summarizes older messages and "
+        "preserves recent ones verbatim. Use when context pressure is high "
+        "or before a complex multi-tool task that needs headroom. "
+        "Returns compaction stats or a reason why compaction was skipped."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "preserve_recent": {
+                "type": "integer",
+                "description": "Number of recent messages to keep verbatim (default: 4)",
+            },
+        },
+    },
+}
+
+
+def _make_compact_handler(get_context_manager, get_messages, set_messages, get_compacted_summary, set_compacted_summary):
+    """
+    Return a compact_context handler that can trigger manual compaction.
+
+    The handler needs indirect access to the Mind's mutable state via closures:
+    - get_context_manager() → ContextManager instance
+    - get_messages() → current message list
+    - set_messages(msgs) → replace message list
+    - get_compacted_summary() → current summary string
+    - set_compacted_summary(s) → update summary string
+    """
+
+    def compact_handler(tool_input: dict) -> str:
+        ctx = get_context_manager()
+        if ctx is None:
+            return "ERROR: No ContextManager available — compaction not configured"
+
+        if ctx._compaction_disabled:
+            return (
+                f"BLOCKED: Compaction circuit breaker tripped "
+                f"({ctx._consecutive_compaction_failures} consecutive failures). "
+                f"Compaction disabled for this session."
+            )
+
+        messages = get_messages()
+        preserve_recent = int(tool_input.get("preserve_recent", 4))
+
+        if len(messages) <= preserve_recent + 2:
+            return (
+                f"SKIPPED: Only {len(messages)} messages — "
+                f"need more than {preserve_recent + 2} to compact."
+            )
+
+        before_count = len(messages)
+        existing_summary = get_compacted_summary()
+
+        compacted, summary = ctx.compact_history(
+            messages,
+            preserve_recent=preserve_recent,
+            existing_summary=existing_summary,
+        )
+
+        if len(compacted) == before_count:
+            return "SKIPPED: Compaction did not reduce message count (split point issue)."
+
+        set_messages(compacted)
+        set_compacted_summary(summary)
+
+        return (
+            f"Compacted: {before_count} → {len(compacted)} messages. "
+            f"Summary: {len(summary)} chars. "
+            f"Preserved {preserve_recent} recent messages verbatim."
+        )
+
+    return compact_handler
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -319,12 +400,18 @@ def register_context_tools(
     agent_id: str,
     get_session_store=None,
     get_message_count=None,
+    get_context_manager=None,
+    get_messages=None,
+    set_messages=None,
+    get_compacted_summary=None,
+    set_compacted_summary=None,
 ) -> None:
     """
-    Register pin_memory, unpin_memory, introspect_context, and get_context_snapshot tools.
+    Register context agency tools: pin, unpin, introspect, snapshot, compact.
 
     All tools close over memory_store. introspect_context and get_context_snapshot also use
     get_session_store (a callable returning session_store) and get_message_count for richer context reporting.
+    compact_context requires closures over mutable Mind state for message manipulation.
     """
     registry.register(
         "pin_memory",
@@ -350,3 +437,14 @@ def register_context_tools(
         _make_snapshot_handler(memory_store, agent_id, get_message_count),
         read_only=True,
     )
+    # compact_context: only register if the Mind provided state closures
+    if all([get_context_manager, get_messages, set_messages, get_compacted_summary, set_compacted_summary]):
+        registry.register(
+            "compact_context",
+            _COMPACT_DEFINITION,
+            _make_compact_handler(
+                get_context_manager, get_messages, set_messages,
+                get_compacted_summary, set_compacted_summary,
+            ),
+            read_only=False,
+        )
