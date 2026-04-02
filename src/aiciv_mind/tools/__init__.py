@@ -32,6 +32,10 @@ class ToolRegistry:
         """Attach a HookRunner for pre/post tool execution governance."""
         self._hooks = hooks
 
+    def get_hooks(self):
+        """Return the attached HookRunner, or None."""
+        return self._hooks
+
     def register(
         self,
         name: str,

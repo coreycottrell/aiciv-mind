@@ -522,6 +522,20 @@ class Mind:
         except Exception:
             pass  # Learner must NEVER crash the task return
 
+        # ── Stop Hook (lifecycle) ─────────────────────────────────────
+        # Fire on_stop so registered callbacks can do cleanup/notifications.
+        try:
+            hooks = self._tools.get_hooks()
+            if hooks:
+                hooks.on_stop(
+                    mind_id=self.manifest.mind_id,
+                    result=final_text[:500] if final_text else "",
+                    tool_calls=tool_call_count,
+                    session_id=self._session_id or "",
+                )
+        except Exception:
+            pass  # Lifecycle hooks must NEVER crash the task return
+
         return final_text
 
     def session_wrapup(self) -> dict[str, Any]:

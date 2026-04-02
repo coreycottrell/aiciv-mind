@@ -1,8 +1,12 @@
 """
-aiciv_mind.tools.hooks — Pre/post tool execution hooks.
+aiciv_mind.tools.hooks — Pre/post tool execution hooks + lifecycle hooks.
 
 Governance layer for tool execution. Pre-hooks can deny tool calls.
 Post-hooks log calls for auditing. Pattern from clawd-code HookRunner.
+
+Lifecycle hooks:
+    - on_stop: fires when a mind's response completes (cleanup, notifications)
+    - on_submind_stop: fires when a spawned sub-mind completes (collect results)
 
 Usage:
     hooks = HookRunner(blocked_tools=["git_push", "netlify_deploy"])
@@ -14,6 +18,10 @@ Usage:
     result = execute_tool(...)
 
     post = hooks.post_tool_use("git_push", input, result, is_error=False)
+
+    # Lifecycle:
+    hooks.on_stop(mind_id="primary", result="task complete", tool_calls=5)
+    hooks.on_submind_stop(parent_id="primary", child_id="researcher", result="found 3 papers")
 """
 
 from __future__ import annotations
@@ -21,8 +29,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# Type for lifecycle callbacks
+LifecycleCallback = Callable[..., None]
 
 
 @dataclass
@@ -149,3 +161,105 @@ class HookRunner:
             "logged": len(self._call_log),
             "blocked_tools": sorted(self._blocked_tools),
         }
+
+    # ------------------------------------------------------------------
+    # Lifecycle hooks — fire at mind lifecycle events
+    # ------------------------------------------------------------------
+
+    def register_on_stop(self, callback: LifecycleCallback) -> None:
+        """Register a callback to fire when a mind's response completes."""
+        if not hasattr(self, "_on_stop_callbacks"):
+            self._on_stop_callbacks: list[LifecycleCallback] = []
+        self._on_stop_callbacks.append(callback)
+
+    def register_on_submind_stop(self, callback: LifecycleCallback) -> None:
+        """Register a callback to fire when a sub-mind completes."""
+        if not hasattr(self, "_on_submind_stop_callbacks"):
+            self._on_submind_stop_callbacks: list[LifecycleCallback] = []
+        self._on_submind_stop_callbacks.append(callback)
+
+    def on_stop(
+        self,
+        mind_id: str,
+        result: str,
+        tool_calls: int = 0,
+        session_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Fire stop hook — called when a mind's task execution completes.
+
+        Used for:
+        - Cleanup (releasing resources, closing connections)
+        - Notifications (alerting other systems of completion)
+        - Session learning (triggering Loop 2 wrapup)
+        - Handoff preparation (writing session state for next boot)
+        """
+        logger.info(
+            "[hooks] on_stop: mind=%s, tool_calls=%d, result_len=%d",
+            mind_id, tool_calls, len(result),
+        )
+
+        if self._log_all:
+            self._call_log.append(ToolCallRecord(
+                timestamp=datetime.now().isoformat(),
+                tool_name="__lifecycle_stop__",
+                input_preview=f"mind_id={mind_id}, session={session_id}",
+                output_preview=result[:200],
+                is_error=False,
+            ))
+
+        for cb in getattr(self, "_on_stop_callbacks", []):
+            try:
+                cb(
+                    mind_id=mind_id,
+                    result=result,
+                    tool_calls=tool_calls,
+                    session_id=session_id,
+                    metadata=metadata or {},
+                )
+            except Exception as e:
+                logger.error("[hooks] on_stop callback error: %s", e)
+
+    def on_submind_stop(
+        self,
+        parent_id: str,
+        child_id: str,
+        result: str,
+        exit_code: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Fire sub-mind stop hook — called when a spawned sub-mind completes.
+
+        Used for:
+        - Result collection (gathering output from parallel sub-minds)
+        - Resource cleanup (freeing context windows, tmux panes)
+        - Error detection (sub-mind crashed or failed)
+        - Orchestration (deciding next steps based on sub-mind results)
+        """
+        logger.info(
+            "[hooks] on_submind_stop: parent=%s, child=%s, exit=%d, result_len=%d",
+            parent_id, child_id, exit_code, len(result),
+        )
+
+        if self._log_all:
+            self._call_log.append(ToolCallRecord(
+                timestamp=datetime.now().isoformat(),
+                tool_name="__lifecycle_submind_stop__",
+                input_preview=f"parent={parent_id}, child={child_id}, exit={exit_code}",
+                output_preview=result[:200],
+                is_error=exit_code != 0,
+            ))
+
+        for cb in getattr(self, "_on_submind_stop_callbacks", []):
+            try:
+                cb(
+                    parent_id=parent_id,
+                    child_id=child_id,
+                    result=result,
+                    exit_code=exit_code,
+                    metadata=metadata or {},
+                )
+            except Exception as e:
+                logger.error("[hooks] on_submind_stop callback error: %s", e)
