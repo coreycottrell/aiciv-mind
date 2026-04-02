@@ -138,6 +138,8 @@ class ToolRegistry:
         scratchpad_dir: str | None = None,
         manifest_path: str | None = None,
         agentmail_inbox: str | None = None,
+        keypair_path: str | None = None,
+        calendar_id: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
@@ -220,5 +222,9 @@ class ToolRegistry:
             memory_store=memory_store,
             mind_root=str(Path(__file__).parent.parent.parent.parent) if memory_store else None,
         )
+
+        if keypair_path is not None and calendar_id is not None:
+            from aiciv_mind.tools.calendar_tools import register_calendar_tools
+            register_calendar_tools(registry, keypair_path, calendar_id)
 
         return registry

@@ -111,6 +111,12 @@ tools:
     enabled: true
   - name: "memory_superseded"
     enabled: true
+  - name: "calendar_list_events"
+    enabled: true
+  - name: "calendar_create_event"
+    enabled: true
+  - name: "calendar_delete_event"
+    enabled: true
 
 compaction:
   enabled: true
@@ -125,6 +131,7 @@ hooks:
 auth:
   civ_id: "acg"
   keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+  calendar_id: "cal_b576313e639e4ce2809179943341a6c1"
 
 agentmail:
   inbox: "root-aiciv@agentmail.to"

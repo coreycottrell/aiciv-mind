@@ -37,6 +37,7 @@ class AuthConfig(BaseModel):
 
     civ_id: str
     keypair_path: str  # Resolved to absolute by MindManifest.from_yaml
+    calendar_id: str | None = None  # AgentCal calendar ID (optional)
 
 
 class MemoryConfig(BaseModel):

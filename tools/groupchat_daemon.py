@@ -286,6 +286,10 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     # AgentMail inbox from manifest (enables email_read + email_send)
     agentmail_inbox = manifest.agentmail.inbox if manifest.agentmail.inbox else None
 
+    # AgentCal config from manifest auth section
+    keypair_path = getattr(manifest.auth, "keypair_path", None)
+    calendar_id = getattr(manifest.auth, "calendar_id", None)
+
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
@@ -299,6 +303,8 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
         spawner=spawner,
         primary_bus=primary_bus,
         agentmail_inbox=agentmail_inbox,
+        keypair_path=keypair_path,
+        calendar_id=calendar_id,
     )
 
     session_store = SessionStore(memory, agent_id=manifest.mind_id)
