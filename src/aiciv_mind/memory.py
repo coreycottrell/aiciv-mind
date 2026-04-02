@@ -3,7 +3,8 @@ aiciv_mind.memory — SQLite + FTS5 memory store.
 
 Memory is not bolted on — it IS the architecture. Every mind has a MemoryStore.
 The store persists learnings, decisions, errors, and observations across sessions
-and surfaces them via full-text search (BM25 ranking via FTS5).
+and surfaces them via full-text search (BM25 ranking via FTS5, weighted by
+depth_score so frequently-accessed and pinned memories rank higher).
 
 Design notes:
 - db_path=":memory:" is supported for in-process tests.
@@ -287,12 +288,24 @@ class MemoryStore:
         domain: str | None = None,
         memory_type: str | None = None,
         limit: int = 20,
+        use_depth: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Full-text search over memories using FTS5 BM25 ranking.
 
         Filters by agent_id, domain, and/or memory_type when provided.
-        Results are ordered by relevance (rank, lower BM25 = better match).
+
+        When *use_depth* is True (the default) results are ordered by a
+        combined score that multiplies BM25 rank (lower = better) by a
+        depth-score discount factor:
+
+            rank * (1.0 - COALESCE(depth_score, 0.0) * 0.5)
+
+        A depth_score of 1.0 shrinks effective rank by 50%, boosting that
+        memory higher in the results.  A depth_score of 0.0 leaves rank
+        unchanged.
+
+        When *use_depth* is False the original pure-BM25 ordering is used.
         """
         # FTS5 MATCH cannot handle punctuation — strip to words only.
         clean_query = " ".join(re.findall(r"\w+", query))
@@ -316,6 +329,13 @@ class MemoryStore:
         if filters:
             where_clause = "AND " + " AND ".join(filters)
 
+        if use_depth:
+            order_clause = (
+                "ORDER BY (rank * (1.0 - COALESCE(m.depth_score, 0.0) * 0.5))"
+            )
+        else:
+            order_clause = "ORDER BY rank"
+
         params.append(limit)
 
         sql = f"""
@@ -324,7 +344,7 @@ class MemoryStore:
             JOIN memories_fts fts ON m.rowid = fts.rowid
             WHERE memories_fts MATCH ?
             {where_clause}
-            ORDER BY rank
+            {order_clause}
             LIMIT ?
         """
         cursor = self._conn.execute(sql, params)

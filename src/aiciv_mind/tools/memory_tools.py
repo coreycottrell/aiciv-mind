@@ -19,8 +19,11 @@ from aiciv_mind.tools import ToolRegistry
 _SEARCH_DEFINITION: dict = {
     "name": "memory_search",
     "description": (
-        "Search stored memories using full-text search. "
-        "Returns relevant memories formatted as markdown sections. "
+        "Search stored memories using depth-weighted full-text search. "
+        "Results combine BM25 text relevance with each memory's depth_score "
+        "(a 0-1 signal reflecting access frequency, recency, pinning, and "
+        "human endorsement). High-depth memories rank higher by default. "
+        "Set use_depth=false for pure BM25 ranking. "
         "Use before starting any significant task to surface prior learnings."
     ),
     "input_schema": {
@@ -38,6 +41,13 @@ _SEARCH_DEFINITION: dict = {
                 "type": "integer",
                 "description": "Maximum number of results to return (default: 5)",
             },
+            "use_depth": {
+                "type": "boolean",
+                "description": (
+                    "When true (default), rank results by BM25 relevance weighted "
+                    "by depth_score. When false, use pure BM25 text relevance."
+                ),
+            },
         },
         "required": ["query"],
     },
@@ -51,12 +61,15 @@ def _make_search_handler(memory_store):
         query: str = tool_input.get("query", "").strip()
         agent_id: str | None = tool_input.get("agent_id")
         limit: int = int(tool_input.get("limit", 5))
+        use_depth: bool = tool_input.get("use_depth", True)
 
         if not query:
             return "ERROR: No query provided"
 
         try:
-            results = memory_store.search(query=query, agent_id=agent_id, limit=limit)
+            results = memory_store.search(
+                query=query, agent_id=agent_id, limit=limit, use_depth=use_depth,
+            )
         except Exception as e:
             return f"ERROR: Memory search failed: {type(e).__name__}: {e}"
 

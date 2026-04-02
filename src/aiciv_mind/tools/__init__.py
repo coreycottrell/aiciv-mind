@@ -140,6 +140,7 @@ class ToolRegistry:
         agentmail_inbox: str | None = None,
         keypair_path: str | None = None,
         calendar_id: str | None = None,
+        mind_lead_scratchpad_dir: str | None = None,
     ) -> "ToolRegistry":
         """
         Create a ToolRegistry with all built-in tools registered.
@@ -205,7 +206,7 @@ class ToolRegistry:
 
         if scratchpad_dir is not None:
             from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
-            register_scratchpad_tools(registry, scratchpad_dir)
+            register_scratchpad_tools(registry, scratchpad_dir, mind_lead_scratchpad_dir)
 
         if manifest_path is not None:
             from aiciv_mind.tools.sandbox_tools import register_sandbox_tools
