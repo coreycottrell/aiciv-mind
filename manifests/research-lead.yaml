@@ -3,7 +3,7 @@ mind_id: "research-lead"
 display_name: "Research Team Lead"
 role: "team-lead"
 
-system_prompt_path: "prompts/research-lead.md"
+system_prompt_path: "self/research-lead.md"
 
 model:
   preferred: "minimax-m27"

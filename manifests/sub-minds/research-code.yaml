@@ -8,7 +8,7 @@ role: "specialist"
 # Answers questions about how code actually works by reading source files.
 # Uses grep, glob, read_file. Returns file references and concrete findings.
 
-system_prompt_path: "prompts/sub-minds/research-code.md"
+system_prompt_path: "../self/sub-minds/research-code.md"
 
 model:
   preferred: "devstral-free"        # code specialist model

@@ -3,7 +3,7 @@ mind_id: "context-engineer"
 display_name: "Context Engineering Sub-Mind"
 role: "context-optimizer"
 
-system_prompt_path: "prompts/context-engineer.md"
+system_prompt_path: "self/context-engineer.md"
 
 model:
   preferred: "kimi-k2"

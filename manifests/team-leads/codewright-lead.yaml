@@ -19,7 +19,7 @@ role: "team-lead"
 # Coordinates with Archivist: Codewright provides top 3 failure patterns
 # for inclusion in Archivist's session-start continuity summary.
 
-system_prompt_path: "prompts/team-leads/codewright-lead.md"
+system_prompt_path: "../self/team-leads/codewright-lead.md"
 
 model:
   preferred: "minimax-m27"

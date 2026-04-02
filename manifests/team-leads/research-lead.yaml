@@ -13,7 +13,7 @@ role: "team-lead"
 # capability — research-lead remembers what was investigated, what dead
 # ends were found, what sources proved reliable.
 
-system_prompt_path: "prompts/team-leads/research-lead.md"
+system_prompt_path: "../self/team-leads/research-lead.md"
 
 model:
   preferred: "minimax-m27"

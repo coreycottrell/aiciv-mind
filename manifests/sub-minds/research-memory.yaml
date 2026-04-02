@@ -8,7 +8,7 @@ role: "specialist"
 # Searches memory, scratchpad, journals. Read-only. Returns what Root already knows
 # so research-lead can decide what gaps still need external investigation.
 
-system_prompt_path: "prompts/sub-minds/research-memory.md"
+system_prompt_path: "../self/sub-minds/research-memory.md"
 
 model:
   preferred: "qwen3-next-free"      # 262K context — room for large memory search results

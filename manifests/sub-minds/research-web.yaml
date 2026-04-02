@@ -8,7 +8,7 @@ role: "specialist"
 # One question in, structured findings out. Does not persist state.
 # research-lead synthesizes output from this and sibling sub-minds.
 
-system_prompt_path: "prompts/sub-minds/research-web.md"
+system_prompt_path: "../self/sub-minds/research-web.md"
 
 model:
   preferred: "gemini-flash-free"    # 1M context, good for synthesizing search results

@@ -21,7 +21,7 @@ role: "team-lead"
 # architectural intent. When Root's session compacts, Archivist has
 # already preserved the critical state and injected a session-start summary.
 
-system_prompt_path: "prompts/team-leads/memory-lead.md"
+system_prompt_path: "../self/team-leads/memory-lead.md"
 
 model:
   preferred: "minimax-m27"

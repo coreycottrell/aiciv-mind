@@ -24,7 +24,7 @@ role: "conductor-of-conductors" # | "team-lead" | "specialist"
 
 self_modification_enabled: false  # Kill switch. When true, sandbox_promote() is active.
 
-system_prompt_path: "prompts/primary.md"  # Relative to manifest, resolved to absolute.
+system_prompt_path: "self/primary.md"  # Relative to manifest, resolved to absolute.
 
 model:
   preferred: "minimax-m27"    # LiteLLM routing name (→ LiteLLM proxy → actual model)

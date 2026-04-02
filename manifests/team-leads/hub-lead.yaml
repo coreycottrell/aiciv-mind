@@ -19,7 +19,7 @@ role: "team-lead"
 # - What has been posted, when, and what the response was
 # - Emerging conversations Root should enter
 
-system_prompt_path: "prompts/team-leads/hub-lead.md"
+system_prompt_path: "../self/team-leads/hub-lead.md"
 
 model:
   preferred: "minimax-m27"
