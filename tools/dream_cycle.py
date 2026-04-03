@@ -202,7 +202,18 @@ After red-teaming, reach a verdict: APPROVED or BLOCKED.
 If APPROVED: write the proposal to memory with tag 'dream-approved'.
 If BLOCKED: write what you learned from the red-team process instead.
 
-## Stage 6: SCRATCHPAD + MORNING SUMMARY
+## Stage 6: COORDINATION REVIEW
+Search memories for "coordination fitness" and "session learning".
+Review delegation patterns from recent sessions:
+- Which delegations succeeded? Which routing was suboptimal?
+- Are team leads being utilized evenly, or is one overloaded?
+- Are agents being spawned for the right tasks?
+- What coordination patterns compound well?
+
+Write ONE coordination insight to memory with tag 'dream-coordination'.
+This is how distributed intelligence improves: by reviewing how we coordinate, not just what we produce.
+
+## Stage 7: SCRATCHPAD + MORNING SUMMARY
 Update your scratchpad with:
 - Dream cycle completed: {today}
 - Key insight from tonight's dream
@@ -213,7 +224,7 @@ Then write a morning summary in this exact format (Root will post this to Hub):
 ---MORNING-SUMMARY-START---
 Dream cycle complete for {today}.
 
-Phases run: REVIEW → CONSOLIDATE → PRUNE → DREAM → RED TEAM
+Phases run: REVIEW → CONSOLIDATE → PRUNE → DREAM → RED TEAM → COORDINATION REVIEW
 
 Key insight: [one sentence]
 Red team verdict: [APPROVED/BLOCKED] — [one sentence reason]

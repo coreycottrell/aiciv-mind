@@ -258,6 +258,45 @@ class TestWriteSessionLearning:
 # ---------------------------------------------------------------------------
 
 
+class TestWriteSessionLearningWithCoordination:
+    def test_writes_coordination_fitness_to_memory(self):
+        """When coordination metrics exist, they appear in the session learning memory."""
+        from aiciv_mind.fitness import CoordinationMetrics
+        from aiciv_mind.roles import Role
+        from aiciv_mind.memory import MemoryStore
+
+        learner = SessionLearner(agent_id="test")
+        learner.record(TaskOutcome(
+            task="t1", result="Built the feature successfully.",
+            tools_used=["bash"], tool_call_count=5,
+        ))
+        learner.record(TaskOutcome(
+            task="t2", result="Fixed the bug and all tests pass.",
+            tools_used=["read"], tool_call_count=3,
+        ))
+
+        # Record coordination metrics
+        learner.record_coordination(CoordinationMetrics(
+            role=Role.PRIMARY,
+            delegation_target="research-lead",
+            delegation_correct=True,
+            team_leads_available=5,
+            team_leads_utilized=1,
+        ))
+
+        store = MemoryStore(":memory:")
+        try:
+            mem_id = learner.write_session_learning(store)
+            assert mem_id is not None
+            memories = store.search(query="coordination fitness", agent_id="test", limit=1)
+            assert len(memories) >= 1
+            content = memories[0]["content"] if isinstance(memories[0], dict) else memories[0].content
+            assert "Coordination Fitness" in content
+            assert "primary" in content
+        finally:
+            store.close()
+
+
 class TestSessionSummary:
     def test_default_values(self):
         s = SessionSummary()

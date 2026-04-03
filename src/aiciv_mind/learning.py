@@ -290,6 +290,17 @@ class SessionLearner:
             tools_str = ", ".join(f"{t}({c}x)" for t, c in summary.most_used_tools[:3])
             content_parts.append(f"\nTop tools: {tools_str}")
 
+        # Include coordination fitness data when available
+        if summary.coordination_fitness:
+            content_parts.append("\nCoordination Fitness:")
+            for role_name, fitness_data in summary.coordination_fitness.items():
+                score = fitness_data.get("overall_score", 0)
+                content_parts.append(f"  {role_name}: {score:.2f}")
+                # Include component scores
+                for key, val in fitness_data.items():
+                    if key != "overall_score" and isinstance(val, (int, float)):
+                        content_parts.append(f"    {key}: {val:.2f}")
+
         content = "\n".join(content_parts)
 
         mem = Memory(

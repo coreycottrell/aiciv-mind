@@ -61,7 +61,7 @@ _SPAWN_TL_DEFINITION: dict = {
 }
 
 
-def _make_spawn_tl_handler(spawner, scratchpad_dir: str | None = None):
+def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: str | None = None):
     """Return async spawn_team_lead handler."""
 
     async def handler(tool_input: dict) -> str:
@@ -101,6 +101,8 @@ def _make_spawn_tl_handler(spawner, scratchpad_dir: str | None = None):
             context_parts = [f"Spawned team lead '{mind_id}' for vertical '{vertical}'"]
             context_parts.append(f"Pane: {handle.pane_id}")
 
+            team_scratchpad = ""
+            coord_scratchpad = ""
             if scratchpad_dir:
                 team_scratchpad = str(Path(scratchpad_dir) / "teams" / f"{vertical}-team.md")
                 coord_scratchpad = str(Path(scratchpad_dir) / "coordination.md")
@@ -109,6 +111,30 @@ def _make_spawn_tl_handler(spawner, scratchpad_dir: str | None = None):
 
             if objective:
                 context_parts.append(f"Objective: {objective}")
+
+            # Context injection: send initial briefing to the team lead via bus.
+            # This is the first message the team lead receives — its operational context.
+            if bus is not None:
+                injection_parts = [
+                    f"[CONTEXT INJECTION] You are team lead for vertical '{vertical}'.",
+                ]
+                if team_scratchpad:
+                    injection_parts.append(f"Team scratchpad: {team_scratchpad}")
+                if coord_scratchpad:
+                    injection_parts.append(f"Coordination scratchpad: {coord_scratchpad}")
+                if objective:
+                    injection_parts.append(f"Objective: {objective}")
+
+                try:
+                    injection_msg = MindMessage.log(
+                        sender=primary_mind_id,
+                        recipient=mind_id,
+                        level="INFO",
+                        message="\n".join(injection_parts),
+                    )
+                    await bus.send(injection_msg)
+                except Exception:
+                    pass  # Non-fatal: team lead can still work without injection
 
             return "\n".join(context_parts)
 
@@ -190,7 +216,7 @@ _SPAWN_AGENT_DEFINITION: dict = {
 }
 
 
-def _make_spawn_agent_handler(spawner):
+def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
     """Return async spawn_agent handler."""
 
     async def handler(tool_input: dict) -> str:
@@ -222,6 +248,19 @@ def _make_spawn_agent_handler(spawner):
             parts = [f"Spawned agent '{mind_id}' (pane: {handle.pane_id})"]
             if task:
                 parts.append(f"Task: {task}")
+
+            # Context injection: send task briefing to the agent via bus
+            if bus is not None and task:
+                try:
+                    injection_msg = MindMessage.log(
+                        sender=team_lead_mind_id,
+                        recipient=mind_id,
+                        level="INFO",
+                        message=f"[CONTEXT INJECTION] Task: {task}",
+                    )
+                    await bus.send(injection_msg)
+                except Exception:
+                    pass  # Non-fatal
 
             return "\n".join(parts)
 
@@ -298,7 +337,7 @@ def register_spawn_tools(
         registry.register(
             "spawn_team_lead",
             _SPAWN_TL_DEFINITION,
-            _make_spawn_tl_handler(spawner, scratchpad_dir),
+            _make_spawn_tl_handler(spawner, bus, mind_id, scratchpad_dir),
             read_only=False,
             timeout=30.0,
         )
@@ -313,7 +352,7 @@ def register_spawn_tools(
         registry.register(
             "spawn_agent",
             _SPAWN_AGENT_DEFINITION,
-            _make_spawn_agent_handler(spawner),
+            _make_spawn_agent_handler(spawner, bus, mind_id),
             read_only=False,
             timeout=30.0,
         )

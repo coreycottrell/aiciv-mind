@@ -204,6 +204,103 @@ class TestSpawnTeamLead:
 
 
 # ---------------------------------------------------------------------------
+# Context injection on spawn
+# ---------------------------------------------------------------------------
+
+
+class TestContextInjection:
+    def test_spawn_tl_sends_injection_message(self, mock_spawner, mock_bus, team_lead_manifest):
+        """After spawning a team lead, a context injection message is sent via bus."""
+        reg = ToolRegistry()
+        register_spawn_tools(reg, mock_spawner, mock_bus, "primary", role="primary")
+        asyncio.run(reg.execute("spawn_team_lead", {
+            "mind_id": "research-lead",
+            "manifest_path": team_lead_manifest,
+            "vertical": "research",
+            "objective": "Find papers",
+        }))
+        # bus.send called once for context injection
+        mock_bus.send.assert_called_once()
+        msg = mock_bus.send.call_args[0][0]
+        assert "research-lead" in str(msg.recipient)
+        assert "CONTEXT INJECTION" in msg.payload["message"]
+
+    def test_spawn_tl_injection_includes_scratchpads(
+        self, mock_spawner, mock_bus, team_lead_manifest, tmp_path
+    ):
+        """Injection message includes scratchpad paths when scratchpad_dir is set."""
+        scratchpad_dir = str(tmp_path / "scratchpads")
+        reg = ToolRegistry()
+        register_spawn_tools(
+            reg, mock_spawner, mock_bus, "primary",
+            role="primary", scratchpad_dir=scratchpad_dir,
+        )
+        asyncio.run(reg.execute("spawn_team_lead", {
+            "mind_id": "research-lead",
+            "manifest_path": team_lead_manifest,
+            "vertical": "research",
+        }))
+        msg = mock_bus.send.call_args[0][0]
+        assert "Team scratchpad" in msg.payload["message"]
+        assert "Coordination scratchpad" in msg.payload["message"]
+        assert "research-team.md" in msg.payload["message"]
+
+    def test_spawn_tl_injection_includes_objective(
+        self, mock_spawner, mock_bus, team_lead_manifest
+    ):
+        """Injection message includes the objective when provided."""
+        reg = ToolRegistry()
+        register_spawn_tools(reg, mock_spawner, mock_bus, "primary", role="primary")
+        asyncio.run(reg.execute("spawn_team_lead", {
+            "mind_id": "research-lead",
+            "manifest_path": team_lead_manifest,
+            "vertical": "research",
+            "objective": "Analyze competition",
+        }))
+        msg = mock_bus.send.call_args[0][0]
+        assert "Analyze competition" in msg.payload["message"]
+
+    def test_spawn_tl_injection_failure_is_nonfatal(
+        self, mock_spawner, team_lead_manifest
+    ):
+        """If bus.send fails during injection, the spawn still succeeds."""
+        failing_bus = MagicMock()
+        failing_bus.send = AsyncMock(side_effect=RuntimeError("bus down"))
+        reg = ToolRegistry()
+        register_spawn_tools(reg, mock_spawner, failing_bus, "primary", role="primary")
+        result = asyncio.run(reg.execute("spawn_team_lead", {
+            "mind_id": "research-lead",
+            "manifest_path": team_lead_manifest,
+            "vertical": "research",
+        }))
+        assert "Spawned team lead" in result  # Still succeeds
+
+    def test_spawn_agent_sends_task_injection(self, mock_spawner, mock_bus, agent_manifest):
+        """After spawning an agent with a task, a task injection is sent via bus."""
+        reg = ToolRegistry()
+        register_spawn_tools(reg, mock_spawner, mock_bus, "research-lead", role="team_lead")
+        asyncio.run(reg.execute("spawn_agent", {
+            "mind_id": "coder-1",
+            "manifest_path": agent_manifest,
+            "task": "Implement auth module",
+        }))
+        mock_bus.send.assert_called_once()
+        msg = mock_bus.send.call_args[0][0]
+        assert "CONTEXT INJECTION" in msg.payload["message"]
+        assert "Implement auth module" in msg.payload["message"]
+
+    def test_spawn_agent_no_injection_without_task(self, mock_spawner, mock_bus, agent_manifest):
+        """When no task is provided, no injection message is sent."""
+        reg = ToolRegistry()
+        register_spawn_tools(reg, mock_spawner, mock_bus, "research-lead", role="team_lead")
+        asyncio.run(reg.execute("spawn_agent", {
+            "mind_id": "coder-1",
+            "manifest_path": agent_manifest,
+        }))
+        mock_bus.send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # shutdown_team_lead
 # ---------------------------------------------------------------------------
 
