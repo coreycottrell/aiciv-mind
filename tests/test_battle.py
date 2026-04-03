@@ -9890,3 +9890,459 @@ class TestEdgeCasesR23:
         from aiciv_mind.planning import classify_task, TaskComplexity
         result = classify_task("")
         assert result.complexity == TaskComplexity.TRIVIAL
+
+
+# ===========================================================================
+# Round 24 — Adversarial inputs, stress testing, Mind init, REPL structure,
+#             memory boundary conditions, concurrent safety
+# ===========================================================================
+
+
+class TestAdversarialInputs:
+    """Adversarial and unusual inputs across tool handlers."""
+
+    def test_bash_unicode_command(self):
+        """bash handler handles unicode in commands."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "echo '你好世界'"}))
+        assert "你好世界" in result
+
+    def test_bash_very_long_command(self):
+        """bash handler handles very long commands without crash."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        long_cmd = "echo " + "a" * 10000
+        result = asyncio.run(bash_handler({"command": long_cmd}))
+        assert isinstance(result, str)
+
+    def test_file_read_nonexistent(self, tmp_path):
+        """read_file_handler returns error for nonexistent file."""
+        from aiciv_mind.tools.files import read_file_handler
+        result = read_file_handler({"path": str(tmp_path / "nonexistent.txt")})
+        assert "ERROR" in result or "not found" in result.lower() or "No such" in result
+
+    def test_file_write_deeply_nested(self, tmp_path):
+        """write_file_handler creates deeply nested directories."""
+        from aiciv_mind.tools.files import write_file_handler
+        deep_path = str(tmp_path / "a" / "b" / "c" / "d" / "test.txt")
+        result = write_file_handler({"file_path": deep_path, "content": "deep content"})
+        assert "ERROR" not in result
+        assert (tmp_path / "a" / "b" / "c" / "d" / "test.txt").exists()
+
+    def test_edit_file_nonunique_match(self, tmp_path):
+        """edit_file_handler returns error for non-unique old_string."""
+        from aiciv_mind.tools.files import write_file_handler, edit_file_handler
+        path = str(tmp_path / "repeat.txt")
+        write_file_handler({"path": path, "content": "hello\nhello\nhello"})
+        result = edit_file_handler({
+            "path": path,
+            "old_string": "hello",
+            "new_string": "world",
+        })
+        assert "ERROR" in result or "unique" in result.lower() or "multiple" in result.lower()
+
+    def test_grep_empty_pattern(self, tmp_path):
+        """grep_handler handles empty pattern."""
+        from aiciv_mind.tools.search import grep_handler
+        result = grep_handler({"pattern": "", "path": str(tmp_path)})
+        assert isinstance(result, str)
+
+    def test_glob_empty_pattern(self, tmp_path):
+        """glob_handler handles empty pattern."""
+        from aiciv_mind.tools.search import glob_handler
+        result = glob_handler({"pattern": "", "path": str(tmp_path)})
+        assert isinstance(result, str)
+
+    def test_memory_write_unicode_content(self, memory_store):
+        """memory_write handles unicode content."""
+        from aiciv_mind.memory import Memory
+        mem_id = memory_store.store(Memory(
+            agent_id="unicode", title="Multilingual",
+            content="こんにちは世界 🌍 مرحبا Здравствуйте",
+            memory_type="learning",
+        ))
+        result = memory_store.search(query="Multilingual", agent_id="unicode")
+        assert len(result) >= 1
+
+    def test_memory_write_very_long_content(self, memory_store):
+        """memory_write handles very long content."""
+        from aiciv_mind.memory import Memory
+        long_content = "x" * 100_000
+        mem_id = memory_store.store(Memory(
+            agent_id="long", title="Long memory",
+            content=long_content,
+            memory_type="learning",
+        ))
+        assert mem_id is not None
+
+    def test_memory_search_special_chars(self, memory_store):
+        """memory_search handles special characters in query."""
+        from aiciv_mind.tools.memory_tools import _make_search_handler
+        searcher = _make_search_handler(memory_store)
+        # FTS5 special chars
+        result = searcher({"query": "hello AND world OR (foo NOT bar)"})
+        assert isinstance(result, str)  # Should not crash
+
+    def test_classify_task_very_long(self):
+        """classify_task handles very long task descriptions."""
+        from aiciv_mind.planning import classify_task
+        long_task = "implement " * 500 + "deploy"
+        result = classify_task(long_task)
+        assert result.complexity is not None
+        assert result.signals["length"]["score"] == 1.0
+
+    def test_web_fetch_whitespace_url(self):
+        """web_fetch handles whitespace-only URL."""
+        import asyncio
+        from aiciv_mind.tools.web_fetch_tools import _web_fetch_handler
+        result = asyncio.run(_web_fetch_handler({"url": "   "}))
+        assert "ERROR" in result
+
+    def test_evolution_log_write_empty_strings(self, memory_store):
+        """evolution_log_write rejects all-whitespace fields."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler
+        writer = _make_write_handler(memory_store, "adv-test")
+        result = writer({"change_type": "  ", "description": "  ", "reasoning": "  "})
+        assert "ERROR" in result
+
+
+class TestMemoryBoundaryConditions:
+    """Boundary conditions for MemoryStore operations."""
+
+    def test_store_and_retrieve_with_empty_tags(self, memory_store):
+        """Memory with empty tags list stores and retrieves correctly."""
+        from aiciv_mind.memory import Memory
+        mem_id = memory_store.store(Memory(
+            agent_id="boundary", title="No tags",
+            content="Content", memory_type="learning", tags=[],
+        ))
+        results = memory_store.search("No tags", agent_id="boundary")
+        assert len(results) >= 1
+
+    def test_store_with_many_tags(self, memory_store):
+        """Memory with many tags stores correctly."""
+        from aiciv_mind.memory import Memory
+        mem_id = memory_store.store(Memory(
+            agent_id="boundary", title="Many tags",
+            content="Content", memory_type="learning",
+            tags=[f"tag-{i}" for i in range(50)],
+        ))
+        assert mem_id is not None
+
+    def test_touch_nonexistent_memory(self, memory_store):
+        """touch() on nonexistent memory_id doesn't crash."""
+        # This should be a no-op or raise gracefully
+        try:
+            memory_store.touch("nonexistent-id-12345")
+        except Exception:
+            pass  # Some implementations may raise, some no-op
+
+    def test_pin_and_unpin(self, memory_store):
+        """pin/unpin cycle works."""
+        from aiciv_mind.memory import Memory
+        mem_id = memory_store.store(Memory(
+            agent_id="pin-test", title="Pinnable",
+            content="Pin me", memory_type="learning",
+        ))
+        memory_store.pin(mem_id)
+        memory_store.unpin(mem_id)
+        # Should not raise
+
+    def test_by_agent(self, memory_store):
+        """by_agent returns only memories for the specified agent."""
+        from aiciv_mind.memory import Memory
+        memory_store.store(Memory(
+            agent_id="agent-a", title="A's memory",
+            content="A content", memory_type="learning",
+        ))
+        memory_store.store(Memory(
+            agent_id="agent-b", title="B's memory",
+            content="B content", memory_type="learning",
+        ))
+        a_mems = memory_store.by_agent("agent-a")
+        assert all(m["agent_id"] == "agent-a" for m in a_mems)
+
+    def test_by_type(self, memory_store):
+        """by_type returns only memories of the specified type."""
+        from aiciv_mind.memory import Memory
+        memory_store.store(Memory(
+            agent_id="type-test", title="Learning",
+            content="L", memory_type="learning",
+        ))
+        memory_store.store(Memory(
+            agent_id="type-test", title="Error",
+            content="E", memory_type="error",
+        ))
+        learnings = memory_store.by_type("learning", agent_id="type-test")
+        assert all(m["memory_type"] == "learning" for m in learnings)
+
+    def test_store_identity_memory(self, memory_store):
+        """identity type memories store correctly."""
+        from aiciv_mind.memory import Memory
+        mem_id = memory_store.store(Memory(
+            agent_id="identity-test", title="Who I Am",
+            content="I am Root, primary mind of A-C-Gee",
+            memory_type="identity",
+        ))
+        results = memory_store.by_type("identity", agent_id="identity-test")
+        assert len(results) >= 1
+        assert any("Root" in m["content"] for m in results)
+
+
+class TestInteractiveREPLStructure:
+    """Test InteractiveREPL command structure (no actual stdin/stdout)."""
+
+    def test_commands_dict_exists(self):
+        """COMMANDS dict has expected commands."""
+        from aiciv_mind.interactive import InteractiveREPL
+        cmds = InteractiveREPL.COMMANDS
+        assert "/quit" in cmds
+        assert "/exit" in cmds
+        assert "/help" in cmds
+        assert "/status" in cmds
+        assert "/clear" in cmds
+
+    def test_repl_init(self, tmp_path):
+        """InteractiveREPL can be instantiated with a mock Mind."""
+        from aiciv_mind.interactive import InteractiveREPL
+        from unittest.mock import MagicMock
+        mock_mind = MagicMock()
+        mock_mind.manifest.mind_id = "test-mind"
+        mock_mind.manifest.display_name = "Test Mind"
+        mock_mind.manifest.model.preferred = "test-model"
+        mock_mind.manifest.enabled_tool_names.return_value = ["bash"]
+        repl = InteractiveREPL(mock_mind)
+        assert repl.mind is mock_mind
+        assert repl._running is True
+
+    def test_handle_quit_command(self, tmp_path):
+        """_handle_command('/quit') sets _running to False."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        from unittest.mock import MagicMock
+        mock_mind = MagicMock()
+        repl = InteractiveREPL(mock_mind)
+        asyncio.run(repl._handle_command("/quit"))
+        assert repl._running is False
+
+    def test_handle_exit_command(self, tmp_path):
+        """_handle_command('/exit') sets _running to False."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        from unittest.mock import MagicMock
+        mock_mind = MagicMock()
+        repl = InteractiveREPL(mock_mind)
+        asyncio.run(repl._handle_command("/exit"))
+        assert repl._running is False
+
+    def test_handle_help_returns_true(self):
+        """_handle_command('/help') returns True (command recognized)."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        from unittest.mock import MagicMock
+        mock_mind = MagicMock()
+        repl = InteractiveREPL(mock_mind)
+        result = asyncio.run(repl._handle_command("/help"))
+        assert result is True
+
+    def test_handle_unknown_returns_false(self):
+        """_handle_command('/unknown') returns False."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        from unittest.mock import MagicMock
+        mock_mind = MagicMock()
+        repl = InteractiveREPL(mock_mind)
+        result = asyncio.run(repl._handle_command("/nonexistent_command"))
+        assert result is False
+
+
+class TestMindInitialization:
+    """Test Mind class initialization without running actual LLM calls."""
+
+    def test_mind_creates_with_manifest(self, tmp_path):
+        """Mind can be instantiated with manifest and memory store."""
+        from aiciv_mind.manifest import MindManifest
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.mind import Mind
+
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text("""
+mind_id: test-mind
+display_name: Test Mind
+role: tester
+auth:
+  civ_id: test-civ
+  keypair_path: key.pem
+memory:
+  db_path: test.db
+planning:
+  enabled: false
+verification:
+  enabled: false
+hooks:
+  enabled: false
+""")
+        (tmp_path / "key.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        memory = MemoryStore(str(tmp_path / "test.db"))
+
+        mind = Mind(manifest=manifest, memory=memory)
+        assert mind.manifest.mind_id == "test-mind"
+        assert mind._running is False
+        assert mind._messages == []
+
+    def test_mind_with_hooks_enabled(self, tmp_path):
+        """Mind attaches HookRunner when hooks.enabled is True."""
+        from aiciv_mind.manifest import MindManifest
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.mind import Mind
+
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text("""
+mind_id: hooked
+display_name: Hooked Mind
+role: tester
+auth:
+  civ_id: test
+  keypair_path: key.pem
+memory:
+  db_path: test.db
+hooks:
+  enabled: true
+  blocked_tools:
+    - dangerous_tool
+planning:
+  enabled: false
+verification:
+  enabled: false
+""")
+        (tmp_path / "key.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        memory = MemoryStore(str(tmp_path / "test.db"))
+
+        mind = Mind(manifest=manifest, memory=memory)
+        hooks = mind._tools.get_hooks()
+        assert hooks is not None
+        assert "dangerous_tool" in hooks.blocked_tools
+
+    def test_mind_stop(self, tmp_path):
+        """Mind.stop() sets _running to False."""
+        from aiciv_mind.manifest import MindManifest
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.mind import Mind
+
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text("""
+mind_id: stoppable
+display_name: Stop Test
+role: test
+auth:
+  civ_id: test
+  keypair_path: key.pem
+memory:
+  db_path: test.db
+planning:
+  enabled: false
+verification:
+  enabled: false
+hooks:
+  enabled: false
+""")
+        (tmp_path / "key.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        memory = MemoryStore(str(tmp_path / "test.db"))
+        mind = Mind(manifest=manifest, memory=memory)
+        mind._running = True
+        mind.stop()
+        assert mind._running is False
+
+
+class TestMindMessageStress:
+    """Stress tests for MindMessage serialization."""
+
+    def test_large_payload(self):
+        """MindMessage handles large payloads."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.task(
+            sender="primary",
+            recipient="sub-1",
+            task_id="big-task",
+            objective="x" * 100_000,
+        )
+        wire = msg.to_bytes()
+        restored = MindMessage.from_bytes(wire)
+        assert len(restored.payload["objective"]) == 100_000
+
+    def test_unicode_payload(self):
+        """MindMessage handles unicode payloads."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.task(
+            sender="primary",
+            recipient="sub-1",
+            task_id="unicode-task",
+            objective="分析这个问题 🧠",
+        )
+        wire = msg.to_bytes()
+        restored = MindMessage.from_bytes(wire)
+        assert "分析" in restored.payload["objective"]
+
+    def test_many_messages(self):
+        """Create many messages without memory issues."""
+        from aiciv_mind.ipc.messages import MindMessage
+        messages = []
+        for i in range(1000):
+            msg = MindMessage.heartbeat(sender=f"mind-{i}", recipient="primary")
+            messages.append(msg.to_bytes())
+        assert len(messages) == 1000
+
+    def test_empty_payload_fields(self):
+        """MindMessage with empty string fields."""
+        from aiciv_mind.ipc.messages import MindMessage
+        msg = MindMessage(type="task", sender="", recipient="", payload={})
+        wire = msg.to_bytes()
+        restored = MindMessage.from_bytes(wire)
+        assert restored.sender == ""
+
+
+class TestConsolidationLockStress:
+    """Stress tests for ConsolidationLock."""
+
+    def test_lock_and_unlock_cycle(self, tmp_path):
+        """Lock can be acquired and released repeatedly."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(str(tmp_path / "test.lock"))
+        for _ in range(10):
+            lock.acquire()
+            assert lock.is_held_by_us
+            lock.release()
+        assert not lock.is_held_by_us
+
+    def test_stale_lock_detection(self, tmp_path):
+        """Stale lock (dead PID) is detected and overridden."""
+        import json
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "stale.lock"
+        # Write a fake lock with a definitely-dead PID
+        lock_path.write_text(json.dumps({"pid": 999999999, "started_at": 0}))
+        lock = ConsolidationLock(str(lock_path))
+        # Should be able to acquire despite the stale lock
+        assert lock.acquire()
+        assert lock.is_held_by_us
+        lock.release()
+
+    def test_async_context_manager(self, tmp_path):
+        """Async context manager acquires and releases."""
+        import asyncio
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(str(tmp_path / "async.lock"))
+
+        async def use_lock():
+            async with lock:
+                assert lock.is_held_by_us
+            assert not lock.is_held_by_us
+
+        asyncio.run(use_lock())
