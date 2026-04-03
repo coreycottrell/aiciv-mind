@@ -7,7 +7,7 @@
 **Codebase**: `/home/corey/projects/AI-CIV/aiciv-mind/` — 18 source files, 12 tool modules, 4 skills, 10 manifests, 4 tools scripts
 
 ## BUILD STATUS (2026-04-03 Continued Overnight Flywheel)
-**27 of 25 core items BUILT (exceeded roadmap). 2126+ tests passing.** Full coverage of original roadmap + 2 extras.
+**28 of 25 core items BUILT (exceeded roadmap). 2144+ tests passing.** All original items + 3 stretch goals.
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -42,8 +42,9 @@
 | P3-9 | ✅ BUILT | Calendar tools — 283 lines |
 
 | P3-2 | ✅ BUILT | Self-modification sandbox — 280 lines + 15 tests |
+| P3-3 | ✅ BUILT | Cross-domain transfer — 190 lines + 18 tests |
 
-**Remaining unbuilt (stretch goals)**: P3-3 (cross-domain transfer), P3-8 (MCP server), P3-10 (local content gen)
+**Remaining unbuilt (stretch goals)**: P3-8 (MCP server), P3-10 (local content gen)
 
 ---
 
