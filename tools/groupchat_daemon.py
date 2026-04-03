@@ -42,6 +42,7 @@ LOG = logging.getLogger("groupchat")
 DEFAULT_THREAD = "f6518cc3-3479-4a1a-a284-2192269ca5fb"
 POLL_INTERVAL = 5  # seconds
 HUB = "http://87.99.131.49:8900"
+TASK_TIMEOUT = 300.0  # max seconds for a single mind.run_task() call
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +373,13 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     )
     try:
         LOG.info("Running boot turn...")
-        boot_reply = await mind.run_task(boot_task, inject_memories=False)
+        boot_reply = await asyncio.wait_for(
+            mind.run_task(boot_task, inject_memories=False),
+            timeout=TASK_TIMEOUT,
+        )
         LOG.info("Boot turn complete: %s", (boot_reply or "")[:200])
+    except asyncio.TimeoutError:
+        LOG.warning("Boot turn timed out after %.0fs (non-fatal)", TASK_TIMEOUT)
     except Exception as e:
         LOG.warning("Boot turn failed (non-fatal): %s", e)
 
@@ -462,15 +468,20 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
                     LOG.info("Scheduled task '%s' triggered (every %d min)", name, interval)
                     scheduler.mark_run(name)
                     try:
-                        reply = await mind.run_task(
-                            f"[Scheduled BOOP: {name}]\n{prompt}",
-                            inject_memories=True,
-                            fresh_context=True,
+                        reply = await asyncio.wait_for(
+                            mind.run_task(
+                                f"[Scheduled BOOP: {name}]\n{prompt}",
+                                inject_memories=True,
+                                fresh_context=True,
+                            ),
+                            timeout=TASK_TIMEOUT,
                         )
                         LOG.info(
                             "Scheduled task '%s' complete: %s",
                             name, (reply or "")[:200],
                         )
+                    except asyncio.TimeoutError:
+                        LOG.error("Scheduled task '%s' timed out after %.0fs", name, TASK_TIMEOUT)
                     except Exception as e:
                         LOG.error("Scheduled task '%s' failed: %s", name, e)
 
@@ -494,8 +505,8 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
         except BaseException as e:
             # Catches asyncio.CancelledError, KeyboardInterrupt, SystemExit, etc.
             # These are NOT Exception subclasses and would otherwise kill the
-            # daemon silently. Log them and continue unless it's SystemExit.
-            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+            # daemon silently. Log them and continue unless it's a shutdown signal.
+            if isinstance(e, (SystemExit, KeyboardInterrupt, asyncio.CancelledError)):
                 LOG.info("Received %s — shutting down gracefully", type(e).__name__)
                 raise  # let these actually terminate
             LOG.error(
@@ -559,11 +570,15 @@ async def _poll_thread(
                 f"Prefix your response with [Root]."
             )
             try:
-                response = await mind.run_task(prompt)
+                response = await asyncio.wait_for(
+                    mind.run_task(prompt), timeout=TASK_TIMEOUT,
+                )
                 if response:
                     tagged = f"[Root] {response}" if not response.startswith("[Root]") else response
                     success = await post_reply(target.id, tagged, hub_token)
                     LOG.info("Root replied (%s): %s", "ok" if success else "FAILED", response[:80])
+            except asyncio.TimeoutError:
+                LOG.error("Mind timed out after %.0fs on group chat reply", TASK_TIMEOUT)
             except Exception as e:
                 LOG.error("Mind error: %s", e)
         elif target.mode == "passive":
@@ -639,12 +654,16 @@ async def _poll_room(
                 f"Be concise and direct. Prefix with [Root]."
             )
             try:
-                response = await mind.run_task(prompt)
+                response = await asyncio.wait_for(
+                    mind.run_task(prompt), timeout=TASK_TIMEOUT,
+                )
                 if response:
                     tagged = f"[Root] {response}" if not response.startswith("[Root]") else response
                     success = await post_reply(tid, tagged, hub_token)
                     LOG.info("Root replied to mention (%s): %s",
                              "ok" if success else "FAILED", response[:80])
+            except asyncio.TimeoutError:
+                LOG.error("Mind timed out after %.0fs on mention reply", TASK_TIMEOUT)
             except Exception as e:
                 LOG.error("Mind error on mention: %s", e)
 
