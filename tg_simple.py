@@ -245,6 +245,25 @@ async def build_mind():
     def get_msg_count():
         return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
 
+    # Sub-mind IPC infrastructure (enables spawn_team_lead + send_to_submind)
+    primary_bus = None
+    spawner = None
+    try:
+        from aiciv_mind.ipc.primary_bus import PrimaryBus
+        from aiciv_mind.spawner import SubMindSpawner
+
+        mind_root = Path(__file__).parent
+        primary_bus = PrimaryBus()
+        primary_bus.bind()
+        primary_bus.start_recv()
+        spawner = SubMindSpawner(
+            session_name="aiciv-subminds",
+            mind_root=mind_root,
+        )
+        log.info("PrimaryBus bound + SubMindSpawner ready (session: aiciv-subminds)")
+    except Exception as e:
+        log.warning("Sub-mind IPC unavailable: %s — spawn_team_lead disabled", e)
+
     # AgentMail + AgentCal config
     agentmail_inbox = manifest.agentmail.inbox if manifest.agentmail.inbox else None
     kp_path = getattr(manifest.auth, "keypair_path", None)
@@ -253,6 +272,7 @@ async def build_mind():
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
+        role="primary",
         suite_client=suite_client,
         context_store=memory,
         get_message_count=get_msg_count,
@@ -260,6 +280,8 @@ async def build_mind():
         skills_dir=skills_dir if Path(skills_dir).exists() else None,
         scratchpad_dir=scratchpad_dir,
         manifest_path=manifest_path,
+        spawner=spawner,
+        primary_bus=primary_bus,
         agentmail_inbox=agentmail_inbox,
         keypair_path=kp_path,
         calendar_id=calendar_id,
@@ -283,14 +305,14 @@ async def build_mind():
     )
     _mind_ref[0] = mind
     log.info("Mind ready — model: %s (full tool registry)", manifest.model.preferred)
-    return mind, memory, session_store
+    return mind, memory, session_store, primary_bus
 
 
 # ---------------------------------------------------------------------------
 # Shutdown handler
 # ---------------------------------------------------------------------------
 
-def make_shutdown_handler(mind, memory, session_store):
+def make_shutdown_handler(mind, memory, session_store, primary_bus=None):
     """Create SIGTERM/SIGINT handler for graceful shutdown."""
     def handler(signum, frame):
         log.info("Signal %s received — shutting down gracefully", signum)
@@ -302,6 +324,11 @@ def make_shutdown_handler(mind, memory, session_store):
             session_store.shutdown(mind._messages)
         except Exception as e:
             log.warning("session shutdown failed: %s", e)
+        if primary_bus is not None:
+            try:
+                primary_bus.close()
+            except Exception:
+                pass
         try:
             memory.close()
         except Exception:
@@ -321,10 +348,10 @@ async def run(skip_boot: bool = False):
         log.error("AICIV_MIND_TG_TOKEN not set — cannot start")
         sys.exit(1)
 
-    mind, memory, session_store = await build_mind()
+    mind, memory, session_store, primary_bus = await build_mind()
 
     # Register signal handlers
-    handler = make_shutdown_handler(mind, memory, session_store)
+    handler = make_shutdown_handler(mind, memory, session_store, primary_bus)
     signal.signal(signal.SIGTERM, handler)
     signal.signal(signal.SIGINT, handler)
     log.info("Signal handlers registered")

@@ -294,6 +294,7 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     tools = ToolRegistry.default(
         memory_store=memory,
         agent_id=manifest.mind_id,
+        role="primary",
         suite_client=suite_client,
         context_store=memory,
         get_message_count=get_msg_count,
