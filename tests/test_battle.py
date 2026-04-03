@@ -3557,3 +3557,315 @@ class TestSecurityDeeper:
         assert not _matches_credential_pattern("EDITOR")
         assert not _matches_credential_pattern("TERM")
         assert not _matches_credential_pattern("COLUMNS")
+
+
+# ---------------------------------------------------------------------------
+# Integration: Mind initialization with full manifest
+# ---------------------------------------------------------------------------
+
+
+class TestMindInit:
+    """Integration tests for Mind object initialization with full subsystem wiring."""
+
+    def _make_mind(self, **overrides):
+        """Create a Mind instance with minimal configuration."""
+        from aiciv_mind.manifest import MindManifest, ModelConfig, AuthConfig, MemoryConfig
+        from aiciv_mind.mind import Mind
+        store = MemoryStore(":memory:")
+        defaults = dict(
+            mind_id="test-mind",
+            display_name="Test Mind",
+            role="worker",
+            system_prompt="You are a test agent.",
+            model=ModelConfig(preferred="test-model"),
+            auth=AuthConfig(civ_id="test-civ", keypair_path="/tmp/test.json"),
+            memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+        )
+        defaults.update(overrides)
+        manifest = MindManifest(**defaults)
+        mind = Mind(manifest=manifest, memory=store)
+        return mind, store
+
+    def test_mind_has_planning_gate(self):
+        """Mind initializes with PlanningGate."""
+        mind, store = self._make_mind()
+        assert mind._planning_gate is not None
+        assert mind._planning_gate._enabled
+        store.close()
+
+    def test_mind_has_completion_protocol(self):
+        """Mind initializes with CompletionProtocol."""
+        mind, store = self._make_mind()
+        assert mind._completion_protocol is not None
+        store.close()
+
+    def test_mind_has_session_learner(self):
+        """Mind initializes with SessionLearner."""
+        mind, store = self._make_mind()
+        assert mind._session_learner is not None
+        assert mind._session_learner._agent_id == "test-mind"
+        store.close()
+
+    def test_mind_has_tool_registry(self):
+        """Mind initializes with a ToolRegistry containing core tools."""
+        mind, store = self._make_mind()
+        names = mind._tools.names()
+        assert "bash" in names
+        assert len(names) >= 10
+        store.close()
+
+    def test_mind_hooks_attached_by_default(self):
+        """Mind attaches HookRunner when hooks.enabled=True (default)."""
+        mind, store = self._make_mind()
+        hooks = mind._tools.get_hooks()
+        assert hooks is not None
+        store.close()
+
+    def test_mind_hooks_disabled(self):
+        """Mind doesn't attach HookRunner when hooks.enabled=False."""
+        from aiciv_mind.manifest import HooksConfig
+        mind, store = self._make_mind(hooks=HooksConfig(enabled=False))
+        hooks = mind._tools.get_hooks()
+        assert hooks is None
+        store.close()
+
+    def test_mind_blocked_tools_wired(self):
+        """Mind wires manifest blocked_tools into HookRunner."""
+        from aiciv_mind.manifest import HooksConfig
+        mind, store = self._make_mind(
+            hooks=HooksConfig(enabled=True, blocked_tools=["bash", "write_file"])
+        )
+        hooks = mind._tools.get_hooks()
+        result = hooks.pre_tool_use("bash", {"command": "rm -rf /"})
+        assert not result.allowed
+        store.close()
+
+    def test_mind_planning_disabled(self):
+        """PlanningGate respects manifest disabled flag."""
+        from aiciv_mind.manifest import PlanningConfig
+        mind, store = self._make_mind(planning=PlanningConfig(enabled=False))
+        assert not mind._planning_gate._enabled
+        store.close()
+
+    def test_mind_verification_disabled(self):
+        """CompletionProtocol respects manifest disabled flag."""
+        from aiciv_mind.manifest import VerificationConfig
+        mind, store = self._make_mind(verification=VerificationConfig(enabled=False))
+        assert not mind._completion_protocol._enabled
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Integration: Session lifecycle (boot → turn → shutdown)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionLifecycleIntegration:
+    """Integration tests for session lifecycle through SessionStore + MemoryStore."""
+
+    def test_full_session_lifecycle(self):
+        """Boot → record turns → shutdown → next boot loads handoff."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+
+        # Session 1: boot, work, shutdown
+        ss1 = SessionStore(store, agent_id="lifecycle")
+        boot1 = ss1.boot()
+        assert boot1.handoff_memory is None  # First session, no prior handoff
+        ss1.record_turn(topic="research")
+        ss1.record_turn(topic="coding")
+        ss1.shutdown([
+            {"role": "assistant", "content": "Finished implementing the auth module."},
+        ])
+
+        # Session 2: boot should load handoff from session 1
+        ss2 = SessionStore(store, agent_id="lifecycle")
+        boot2 = ss2.boot()
+        assert boot2.handoff_memory is not None
+        assert "auth module" in boot2.handoff_memory.get("content", "")
+        assert boot2.session_count >= 1
+        store.close()
+
+    def test_multiple_sessions_handoff_chain(self):
+        """Three sessions in sequence — fourth session loads a handoff."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+
+        for i in range(3):
+            ss = SessionStore(store, agent_id="chain")
+            ss.boot()
+            ss.record_turn(topic=f"topic-{i}")
+            ss.shutdown([
+                {"role": "assistant", "content": f"Session {i} completed task {i}."},
+            ])
+
+        # Session 4 should see a handoff from a prior session
+        ss4 = SessionStore(store, agent_id="chain")
+        boot4 = ss4.boot()
+        assert boot4.handoff_memory is not None
+        # Should have content from one of the prior sessions
+        content = boot4.handoff_memory.get("content", "")
+        assert "completed task" in content
+        assert boot4.session_count >= 3
+        store.close()
+
+    def test_identity_persists_across_sessions(self):
+        """Identity memory stored in session 1 is available in session 2."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+
+        # Store identity memory
+        store.store(Memory(
+            agent_id="identity-persist",
+            title="Core Identity",
+            content="I am a research specialist focused on competitive analysis.",
+            memory_type="identity",
+        ))
+
+        # Session 1
+        ss1 = SessionStore(store, agent_id="identity-persist")
+        boot1 = ss1.boot()
+        assert len(boot1.identity_memories) >= 1
+        ss1.shutdown([{"role": "assistant", "content": "Done."}])
+
+        # Session 2 — identity should still be there
+        ss2 = SessionStore(store, agent_id="identity-persist")
+        boot2 = ss2.boot()
+        assert len(boot2.identity_memories) >= 1
+        assert any("competitive" in m.get("content", "") for m in boot2.identity_memories)
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Integration: Tool execution pipeline with hooks
+# ---------------------------------------------------------------------------
+
+
+class TestToolPipelineIntegration:
+    """Integration tests for tool registration → execution → hooks chain."""
+
+    def test_register_execute_with_hooks(self):
+        """Tool registered → hooks attached → blocked tool returns BLOCKED."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+
+        reg = ToolRegistry()
+        reg.register("safe_tool", {"name": "safe_tool"}, lambda x: "safe result")
+        reg.register("danger_tool", {"name": "danger_tool"}, lambda x: "danger result")
+        hooks = HookRunner(blocked_tools=["danger_tool"])
+        reg.set_hooks(hooks)
+
+        safe_result = asyncio.run(reg.execute("safe_tool", {}))
+        assert safe_result == "safe result"
+
+        danger_result = asyncio.run(reg.execute("danger_tool", {}))
+        assert "BLOCKED" in danger_result
+
+    def test_hooks_log_all_tool_calls(self):
+        """With log_all=True, all tool calls are logged by hooks."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+
+        reg = ToolRegistry()
+        reg.register("logged", {"name": "logged"}, lambda x: "ok")
+        hooks = HookRunner(log_all=True)
+        reg.set_hooks(hooks)
+
+        result = asyncio.run(reg.execute("logged", {"key": "value"}))
+        assert result == "ok"
+        # Hooks should have logged the call via call_log
+        assert len(hooks.call_log) >= 1
+        assert hooks.call_log[-1].tool_name == "logged"
+
+    def test_default_registry_execute_read_file(self, tmp_path):
+        """Default registry read_file tool can actually read files."""
+        from aiciv_mind.tools import ToolRegistry
+        store = MemoryStore(":memory:")
+        reg = ToolRegistry.default(memory_store=store)
+
+        test_file = tmp_path / "hello.txt"
+        test_file.write_text("Hello, aiciv-mind!")
+
+        result = asyncio.run(reg.execute("read_file", {"file_path": str(test_file)}))
+        assert "Hello, aiciv-mind!" in result
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Integration: Memory depth scoring + pinning
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryDepthIntegration:
+    """Integration tests for memory depth scoring, pinning, and evolution."""
+
+    def test_touch_increases_access_count(self):
+        """Touching a memory increases its access_count."""
+        store = MemoryStore(":memory:")
+        mem = Memory(agent_id="depth", title="Test", content="Content", memory_type="learning")
+        mid = store.store(mem)
+        # Touch it several times
+        for _ in range(5):
+            store.touch(mid)
+        # Fetch via by_agent to check access_count
+        rows = store.by_agent("depth", limit=1)
+        assert len(rows) >= 1
+        assert rows[0]["access_count"] >= 5
+        store.close()
+
+    def test_top_by_depth_returns_memories(self):
+        """top_by_depth returns memories with depth scores."""
+        store = MemoryStore(":memory:")
+        # Store memories and touch some to drive depth scores
+        m1 = store.store(Memory(agent_id="depth", title="Rarely accessed", content="A", memory_type="learning"))
+        m2 = store.store(Memory(agent_id="depth", title="Frequently accessed", content="B", memory_type="learning"))
+        # Touch m2 many times to increase its depth score
+        for _ in range(10):
+            store.touch(m2)
+        # Recompute depth scores
+        store.update_depth_score(m2)
+        top = store.top_by_depth(agent_id="depth", limit=2)
+        assert len(top) >= 1
+        # At minimum, we should get results back
+        ids = {m["id"] for m in top}
+        assert m1 in ids or m2 in ids
+        store.close()
+
+    def test_pin_and_get_pinned(self):
+        """Pinned memories are returned by get_pinned."""
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(
+            agent_id="pin", title="Important", content="Critical", memory_type="learning"
+        ))
+        store.pin(mid)
+        pinned = store.get_pinned(agent_id="pin")
+        assert len(pinned) >= 1
+        assert pinned[0]["id"] == mid
+        store.close()
+
+    def test_unpin_removes_from_pinned(self):
+        """Unpinned memory no longer returned by get_pinned."""
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(
+            agent_id="unpin", title="Was pinned", content="Content", memory_type="learning"
+        ))
+        store.pin(mid)
+        assert len(store.get_pinned(agent_id="unpin")) >= 1
+        store.unpin(mid)
+        assert len(store.get_pinned(agent_id="unpin")) == 0
+        store.close()
+
+    def test_evolution_trajectory(self):
+        """Evolution trajectory is built from identity/learning memories."""
+        store = MemoryStore(":memory:")
+        # Seed some memories that form a trajectory
+        store.store(Memory(
+            agent_id="evo", title="Learning 1", content="Mastered code analysis", memory_type="learning"
+        ))
+        store.store(Memory(
+            agent_id="evo", title="Learning 2", content="Developing hub expertise", memory_type="learning"
+        ))
+        trajectory = store.get_evolution_trajectory("evo")
+        # Should return some kind of trajectory string (may be empty if no identity)
+        assert isinstance(trajectory, str)
+        store.close()
