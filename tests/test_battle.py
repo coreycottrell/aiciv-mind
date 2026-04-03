@@ -6841,7 +6841,7 @@ class TestDaemonTools:
 # ===========================================================================
 
 
-class TestContextManager:
+class TestContextManagerR19:
     """Battle-test ContextManager: boot format, search results, compaction."""
 
     def test_format_boot_context_with_identity(self):
@@ -6995,7 +6995,7 @@ class TestContextManager:
         assert ContextManager._extract_message_text({}) == ""
 
 
-class TestConsolidationLock:
+class TestConsolidationLockR19:
     """Battle-test ConsolidationLock: acquire, release, stale detection."""
 
     def test_acquire_and_release(self, tmp_path):
@@ -7223,7 +7223,7 @@ class TestTaskOutcomeAndLearning:
         assert d["success_rate"] == 0.8
 
 
-class TestModelRouter:
+class TestModelRouterR19:
     """Battle-test ModelRouter: classification, selection, outcome tracking."""
 
     def test_classify_code_task(self):
@@ -7301,7 +7301,7 @@ class TestModelRouter:
         assert len(router2._outcomes) == 1
 
 
-class TestSkillDiscovery:
+class TestSkillDiscoveryR19:
     """Battle-test SkillDiscovery: registration, suggestion, session reset."""
 
     def test_register_and_suggest(self):
@@ -7404,7 +7404,7 @@ trigger_paths:
         assert disc.format_suggestions([]) == ""
 
 
-class TestForkContext:
+class TestForkContextR19:
     """Battle-test ForkContext: snapshot, enter, exit, isolation."""
 
     def test_snapshot_and_enter(self):
@@ -7692,7 +7692,7 @@ class TestVerificationDeep:
         assert protocol.build_verification_prompt("task") == ""
 
 
-class TestMindRegistry:
+class TestMindRegistryR20:
     """Battle-test MindRegistry: register, query, heartbeat, unresponsive."""
 
     def test_register_and_get(self):
@@ -7791,7 +7791,7 @@ class TestMindRegistry:
         assert "b" in ids
 
 
-class TestIPCMessages:
+class TestIPCMessagesR20:
     """Battle-test MindMessage serialization and factory methods."""
 
     def test_serialize_roundtrip(self):
@@ -7908,7 +7908,7 @@ class TestIPCMessages:
         assert msg.payload["level"] == "WARNING"
 
 
-class TestSessionStore:
+class TestSessionStoreR20:
     """Battle-test SessionStore: boot, record_turn, shutdown."""
 
     def test_boot_returns_context(self, memory_store):
