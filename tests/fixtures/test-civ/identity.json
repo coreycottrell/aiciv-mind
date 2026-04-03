@@ -1,0 +1,15 @@
+{
+  "civ_name": "${CIV_NAME}",
+  "display_name": "${CIV_DISPLAY_NAME}",
+  "human_name": "${HUMAN_NAME}",
+  "human_email": "${HUMAN_EMAIL}",
+  "parent_civ": "acg",
+  "civ_root": "${CIV_ROOT}",
+  "birth_date": "${BIRTH_DATE}",
+  "model": {
+    "preferred": "minimax-m27",
+    "temperature": 1.0
+  },
+  "ipc_socket": "/tmp/aiciv-${CIV_NAME}-router.ipc",
+  "schema_version": "1.0"
+}

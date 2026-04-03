@@ -2,11 +2,21 @@
 """
 aiciv-mind -- Sub-Mind Entry Point
 
-Spawned by primary into a tmux pane. Connects to primary via ZeroMQ DEALER socket.
-Waits for task messages, executes them, reports results.
+Spawned by primary into a tmux pane. Two modes:
+
+1. IPC mode (team leads): Connects to primary via ZeroMQ DEALER socket.
+   Waits for task messages, executes them, reports results.
+   Team leads also get a SubMindSpawner so they can spawn agents.
+
+2. Task-file mode (agents): Reads task from --task-file, runs it directly,
+   writes result to data/submind_results/, and exits. No IPC needed.
 
 Usage (internal -- don't call directly):
-    python3 run_submind.py --manifest manifests/research-lead.yaml --id research-lead
+    # Team lead (IPC mode):
+    python3 run_submind.py --manifest manifests/team-leads/research-lead.yaml --id research-lead
+
+    # Agent (task-file mode):
+    python3 run_submind.py --manifest manifests/agents/coder.yaml --id coder-1 --task-file data/agent_tasks/agent-abc123.json
 """
 import argparse
 import asyncio
@@ -19,6 +29,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+_MIND_ROOT = Path(__file__).parent
+_RESULTS_DIR = _MIND_ROOT / "data" / "submind_results"
+
 
 def setup_logging(mind_id: str, level: str = "INFO") -> None:
     logging.basicConfig(
@@ -30,40 +43,38 @@ def setup_logging(mind_id: str, level: str = "INFO") -> None:
     logging.getLogger("anthropic").setLevel(logging.WARNING)
 
 
-_RESULTS_DIR = Path(__file__).parent / "data" / "submind_results"
-
-
-def _persist_result(task_id: str, mind_id: str, result: str, logger: logging.Logger) -> None:
-    """Write result to disk so primary can recover it on ZMQ timeout."""
+def _persist_result(
+    task_id: str, mind_id: str, result: str, logger: logging.Logger,
+    success: bool = True, error: str = "",
+) -> None:
+    """Write result to disk. Used by both IPC mode and task-file mode."""
     try:
         _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         (_RESULTS_DIR / f"{task_id}.json").write_text(json.dumps({
-            "task_id": task_id, "mind_id": mind_id,
-            "result": result, "timestamp": time.time(),
+            "task_id": task_id,
+            "mind_id": mind_id,
+            "result": result,
+            "success": success,
+            "error": error,
+            "timestamp": time.time(),
         }))
     except Exception as exc:
         logger.warning("Failed to persist result for %s: %s", task_id, exc)
 
 
-async def run_submind(manifest_path: str, mind_id: str, model_override: str | None = None) -> None:
-    from aiciv_mind.manifest import MindManifest, ModelConfig
+def _load_common(manifest_path: str, mind_id: str, model_override: str | None):
+    """Load manifest, memory, and suite client. Shared by both modes."""
+    from aiciv_mind.manifest import MindManifest
     from aiciv_mind.memory import MemoryStore
-    from aiciv_mind.tools import ToolRegistry
-    from aiciv_mind.mind import Mind
-    from aiciv_mind.ipc.submind_bus import SubMindBus
-    from aiciv_mind.ipc.messages import MindMessage, MsgType
 
     logger = logging.getLogger(mind_id)
-    logger.info("Sub-mind starting: %s", mind_id)
 
     # Load manifest
     manifest = MindManifest.from_yaml(manifest_path)
-    # Override mind_id if provided via CLI
     if mind_id and mind_id != manifest.mind_id:
         logger.info("Overriding mind_id: %s -> %s", manifest.mind_id, mind_id)
         manifest = manifest.model_copy(update={"mind_id": mind_id})
 
-    # Override model if provided via CLI (used by A/B testing)
     if model_override:
         logger.info("Model override: %s -> %s", manifest.model.preferred, model_override)
         new_model = manifest.model.model_copy(update={"preferred": model_override})
@@ -77,7 +88,11 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
             os.makedirs(db_dir, exist_ok=True)
     memory = MemoryStore(db_path)
 
-    # SuiteClient for Hub tools — sub-minds with auth config get Hub access
+    return manifest, memory, logger
+
+
+async def _init_suite_client(manifest, logger):
+    """Initialize SuiteClient if auth config is present."""
     suite_client = None
     try:
         auth_cfg = getattr(manifest, "auth", None)
@@ -88,24 +103,126 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
             logger.info("SuiteClient connected — Hub tools enabled")
     except Exception as e:
         logger.info("SuiteClient unavailable: %s", e)
+    return suite_client
 
-    # Build tool registry — register ALL tools, let manifest.enabled_tool_names()
-    # control what the LLM actually sees.  Role-based registry filtering was
-    # stripping tools that team leads need (bash, files, grep etc.) because
-    # TEAM_LEAD_TOOLS only contains orchestration tools.  The manifest's enabled
-    # list is the real whitelist (passed to build_openai_tools in Mind._run_task_body).
-    scratchpad_dir = str(Path(__file__).parent / "scratchpads")
-    queue_path = str(Path(__file__).parent / "data" / "hub_queue.jsonl")
-    tools = ToolRegistry.default(
+
+def _build_tool_registry(manifest, memory, suite_client):
+    """Build the base tool registry with all standard tools."""
+    from aiciv_mind.tools import ToolRegistry
+
+    scratchpad_dir = str(_MIND_ROOT / "scratchpads")
+    queue_path = str(_MIND_ROOT / "data" / "hub_queue.jsonl")
+    return ToolRegistry.default(
         memory_store=memory,
-        role="agent",  # Don't filter — manifest tool list controls LLM visibility
+        role="agent",  # Register ALL tools; manifest tool list controls LLM visibility
         agent_id=manifest.mind_id,
         suite_client=suite_client,
         queue_path=queue_path,
         scratchpad_dir=scratchpad_dir,
     )
 
-    # Connect IPC bus
+
+# ---------------------------------------------------------------------------
+# Mode 1: Task-file mode (agents) — direct execution, no IPC
+# ---------------------------------------------------------------------------
+
+async def run_agent_task(manifest_path: str, mind_id: str, task_file: str,
+                         model_override: str | None = None) -> None:
+    """
+    Agent task-file mode: read task from file, run it, write result, exit.
+    No ZeroMQ bus needed. The team lead polls the result file.
+    """
+    from aiciv_mind.mind import Mind
+
+    manifest, memory, logger = _load_common(manifest_path, mind_id, model_override)
+    logger.info("Agent starting in task-file mode: %s", mind_id)
+
+    # Read task from file
+    task_path = Path(task_file)
+    if not task_path.exists():
+        logger.error("Task file not found: %s", task_file)
+        return
+
+    task_data = json.loads(task_path.read_text())
+    task_id = task_data.get("task_id", f"unknown-{int(time.time())}")
+    task = task_data.get("task", "")
+    from_lead = task_data.get("from", "unknown")
+
+    if not task:
+        logger.error("Empty task in task file: %s", task_file)
+        _persist_result(task_id, mind_id, "ERROR: Empty task", logger,
+                        success=False, error="Empty task in task file")
+        return
+
+    logger.info("Task %s from %s: %s", task_id, from_lead, task[:100])
+
+    # Initialize tools and mind (no bus needed)
+    suite_client = await _init_suite_client(manifest, logger)
+    tools = _build_tool_registry(manifest, memory, suite_client)
+    mind = Mind(manifest=manifest, memory=memory, tools=tools, bus=None)
+
+    # Execute the task
+    try:
+        result = await mind.run_task(task, task_id=task_id)
+        logger.info("Task %s completed (%d chars)", task_id, len(result))
+        _persist_result(task_id, mind_id, result, logger, success=True)
+    except Exception as e:
+        logger.exception("Task %s failed", task_id)
+        _persist_result(task_id, mind_id, str(e), logger,
+                        success=False, error=str(e))
+    finally:
+        memory.close()
+        logger.info("Agent %s exiting", mind_id)
+
+
+# ---------------------------------------------------------------------------
+# Mode 2: IPC mode (team leads) — ZeroMQ bus, long-running
+# ---------------------------------------------------------------------------
+
+async def run_submind(manifest_path: str, mind_id: str,
+                      model_override: str | None = None) -> None:
+    """
+    IPC mode for team leads: connect to primary's bus, wait for tasks.
+    Team leads also get a SubMindSpawner so they can spawn agents.
+    """
+    from aiciv_mind.mind import Mind
+    from aiciv_mind.ipc.submind_bus import SubMindBus
+    from aiciv_mind.ipc.messages import MindMessage, MsgType
+    from aiciv_mind.roles import Role
+
+    manifest, memory, logger = _load_common(manifest_path, mind_id, model_override)
+    logger.info("Sub-mind starting (IPC mode): %s", mind_id)
+
+    suite_client = await _init_suite_client(manifest, logger)
+    tools = _build_tool_registry(manifest, memory, suite_client)
+
+    # --- Wire spawn_agent for team leads ---
+    role = Role.from_str(manifest.role)
+    if role == Role.TEAM_LEAD:
+        logger.info("Team lead detected — wiring SubMindSpawner + spawn_agent")
+        from aiciv_mind.spawner import SubMindSpawner
+        from aiciv_mind.registry import MindRegistry
+        from aiciv_mind.tools.spawn_tools import register_spawn_tools
+
+        agent_registry = MindRegistry()
+        spawner = SubMindSpawner(
+            session_name="aiciv-subminds",
+            mind_root=_MIND_ROOT,
+            registry=agent_registry,
+            memory_store=memory,
+        )
+        # Register spawn_agent + shutdown_agent on the tool registry.
+        # bus=None because agents use file-based task passing, not IPC.
+        register_spawn_tools(
+            registry=tools,
+            spawner=spawner,
+            bus=None,
+            mind_id=manifest.mind_id,
+            role="team_lead",
+        )
+        logger.info("spawn_agent + shutdown_agent registered")
+
+    # Connect IPC bus (for Primary ↔ team lead communication)
     bus = SubMindBus(mind_id=manifest.mind_id)
     bus.connect()
 
@@ -143,7 +260,8 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
             ))
         except Exception as e:
             logger.exception("Task %s failed", task_id)
-            _persist_result(task_id, manifest.mind_id, f"ERROR: {e}", logger)
+            _persist_result(task_id, manifest.mind_id, f"ERROR: {e}", logger,
+                            success=False, error=str(e))
             await bus.send(MindMessage.result(
                 sender=manifest.mind_id,
                 recipient="primary",
@@ -187,16 +305,34 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
         logger.info("Sub-mind %s stopped", manifest.mind_id)
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="aiciv-mind sub-mind process")
     parser.add_argument("--manifest", required=True, help="Path to mind manifest YAML")
     parser.add_argument("--id", required=True, dest="mind_id", help="Mind ID override")
     parser.add_argument("--model", default=None, help="Override manifest model.preferred")
+    parser.add_argument("--task-file", default=None, dest="task_file",
+                        help="Path to task JSON file (agent direct-execution mode)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     setup_logging(args.mind_id, args.log_level)
-    asyncio.run(run_submind(args.manifest, args.mind_id, model_override=args.model))
+
+    if args.task_file:
+        # Agent mode: run task directly, write result, exit
+        asyncio.run(run_agent_task(
+            args.manifest, args.mind_id, args.task_file,
+            model_override=args.model,
+        ))
+    else:
+        # IPC mode: connect to primary's bus, wait for tasks
+        asyncio.run(run_submind(
+            args.manifest, args.mind_id,
+            model_override=args.model,
+        ))
 
 
 if __name__ == "__main__":

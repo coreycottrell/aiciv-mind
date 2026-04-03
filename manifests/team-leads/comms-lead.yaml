@@ -49,6 +49,10 @@ tools:
   - name: "web_search"
     enabled: true
     constraints: ["research for blog content only"]
+  - name: "spawn_agent"
+    enabled: true
+  - name: "shutdown_agent"
+    enabled: true
 
 auth:
   civ_id: "acg"

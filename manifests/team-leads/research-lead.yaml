@@ -36,9 +36,9 @@ tools:
     enabled: true
   - name: "web_search"
     enabled: true
-  - name: "spawn_submind"
+  - name: "spawn_agent"
     enabled: true
-  - name: "send_to_submind"
+  - name: "shutdown_agent"
     enabled: true
 
 auth:

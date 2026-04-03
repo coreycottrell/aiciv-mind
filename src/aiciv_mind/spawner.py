@@ -60,6 +60,7 @@ class SubMindSpawner:
         mind_id: str,
         manifest_path: str | Path,
         model_override: str | None = None,
+        extra_args: list[str] | None = None,
     ) -> MindHandle:
         """
         Spawn sub-mind in a new tmux window.
@@ -104,6 +105,9 @@ class SubMindSpawner:
         env_prefix = f"export {env_exports} && " if env_exports else ""
 
         model_arg = f" --model {model_override}" if model_override else ""
+        extra = ""
+        if extra_args:
+            extra = " " + " ".join(extra_args)
         cmd = (
             f"cd {self._mind_root} && "
             f"{env_prefix}"
@@ -111,6 +115,7 @@ class SubMindSpawner:
             f"--manifest {manifest_path} "
             f"--id {mind_id}"
             f"{model_arg}"
+            f"{extra}"
         )
 
         window = session.new_window(window_name=mind_id, window_shell=cmd)

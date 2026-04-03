@@ -18,6 +18,8 @@ removes it before tool definitions reach the model.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 import uuid
 from pathlib import Path
 
@@ -203,32 +205,46 @@ def _make_shutdown_tl_handler(bus, primary_mind_id: str):
 _SPAWN_AGENT_DEFINITION: dict = {
     "name": "spawn_agent",
     "description": (
-        "Spawn a specialist agent sub-mind. The agent gets full tool access "
-        "and team scratchpad write access. It executes tools directly."
+        "Spawn a specialist agent sub-mind to execute a task. The agent gets "
+        "full tool access (65+ tools). It runs the task, returns results, and "
+        "exits. This call BLOCKS until the agent completes or times out."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "mind_id": {
                 "type": "string",
-                "description": "Unique ID for the agent (e.g. 'coder-1', 'web-searcher')",
+                "description": "Unique ID for the agent (e.g. 'coder-1', 'researcher-1')",
             },
             "manifest_path": {
                 "type": "string",
-                "description": "Path to the agent's manifest YAML",
+                "description": "Path to the agent's manifest YAML (e.g. 'manifests/agents/coder.yaml')",
             },
             "task": {
                 "type": "string",
-                "description": "The specific task for this agent",
+                "description": "The specific task for this agent to execute",
             },
         },
-        "required": ["mind_id", "manifest_path"],
+        "required": ["mind_id", "manifest_path", "task"],
     },
 }
 
+# Directories for task files and results (relative to mind_root)
+_AGENT_TASKS_DIR = "data/agent_tasks"
+_AGENT_RESULTS_DIR = "data/submind_results"
+_AGENT_TIMEOUT_SECONDS = 180  # 3 minutes max per agent task
+
 
 def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
-    """Return async spawn_agent handler."""
+    """
+    Return async spawn_agent handler.
+
+    Architecture: file-based task passing (no IPC needed between team lead and agent).
+    1. Write task to data/agent_tasks/{task_id}.json
+    2. Spawn agent with --task-file flag pointing to the task file
+    3. Agent reads task, runs mind.run_task(), writes result to data/submind_results/{task_id}.json
+    4. Team lead polls for result file, returns result when found
+    """
 
     async def handler(tool_input: dict) -> str:
         mind_id = tool_input.get("mind_id", "").strip()
@@ -239,6 +255,8 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
             return "ERROR: mind_id is required"
         if not manifest_path:
             return "ERROR: manifest_path is required"
+        if not task:
+            return "ERROR: task is required — agents need a specific task to execute"
 
         # Verify the manifest declares role: agent
         try:
@@ -252,28 +270,73 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
         except Exception as e:
             return f"ERROR: Could not validate manifest: {type(e).__name__}: {e}"
 
+        # Generate task_id and write task file
+        task_id = f"agent-{uuid.uuid4().hex[:8]}"
+        mind_root = spawner._mind_root
+        task_dir = mind_root / _AGENT_TASKS_DIR
+        task_dir.mkdir(parents=True, exist_ok=True)
+        task_file = task_dir / f"{task_id}.json"
+        task_file.write_text(json.dumps({
+            "task_id": task_id,
+            "task": task,
+            "from": team_lead_mind_id,
+            "mind_id": mind_id,
+            "timestamp": time.time(),
+        }))
+
         try:
-            handle = spawner.spawn(mind_id, manifest_path)
-            await asyncio.sleep(1)
+            # Spawn agent with --task-file flag (runs task directly, no IPC needed)
+            handle = spawner.spawn(
+                mind_id,
+                manifest_path,
+                extra_args=["--task-file", str(task_file)],
+            )
 
-            parts = [f"Spawned agent '{mind_id}' (pane: {handle.pane_id})"]
-            if task:
-                parts.append(f"Task: {task}")
+            parts = [
+                f"Spawned agent '{mind_id}' (pane: {handle.pane_id})",
+                f"Task ID: {task_id}",
+                f"Task: {task[:200]}",
+                "Waiting for agent to complete...",
+            ]
 
-            # Context injection: send task briefing to the agent via bus
-            if bus is not None and task:
-                try:
-                    injection_msg = MindMessage.log(
-                        sender=team_lead_mind_id,
-                        recipient=mind_id,
-                        level="INFO",
-                        message=f"[CONTEXT INJECTION] Task: {task}",
-                    )
-                    await bus.send(injection_msg)
-                except Exception:
-                    pass  # Non-fatal
+            # Poll for result file
+            result_file = mind_root / _AGENT_RESULTS_DIR / f"{task_id}.json"
+            start = time.time()
+            while time.time() - start < _AGENT_TIMEOUT_SECONDS:
+                if result_file.exists():
+                    try:
+                        result_data = json.loads(result_file.read_text())
+                        result_text = result_data.get("result", "No result text")
+                        success = result_data.get("success", True)
+                        elapsed = round(time.time() - start, 1)
+                        if success:
+                            return (
+                                f"Agent '{mind_id}' completed task ({elapsed}s):\n\n"
+                                f"{result_text}"
+                            )
+                        else:
+                            error = result_data.get("error", "Unknown error")
+                            return (
+                                f"Agent '{mind_id}' FAILED ({elapsed}s):\n"
+                                f"Error: {error}\n"
+                                f"Partial result: {result_text}"
+                            )
+                    except json.JSONDecodeError:
+                        pass  # File still being written, retry
+                await asyncio.sleep(2)
 
-            return "\n".join(parts)
+            # Timeout — try to capture last output from pane
+            elapsed = round(time.time() - start, 1)
+            try:
+                last_output = spawner.capture_output(handle, lines=20)
+                output_text = "\n".join(last_output[-10:]) if last_output else "(no output captured)"
+            except Exception:
+                output_text = "(could not capture pane output)"
+
+            return (
+                f"Agent '{mind_id}' TIMED OUT after {elapsed}s.\n"
+                f"Last pane output:\n{output_text}"
+            )
 
         except Exception as e:
             return f"ERROR: Failed to spawn agent: {type(e).__name__}: {e}"
@@ -303,8 +366,9 @@ _SHUTDOWN_AGENT_DEFINITION: dict = {
 }
 
 
-def _make_shutdown_agent_handler(bus, team_lead_mind_id: str):
-    """Return async shutdown_agent handler."""
+def _make_shutdown_agent_handler(spawner, team_lead_mind_id: str):
+    """Return async shutdown_agent handler. Uses spawner.terminate() since agents
+    use file-based task passing (no IPC bus)."""
 
     async def handler(tool_input: dict) -> str:
         mind_id = tool_input.get("mind_id", "").strip()
@@ -312,11 +376,21 @@ def _make_shutdown_agent_handler(bus, team_lead_mind_id: str):
             return "ERROR: mind_id is required"
 
         try:
-            msg = MindMessage.shutdown(team_lead_mind_id, mind_id)
-            await bus.send(msg)
-            return f"Shutdown request sent to agent '{mind_id}'"
+            # Look up handle in spawner's registry
+            if spawner._registry is not None:
+                handle = spawner._registry.get(mind_id)
+                if handle is not None:
+                    spawner.terminate(handle)
+                    return f"Agent '{mind_id}' terminated"
+            # Fallback: kill tmux window by name
+            session = spawner.ensure_session()
+            window = session.windows.get(window_name=mind_id, default=None)
+            if window is not None:
+                window.kill()
+                return f"Agent '{mind_id}' terminated (via tmux window kill)"
+            return f"Agent '{mind_id}' not found — may have already exited"
         except Exception as e:
-            return f"ERROR: Failed to send shutdown to '{mind_id}': {type(e).__name__}: {e}"
+            return f"ERROR: Failed to terminate '{mind_id}': {type(e).__name__}: {e}"
 
     return handler
 
@@ -365,12 +439,12 @@ def register_spawn_tools(
             _SPAWN_AGENT_DEFINITION,
             _make_spawn_agent_handler(spawner, bus, mind_id),
             read_only=False,
-            timeout=30.0,
+            timeout=_AGENT_TIMEOUT_SECONDS + 10,  # Tool timeout > poll timeout
         )
         registry.register(
             "shutdown_agent",
             _SHUTDOWN_AGENT_DEFINITION,
-            _make_shutdown_agent_handler(bus, mind_id),
+            _make_shutdown_agent_handler(spawner, mind_id),
             read_only=False,
         )
     # AGENT role: register nothing — agents cannot spawn

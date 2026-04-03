@@ -1,0 +1,19 @@
+{
+  "current_phase": 0,
+  "phases": {
+    "0_self_discovery": {
+      "started": false,
+      "completed": false,
+      "tasks": {
+        "0.1_read_identity": false,
+        "0.2_extract_identity": false,
+        "0.3_validate_consistency": false,
+        "0.4_replace_placeholders": false,
+        "0.5_write_adaptation_log": false,
+        "0.6_write_core_identity": false,
+        "0.7_verify_no_placeholders": false
+      }
+    }
+  },
+  "schema_version": "1.0"
+}

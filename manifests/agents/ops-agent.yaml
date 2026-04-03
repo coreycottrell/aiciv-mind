@@ -1,0 +1,52 @@
+schema_version: "1.0"
+mind_id: "ops-agent"
+display_name: "Ops Agent"
+role: "agent"
+
+# Ops Agent — spawned by team leads for infrastructure and system tasks.
+#
+# Full tool access: bash, file ops, system health, monitoring.
+# Receives a specific ops task, executes it, reports results back.
+
+system_prompt_path: "../self/agents/ops-agent.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.3
+  max_tokens: 8192
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["monitoring preferred", "no rm -rf", "no destructive ops without confirmation"]
+  - name: "read_file"
+    enabled: true
+  - name: "write_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+  - name: "system_health"
+    enabled: true
+  - name: "resource_usage"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 5

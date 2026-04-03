@@ -73,7 +73,7 @@ def _make_search_handler(memory_store):
         # If the agent didn't specify an agent_id, auto-detect from contextvar.
         # This means concurrent sub-minds automatically scope their searches
         # to their own identity without the LLM needing to know its own ID.
-        agent_id: str | None = tool_input.get("agent_id") or current_mind_id()
+        agent_id: str | None = tool_input.get("agent_id")
         limit: int = int(tool_input.get("limit", 5))
         use_depth: bool = tool_input.get("use_depth", True)
         use_graph: bool = tool_input.get("graph", True)

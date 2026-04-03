@@ -48,6 +48,10 @@ tools:
     enabled: true
   - name: "unpin_memory"
     enabled: true
+  - name: "spawn_agent"
+    enabled: true
+  - name: "shutdown_agent"
+    enabled: true
 
 auth:
   civ_id: "acg"
