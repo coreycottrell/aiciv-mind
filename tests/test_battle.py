@@ -757,3 +757,796 @@ def test_tool_registry_build_performance():
     assert len(tools) >= 20
 
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Text tool call parser — model format edge cases
+# ---------------------------------------------------------------------------
+
+
+def _make_mind_for_parser(tool_names: list[str] | None = None):
+    """Create a Mind instance with a mock ToolRegistry for parser testing."""
+    from aiciv_mind.manifest import MindManifest, ModelConfig, AuthConfig, MemoryConfig
+    from aiciv_mind.mind import Mind
+    from aiciv_mind.tools import ToolRegistry
+
+    store = MemoryStore(":memory:")
+    if tool_names is None:
+        # Use real registry to get real tool names
+        registry = ToolRegistry.default(memory_store=store)
+    else:
+        # Build a mock registry with exactly the given names
+        registry = MagicMock(spec=ToolRegistry)
+        registry.names.return_value = tool_names
+        registry.is_read_only.return_value = True
+
+    manifest = MindManifest(
+        mind_id="parser-test",
+        display_name="Parser Test",
+        role="worker",
+        system_prompt="Test.",
+        model=ModelConfig(preferred="test"),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=store, tools=registry)
+    return mind, store
+
+
+class TestTextToolCallParser:
+    """Battle tests for _parse_text_tool_calls — every model format we've seen."""
+
+    # --- Format 1: {"name": "tool", "arguments": {...}} ---
+
+    def test_format1_basic_json(self):
+        """Standard JSON tool call — most common format."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "memory_search", "arguments": {"query": "hello world", "limit": 5}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        assert blocks[0].input == {"query": "hello world", "limit": 5}
+        store.close()
+
+    def test_format1_embedded_in_prose(self):
+        """JSON tool call embedded in natural language text."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            'Let me search for that.\n\n'
+            '{"name": "memory_search", "arguments": {"query": "WAL mode"}}\n\n'
+            "I'll wait for the results."
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        store.close()
+
+    def test_format1_multiple_tool_calls(self):
+        """Multiple JSON tool calls in a single response."""
+        mind, store = _make_mind_for_parser(["memory_search", "memory_write"])
+        text = (
+            '{"name": "memory_search", "arguments": {"query": "find this"}}\n'
+            'Some text between calls.\n'
+            '{"name": "memory_write", "arguments": {"title": "result", "content": "found it"}}'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 2
+        assert blocks[0].name == "memory_search"
+        assert blocks[1].name == "memory_write"
+        store.close()
+
+    def test_format1_nested_json_in_arguments(self):
+        """Arguments containing nested JSON objects/arrays."""
+        mind, store = _make_mind_for_parser(["memory_write"])
+        text = '{"name": "memory_write", "arguments": {"title": "test", "content": "data: {\\"key\\": \\"value\\"}"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_write"
+        store.close()
+
+    def test_format1_case_insensitive_name(self):
+        """M2.7 emits 'Memory_Search' instead of 'memory_search'."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "Memory_Search", "arguments": {"query": "test"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"  # Normalized to canonical
+        store.close()
+
+    def test_format1_hyphen_underscore_normalization(self):
+        """Tool name with hyphens normalized to underscores."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "memory-search", "arguments": {"query": "test"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        store.close()
+
+    def test_format1_unknown_tool_ignored(self):
+        """JSON with an unregistered tool name is silently skipped."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "nonexistent_tool", "arguments": {"query": "test"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 0
+        store.close()
+
+    # --- Format 2: {"type": "function", "function": {"name": ..., "parameters": {...}}} ---
+
+    def test_format2_openai_style(self):
+        """OpenAI-style function call format."""
+        mind, store = _make_mind_for_parser(["bash"])
+        text = '{"type": "function", "function": {"name": "bash", "parameters": {"command": "ls -la"}}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "bash"
+        assert blocks[0].input == {"command": "ls -la"}
+        store.close()
+
+    def test_format2_arguments_key(self):
+        """OpenAI format with 'arguments' instead of 'parameters'."""
+        mind, store = _make_mind_for_parser(["bash"])
+        text = '{"type": "function", "function": {"name": "bash", "arguments": {"command": "echo hi"}}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input == {"command": "echo hi"}
+        store.close()
+
+    # --- Format 3: {"tool": "tool_name", "arguments": {...}} ---
+
+    def test_format3_minimax_style(self):
+        """MiniMax M2.7 {"tool": ..., "arguments": {...}} format."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"tool": "memory_search", "arguments": {"query": "test query"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        store.close()
+
+    def test_format3_args_key(self):
+        """MiniMax with 'args' shorthand instead of 'arguments'."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"tool": "memory_search", "args": {"query": "short key"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input == {"query": "short key"}
+        store.close()
+
+    # --- [TOOL_CALL] block format ---
+
+    def test_tool_call_block_format(self):
+        """M2.7 [TOOL_CALL] block format with JSON arguments."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '[TOOL_CALL]\n'
+            'tool => "memory_search"\n'
+            'args => {"query": "hello", "limit": 10}\n'
+            '[/TOOL_CALL]'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        assert blocks[0].input["query"] == "hello"
+        store.close()
+
+    def test_tool_call_block_cli_style_args(self):
+        """[TOOL_CALL] with CLI-style --key value arguments."""
+        mind, store = _make_mind_for_parser(["memory_write"])
+        text = (
+            '[TOOL_CALL]\n'
+            'tool => "memory_write"\n'
+            'args => { --title "My Memory" --content "Important fact" }\n'
+            '[/TOOL_CALL]'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_write"
+        assert blocks[0].input.get("title") == "My Memory"
+        store.close()
+
+    def test_multiple_tool_call_blocks(self):
+        """Two consecutive [TOOL_CALL] blocks."""
+        mind, store = _make_mind_for_parser(["memory_search", "bash"])
+        text = (
+            '[TOOL_CALL]\n'
+            'tool => "memory_search"\n'
+            'args => {"query": "first"}\n'
+            '[/TOOL_CALL]\n'
+            'Some intermediate text\n'
+            '[TOOL_CALL]\n'
+            'tool => "bash"\n'
+            'args => {"command": "echo done"}\n'
+            '[/TOOL_CALL]'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 2
+        assert blocks[0].name == "memory_search"
+        assert blocks[1].name == "bash"
+        store.close()
+
+    # --- XML invoke format ---
+
+    def test_xml_invoke_format(self):
+        """XML <invoke> tag format."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '<invoke name="memory_search">\n'
+            '<parameter name="query">find me</parameter>\n'
+            '<parameter name="limit">5</parameter>\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        assert blocks[0].input["query"] == "find me"
+        assert blocks[0].input["limit"] == 5  # JSON-parsed to int
+        store.close()
+
+    def test_xml_invoke_with_minimax_wrapper(self):
+        """MiniMax wraps invoke in <minimax:tool_call> tags."""
+        mind, store = _make_mind_for_parser(["bash"])
+        text = (
+            '<minimax:tool_call>\n'
+            '<invoke name="bash">\n'
+            '<parameter name="command">ls -la /tmp</parameter>\n'
+            '</invoke>\n'
+            '</minimax:tool_call>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "bash"
+        assert blocks[0].input["command"] == "ls -la /tmp"
+        store.close()
+
+    def test_xml_invoke_no_closing_tag(self):
+        """M2.7 sometimes omits </invoke> — parser should still work."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '<invoke name="memory_search">\n'
+            '<parameter name="query">partial</parameter>\n'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input["query"] == "partial"
+        store.close()
+
+    def test_xml_parameter_with_json_value(self):
+        """Parameter value that's valid JSON gets parsed."""
+        mind, store = _make_mind_for_parser(["memory_write"])
+        text = (
+            '<invoke name="memory_write">\n'
+            '<parameter name="title">Test</parameter>\n'
+            '<parameter name="tags">["a", "b", "c"]</parameter>\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input["tags"] == ["a", "b", "c"]
+        store.close()
+
+    # --- Edge cases ---
+
+    def test_empty_text_returns_empty(self):
+        """Empty or whitespace-only text returns no blocks."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        assert mind._parse_text_tool_calls("") == []
+        assert mind._parse_text_tool_calls("   \n\t  ") == []
+        store.close()
+
+    def test_malformed_json_ignored(self):
+        """Malformed JSON doesn't crash the parser."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "memory_search", "arguments": {"query": broken}'
+        blocks = mind._parse_text_tool_calls(text)
+        # Should not crash; may or may not parse depending on brace matching
+        assert isinstance(blocks, list)
+        store.close()
+
+    def test_non_dict_json_ignored(self):
+        """JSON arrays and primitives in text are ignored."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '[1, 2, 3] "hello" 42 true'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 0
+        store.close()
+
+    def test_json_with_no_tool_keys_ignored(self):
+        """JSON objects without name/tool/function keys are skipped."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"key": "value", "count": 42}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 0
+        store.close()
+
+    def test_non_dict_arguments_ignored(self):
+        """Tool call with non-dict arguments is skipped."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = '{"name": "memory_search", "arguments": "not a dict"}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 0
+        store.close()
+
+    def test_synthetic_block_has_required_attrs(self):
+        """Synthetic tool blocks have name, input, id, and type attributes."""
+        mind, store = _make_mind_for_parser(["bash"])
+        text = '{"name": "bash", "arguments": {"command": "echo test"}}'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        b = blocks[0]
+        assert hasattr(b, "name")
+        assert hasattr(b, "input")
+        assert hasattr(b, "id")
+        assert hasattr(b, "type")
+        assert b.type == "tool_use"
+        assert b.id.startswith("synthetic_")
+        assert len(b.id) > len("synthetic_")
+        store.close()
+
+    def test_format_priority_json_before_tool_call_before_xml(self):
+        """JSON format takes priority over [TOOL_CALL] and XML — fallback chain."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        # If JSON parses, [TOOL_CALL] and XML are not tried
+        text = (
+            '{"name": "memory_search", "arguments": {"query": "json wins"}}\n'
+            '[TOOL_CALL]\ntool => "memory_search"\nargs => {"query": "block"}\n[/TOOL_CALL]\n'
+            '<invoke name="memory_search"><parameter name="query">xml</parameter></invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        # JSON found first, so no fallback. But JSON scanner finds ALL JSON objects.
+        # The [TOOL_CALL] and XML are only tried if JSON finds nothing.
+        assert len(blocks) >= 1
+        assert blocks[0].input["query"] == "json wins"
+        store.close()
+
+    def test_extract_json_objects_balanced_braces(self):
+        """_extract_json_objects handles nested braces correctly."""
+        from aiciv_mind.mind import Mind
+        text = '{"outer": {"inner": {"deep": true}}} plain text {"flat": 1}'
+        objects = Mind._extract_json_objects(text)
+        assert len(objects) == 2
+        import json
+        assert json.loads(objects[0]) == {"outer": {"inner": {"deep": True}}}
+        assert json.loads(objects[1]) == {"flat": 1}
+
+    def test_extract_json_objects_strings_with_braces(self):
+        """Braces inside JSON strings don't confuse the extractor."""
+        from aiciv_mind.mind import Mind
+        text = '{"msg": "hello {world} and }"}'
+        objects = Mind._extract_json_objects(text)
+        assert len(objects) == 1
+        import json
+        parsed = json.loads(objects[0])
+        assert parsed["msg"] == "hello {world} and }"
+
+    def test_cli_style_args_escaped_quotes(self):
+        """CLI-style args parser handles escaped quotes in values."""
+        from aiciv_mind.mind import Mind
+        text = '--title "My \\"quoted\\" title" --content "Body text"'
+        result = Mind._parse_cli_style_args(text)
+        assert result["title"] == 'My "quoted" title'
+        assert result["content"] == "Body text"
+
+    def test_cli_style_args_numeric_coercion(self):
+        """CLI-style parser coerces numeric values."""
+        from aiciv_mind.mind import Mind
+        text = '--limit 10 --threshold 0.75 --label text'
+        result = Mind._parse_cli_style_args(text)
+        assert result["limit"] == 10
+        assert result["threshold"] == 0.75
+        assert result["label"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# Hook governance — blocked tools, escalation, custom hooks, skill hooks
+# ---------------------------------------------------------------------------
+
+
+class TestHookGovernance:
+    """Battle tests for the HookRunner governance layer."""
+
+    def test_blocked_tool_denied(self):
+        """Blocked tools are denied with a message."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(blocked_tools=["git_push", "netlify_deploy"])
+        result = hooks.pre_tool_use("git_push", {"branch": "main"})
+        assert not result.allowed
+        assert "blocked" in result.message.lower()
+        assert hooks.stats["denied"] == 1
+
+    def test_allowed_tool_passes(self):
+        """Non-blocked tools pass pre-hook check."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(blocked_tools=["git_push"])
+        result = hooks.pre_tool_use("memory_search", {"query": "test"})
+        assert result.allowed
+
+    def test_dynamic_block_and_unblock(self):
+        """Tools can be blocked/unblocked at runtime."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner()
+        assert hooks.pre_tool_use("bash", {}).allowed
+
+        hooks.block_tool("bash")
+        assert not hooks.pre_tool_use("bash", {}).allowed
+
+        hooks.unblock_tool("bash")
+        assert hooks.pre_tool_use("bash", {}).allowed
+
+    def test_escalation_without_handler_denies(self):
+        """Escalation tools denied if no permission handler registered (fail-closed)."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(escalate_tools=["git_push"])
+        result = hooks.pre_tool_use("git_push", {"branch": "main"})
+        assert not result.allowed
+        assert "no permission handler" in result.message.lower()
+
+    def test_escalation_with_approving_handler(self):
+        """Escalation approved when handler returns approved=True."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionResponse
+        hooks = HookRunner(escalate_tools=["git_push"])
+        hooks.register_permission_handler(
+            lambda req: PermissionResponse(approved=True),
+            mind_id="test-sub",
+        )
+        result = hooks.pre_tool_use("git_push", {"branch": "feature"})
+        assert result.allowed
+
+    def test_escalation_with_denying_handler(self):
+        """Escalation denied when handler returns approved=False."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionResponse
+        hooks = HookRunner(escalate_tools=["git_push"])
+        hooks.register_permission_handler(
+            lambda req: PermissionResponse(approved=False, message="Not on main"),
+            mind_id="test-sub",
+        )
+        result = hooks.pre_tool_use("git_push", {"branch": "main"})
+        assert not result.allowed
+        assert "Not on main" in result.message
+
+    def test_escalation_handler_exception_denies(self):
+        """Exception in permission handler fails closed (denies)."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(escalate_tools=["git_push"])
+        hooks.register_permission_handler(
+            lambda req: (_ for _ in ()).throw(RuntimeError("handler crash")),
+            mind_id="test-sub",
+        )
+        result = hooks.pre_tool_use("git_push", {})
+        assert not result.allowed
+        assert "error" in result.message.lower()
+
+    def test_custom_pre_hook_can_deny(self):
+        """Custom pre-hooks can deny tool calls."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+        hooks = HookRunner()
+        hooks.register_pre_hook(
+            "no-rm",
+            lambda name, inp: HookResult(allowed=False, message="rm not allowed")
+            if "rm" in inp.get("command", "")
+            else HookResult(allowed=True),
+            tools=["bash"],
+        )
+        # Should deny
+        result = hooks.pre_tool_use("bash", {"command": "rm -rf /tmp"})
+        assert not result.allowed
+        # Should allow (different tool)
+        result = hooks.pre_tool_use("memory_search", {"query": "rm stuff"})
+        assert result.allowed
+        # Should allow (no rm in command)
+        result = hooks.pre_tool_use("bash", {"command": "ls -la"})
+        assert result.allowed
+
+    def test_post_hook_logs_all_calls(self):
+        """Post-hook logs all calls when log_all=True."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(log_all=True)
+        hooks.pre_tool_use("bash", {"command": "echo hi"})
+        hooks.post_tool_use("bash", {"command": "echo hi"}, "hi\n", False)
+        hooks.post_tool_use("memory_search", {"query": "q"}, "[]", False)
+        assert len(hooks.call_log) == 2
+        assert hooks.call_log[0].tool_name == "bash"
+        assert hooks.call_log[1].tool_name == "memory_search"
+
+    def test_skill_hooks_install_and_uninstall(self):
+        """Skill-defined hooks can be installed and cleanly uninstalled."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner()
+        # Install skill that blocks git_push
+        hooks.install_skill_hooks("deploy-guard", {
+            "blocked_tools": ["git_push", "netlify_deploy"],
+        })
+        assert "git_push" in hooks.blocked_tools
+        assert "netlify_deploy" in hooks.blocked_tools
+
+        # Uninstall — blocked tools removed
+        hooks.uninstall_skill_hooks("deploy-guard")
+        assert "git_push" not in hooks.blocked_tools
+        assert "netlify_deploy" not in hooks.blocked_tools
+
+    def test_skill_hooks_dont_unblock_base_blocked(self):
+        """Uninstalling a skill doesn't unblock tools that were in the base config."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(blocked_tools=["git_push"])
+        # Skill also blocks git_push
+        hooks.install_skill_hooks("extra-guard", {"blocked_tools": ["git_push"]})
+        hooks.uninstall_skill_hooks("extra-guard")
+        # git_push should STILL be blocked (base config)
+        assert "git_push" in hooks.blocked_tools
+
+    def test_lifecycle_on_stop_fires_callbacks(self):
+        """on_stop fires all registered callbacks."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner()
+        fired = []
+        hooks.register_on_stop(lambda **kw: fired.append(kw))
+        hooks.on_stop(mind_id="test", result="done", tool_calls=3)
+        assert len(fired) == 1
+        assert fired[0]["mind_id"] == "test"
+        assert fired[0]["tool_calls"] == 3
+
+    def test_lifecycle_callback_exception_doesnt_crash(self):
+        """Exception in lifecycle callback is caught, not propagated."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner()
+        hooks.register_on_stop(lambda **kw: 1 / 0)
+        # Should not raise
+        hooks.on_stop(mind_id="test", result="done")
+
+    def test_hook_stats_accumulate(self):
+        """Hook stats accumulate across multiple calls."""
+        from aiciv_mind.tools.hooks import HookRunner
+        hooks = HookRunner(blocked_tools=["bad_tool"])
+        hooks.pre_tool_use("good_tool", {})
+        hooks.pre_tool_use("bad_tool", {})
+        hooks.pre_tool_use("good_tool", {})
+        hooks.pre_tool_use("bad_tool", {})
+        stats = hooks.stats
+        assert stats["total_calls"] == 4
+        assert stats["denied"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Learning loop — TaskOutcome, SessionLearner, SessionSummary
+# ---------------------------------------------------------------------------
+
+
+class TestLearningLoop:
+    """Battle tests for the self-improvement learning system."""
+
+    def test_task_outcome_succeeded(self):
+        """Task with no errors and substantial result counts as succeeded."""
+        from aiciv_mind.learning import TaskOutcome
+        o = TaskOutcome(
+            task="Search for data",
+            result="Found 15 relevant entries with detailed content here",
+            tool_call_count=3,
+        )
+        assert o.succeeded
+
+    def test_task_outcome_failed_on_errors(self):
+        """Task with tool errors counts as failed."""
+        from aiciv_mind.learning import TaskOutcome
+        o = TaskOutcome(
+            task="Deploy",
+            result="Deployment failed due to network error",
+            tool_errors=["NetworkError: connection refused"],
+            tool_call_count=2,
+        )
+        assert not o.succeeded
+
+    def test_task_outcome_failed_on_short_result(self):
+        """Task with trivial result (<20 chars) counts as failed."""
+        from aiciv_mind.learning import TaskOutcome
+        o = TaskOutcome(task="Do thing", result="OK", tool_call_count=1)
+        assert not o.succeeded
+
+    def test_efficiency_score_range(self):
+        """Efficiency score is always in [0, 1] range."""
+        from aiciv_mind.learning import TaskOutcome
+        cases = [
+            TaskOutcome(task="t", result="r" * 30, tool_call_count=0),
+            TaskOutcome(task="t", result="r" * 30, tool_call_count=1),
+            TaskOutcome(task="t", result="r" * 30, tool_call_count=100),
+            TaskOutcome(task="t", result="r" * 30, tool_call_count=3, tool_errors=["e"] * 5),
+        ]
+        for o in cases:
+            assert 0.0 <= o.efficiency_score <= 1.0, f"Out of range: {o.efficiency_score}"
+
+    def test_session_learner_empty_summary(self):
+        """Empty session produces zero-count summary."""
+        from aiciv_mind.learning import SessionLearner
+        learner = SessionLearner(agent_id="test")
+        s = learner.summarize()
+        assert s.task_count == 0
+        assert s.success_rate == 0.0
+
+    def test_session_learner_accumulates(self):
+        """SessionLearner accumulates outcomes and computes correct stats."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        learner.record(TaskOutcome(
+            task="t1", result="r" * 30, tool_call_count=3,
+            tools_used=["bash", "memory_search"],
+        ))
+        learner.record(TaskOutcome(
+            task="t2", result="r" * 30, tool_call_count=5,
+            tools_used=["bash", "memory_write"],
+            tool_errors=["timeout"],
+        ))
+        learner.record(TaskOutcome(
+            task="t3", result="r" * 30, tool_call_count=2,
+            tools_used=["memory_search"],
+        ))
+        assert learner.task_count == 3
+        s = learner.summarize()
+        assert s.task_count == 3
+        assert s.success_count == 2  # t2 failed (has errors)
+        assert s.total_tool_calls == 10  # 3+5+2
+
+    def test_session_learner_generates_insights(self):
+        """High error rate generates an insight."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        # 3 tasks, all with errors → >30% error rate
+        for i in range(3):
+            learner.record(TaskOutcome(
+                task=f"t{i}", result="r" * 30, tool_call_count=5,
+                tool_errors=["err1", "err2"],
+                tools_used=["bash"],
+            ))
+        s = learner.summarize()
+        assert len(s.insights) > 0
+        assert any("error" in i.lower() for i in s.insights)
+
+    def test_session_learner_writes_memory(self):
+        """write_session_learning stores a session learning memory."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        learner.record(TaskOutcome(task="t1", result="r" * 30, tool_call_count=2))
+        learner.record(TaskOutcome(task="t2", result="r" * 30, tool_call_count=3))
+        store = MemoryStore(":memory:")
+        mid = learner.write_session_learning(store)
+        assert mid is not None
+        results = store.search("Session learning", agent_id="test")
+        assert len(results) >= 1
+        store.close()
+
+    def test_session_learner_skips_single_task(self):
+        """Single-task sessions don't generate a learning (not enough data)."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        learner.record(TaskOutcome(task="t1", result="r" * 30, tool_call_count=2))
+        store = MemoryStore(":memory:")
+        mid = learner.write_session_learning(store)
+        assert mid is None
+        store.close()
+
+    def test_session_summary_to_dict(self):
+        """SessionSummary.to_dict() produces valid JSON-serializable output."""
+        import json
+        from aiciv_mind.learning import SessionSummary
+        s = SessionSummary(
+            task_count=5, success_count=4, success_rate=0.8,
+            total_tool_calls=20, total_errors=2, elapsed_s=120.0,
+            avg_efficiency=0.65,
+            most_used_tools=[("bash", 10), ("memory_search", 5)],
+            insights=["High error rate on bash"],
+        )
+        d = s.to_dict()
+        # Must be JSON serializable
+        json.dumps(d)
+        assert d["task_count"] == 5
+        assert d["insights"] == ["High error rate on bash"]
+
+
+# ---------------------------------------------------------------------------
+# IPC message serialization — round-trip, factories, edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestIPCMessages:
+    """Battle tests for MindMessage wire format."""
+
+    def test_round_trip_serialization(self):
+        """Message survives to_bytes → from_bytes round trip."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.task(
+            sender="primary",
+            recipient="research-lead",
+            task_id="task-001",
+            objective="Research AI safety",
+            context={"priority": "high"},
+        )
+        raw = msg.to_bytes()
+        restored = MindMessage.from_bytes(raw)
+        assert restored.type == MsgType.TASK
+        assert restored.sender == "primary"
+        assert restored.recipient == "research-lead"
+        assert restored.payload["task_id"] == "task-001"
+        assert restored.payload["context"]["priority"] == "high"
+
+    def test_all_factory_methods_produce_valid_messages(self):
+        """Every MindMessage factory produces a valid serializable message."""
+        from aiciv_mind.ipc.messages import MindMessage, MindCompletionEvent
+        factories = [
+            MindMessage.task("a", "b", "t1", "do thing"),
+            MindMessage.result("a", "b", "t1", "done", True),
+            MindMessage.shutdown("a", "b"),
+            MindMessage.shutdown_ack("a", "b", "child"),
+            MindMessage.heartbeat("a", "b"),
+            MindMessage.heartbeat_ack("a", "b"),
+            MindMessage.status("a", "b", "t1", "50%", 50),
+            MindMessage.log("a", "b", "INFO", "hello"),
+            MindMessage.permission_request("a", "b", "bash", {"command": "ls"}),
+            MindMessage.permission_response("a", "b", "req-1", True),
+            MindMessage.completion("a", "b", MindCompletionEvent(
+                mind_id="sub", task_id="t1", status="success", summary="Done",
+            )),
+        ]
+        for msg in factories:
+            raw = msg.to_bytes()
+            assert isinstance(raw, bytes)
+            restored = MindMessage.from_bytes(raw)
+            assert restored.type == msg.type
+            assert restored.sender == msg.sender
+
+    def test_message_ids_are_unique(self):
+        """Each message gets a unique ID."""
+        from aiciv_mind.ipc.messages import MindMessage
+        ids = {MindMessage.heartbeat("a", "b").id for _ in range(100)}
+        assert len(ids) == 100
+
+    def test_completion_event_context_line(self):
+        """MindCompletionEvent.context_line produces the expected format."""
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+        event = MindCompletionEvent(
+            mind_id="research-lead",
+            task_id="t1",
+            status="success",
+            summary="Found 3 relevant papers",
+            tokens_used=1240,
+            tool_calls=5,
+            duration_ms=3200,
+        )
+        line = event.context_line()
+        assert "[research-lead]" in line
+        assert "SUCCESS" in line
+        assert "Found 3 relevant papers" in line
+        assert "1240t" in line
+
+    def test_completion_event_round_trip(self):
+        """MindCompletionEvent survives to_dict → from_dict."""
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+        original = MindCompletionEvent(
+            mind_id="sub",
+            task_id="t1",
+            status="error",
+            summary="Failed to connect",
+            result="ConnectionRefusedError",
+            tokens_used=500,
+            tool_calls=2,
+            duration_ms=1000,
+            tools_used=["bash", "memory_search"],
+            error="Connection refused",
+        )
+        d = original.to_dict()
+        restored = MindCompletionEvent.from_dict(d)
+        assert restored.mind_id == "sub"
+        assert restored.status == "error"
+        assert restored.error == "Connection refused"
+        assert restored.tools_used == ["bash", "memory_search"]
+
+    def test_from_bytes_with_missing_optional_fields(self):
+        """from_bytes handles missing optional fields gracefully."""
+        import json
+        from aiciv_mind.ipc.messages import MindMessage
+        # Minimal message — no id, no timestamp, no payload
+        raw = json.dumps({
+            "type": "heartbeat",
+            "sender": "a",
+            "recipient": "b",
+        }).encode("utf-8")
+        msg = MindMessage.from_bytes(raw)
+        assert msg.type == "heartbeat"
+        assert msg.sender == "a"
+        assert isinstance(msg.id, str) and len(msg.id) > 0
+        assert msg.payload == {}
