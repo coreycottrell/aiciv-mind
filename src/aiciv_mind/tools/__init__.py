@@ -205,6 +205,7 @@ class ToolRegistry:
         cls,
         memory_store=None,
         agent_id: str = "primary",
+        role: str = "agent",
         suite_client=None,
         context_store=None,
         get_message_count=None,
@@ -288,6 +289,17 @@ class ToolRegistry:
         if spawner is not None and primary_bus is not None:
             from aiciv_mind.tools.submind_tools import register_submind_tools
             register_submind_tools(registry, spawner=spawner, bus=primary_bus, primary_mind_id=agent_id)
+
+            # Role-enforced spawn tools (defense-in-depth alongside filter_by_role)
+            from aiciv_mind.tools.spawn_tools import register_spawn_tools
+            register_spawn_tools(
+                registry, spawner=spawner, bus=primary_bus,
+                mind_id=agent_id, role=role, scratchpad_dir=scratchpad_dir,
+            )
+
+            # Inter-mind messaging (PRIMARY and TEAM_LEAD both get this)
+            from aiciv_mind.tools.message_tools import register_message_tools
+            register_message_tools(registry, bus=primary_bus, sender_id=agent_id)
 
         if skills_dir is not None and memory_store is not None:
             from aiciv_mind.tools.skill_tools import register_skill_tools
