@@ -528,3 +528,229 @@ async def test_synthetic_tool_calls_still_work(minimal_manifest, memory_store):
     assert result == "Got it: hello"
     assert mock_exec.call_count == 1
     mock_exec.assert_called_once_with("bash", {"command": "echo hello"})
+
+
+# ---------------------------------------------------------------------------
+# Tests: text-embedded tool call parsing variations
+# ---------------------------------------------------------------------------
+
+
+async def test_json_format_tool_call_parsing(minimal_manifest, memory_store):
+    """JSON format: {"name": "tool", "arguments": {...}} embedded in text."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    json_text = (
+        'Let me check.\n'
+        '{"name": "bash", "arguments": {"command": "pwd"}}\n'
+    )
+    first = make_response(text=json_text, stop_reason="end_turn")
+    second = make_response(text="/home/corey/projects")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="/home/corey"
+        ) as mock_exec:
+            result = await mind.run_task("Where am I?", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "pwd"})
+
+
+async def test_openai_function_format_parsing(minimal_manifest, memory_store):
+    """OpenAI format: {"type": "function", "function": {"name": ..., "parameters": ...}}."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    func_text = (
+        '{"type": "function", "function": '
+        '{"name": "bash", "parameters": {"command": "ls"}}}'
+    )
+    first = make_response(text=func_text, stop_reason="end_turn")
+    second = make_response(text="Files listed.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="a.py"
+        ) as mock_exec:
+            result = await mind.run_task("List files", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "ls"})
+
+
+async def test_case_insensitive_tool_name_parsing(minimal_manifest, memory_store):
+    """Tool names should normalize: Bash → bash, Memory_Search → memory_search."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    json_text = '{"name": "Bash", "arguments": {"command": "echo test"}}'
+    first = make_response(text=json_text, stop_reason="end_turn")
+    second = make_response(text="test")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="test"
+        ) as mock_exec:
+            result = await mind.run_task("Test", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    # Should be normalized to "bash"
+    mock_exec.assert_called_once_with("bash", {"command": "echo test"})
+
+
+async def test_tool_call_block_format_parsing(minimal_manifest, memory_store):
+    """[TOOL_CALL]...[/TOOL_CALL] format used by M2.7."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    tc_text = (
+        'I will check.\n'
+        '[TOOL_CALL]\n'
+        'tool => "bash"\n'
+        'args => {"command": "date"}\n'
+        '[/TOOL_CALL]'
+    )
+    first = make_response(text=tc_text, stop_reason="end_turn")
+    second = make_response(text="Today is Wednesday.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="Wed Apr 2"
+        ) as mock_exec:
+            result = await mind.run_task("What day?", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "date"})
+
+
+async def test_xml_invoke_with_wrapper_parsing(minimal_manifest, memory_store):
+    """<minimax:tool_call><invoke name="...">...</invoke></minimax:tool_call> format."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    xml_text = (
+        '<minimax:tool_call>'
+        '<invoke name="bash">\n'
+        '<parameter name="command">whoami</parameter>\n'
+        '</invoke>'
+        '</minimax:tool_call>'
+    )
+    first = make_response(text=xml_text, stop_reason="end_turn")
+    second = make_response(text="You are root.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="corey"
+        ) as mock_exec:
+            result = await mind.run_task("Who am I?", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "whoami"})
+
+
+async def test_unrecognized_tool_name_ignored(minimal_manifest, memory_store):
+    """Tool calls with names not in the registry are silently ignored."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    json_text = '{"name": "nonexistent_tool", "arguments": {"x": 1}}'
+    first = make_response(text=json_text, stop_reason="end_turn")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=first,
+    ):
+        # Should NOT crash — unrecognized tool names are skipped
+        result = await mind.run_task("Try bad tool", inject_memories=False)
+
+    # No tool_use blocks found → loop breaks → returns whatever text was there
+    assert isinstance(result, str)
+
+
+async def test_synthetic_result_injected_as_user_text(minimal_manifest, memory_store):
+    """When synthetic tool calls execute, results are injected as plain text
+    user messages (not tool_result blocks)."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    xml_text = (
+        '<invoke name="bash">\n'
+        '<parameter name="command">echo ok</parameter>\n'
+        '</invoke>'
+    )
+    first = make_response(text=xml_text, stop_reason="end_turn")
+    second = make_response(text="Done.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="ok"
+        ):
+            await mind.run_task("Test", inject_memories=False)
+
+    # Find the user message with tool result text
+    text_results = [
+        m for m in mind._messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+        and "[Tool result:" in m["content"]
+    ]
+    assert len(text_results) == 1
+    assert "[Tool result: bash]" in text_results[0]["content"]
+    assert "ok" in text_results[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: read-only vs write tool execution ordering
+# ---------------------------------------------------------------------------
+
+
+async def test_read_only_tools_can_run_concurrently(minimal_manifest, memory_store):
+    """Read-only tools should be executed concurrently (via asyncio.gather)."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    # Register two read-only tools
+    mind._tools.register(
+        "ro_tool_a",
+        {"name": "ro_tool_a", "description": "Read A", "input_schema": {"type": "object", "properties": {}}},
+        lambda x: "a_result",
+        read_only=True,
+    )
+    mind._tools.register(
+        "ro_tool_b",
+        {"name": "ro_tool_b", "description": "Read B", "input_schema": {"type": "object", "properties": {}}},
+        lambda x: "b_result",
+        read_only=True,
+    )
+
+    tc1 = make_tool_use_block("c1", "ro_tool_a", {})
+    tc2 = make_tool_use_block("c2", "ro_tool_b", {})
+    first = make_response(tool_blocks=[tc1, tc2], stop_reason="tool_use")
+    second = make_response(text="Both done.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        result = await mind.run_task("Read both", inject_memories=False)
+
+    assert result == "Both done."
+    # Both results should be in the tool_result message
+    result_msgs = [
+        m for m in mind._messages
+        if m.get("role") == "user" and isinstance(m.get("content"), list)
+    ]
+    assert len(result_msgs) == 1
+    contents = [r["content"] for r in result_msgs[0]["content"]]
+    assert "a_result" in contents
+    assert "b_result" in contents
