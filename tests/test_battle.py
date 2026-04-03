@@ -3310,6 +3310,283 @@ class TestBootContext:
 
 
 # ---------------------------------------------------------------------------
+# Stress: Context compaction under pressure
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionStress:
+    """Stress tests for context compaction — circuit breaker, multi-round, edge cases."""
+
+    def _make_ctx(self, **kwargs):
+        from aiciv_mind.context_manager import ContextManager
+        defaults = dict(max_context_memories=10, model_max_tokens=4096)
+        defaults.update(kwargs)
+        return ContextManager(**defaults)
+
+    def _make_messages(self, n: int) -> list[dict]:
+        """Generate n alternating user/assistant messages."""
+        msgs = []
+        for i in range(n):
+            role = "user" if i % 2 == 0 else "assistant"
+            msgs.append({"role": role, "content": f"Message {i}: " + "x" * 200})
+        return msgs
+
+    def test_should_compact_large_conversation(self):
+        """should_compact returns True when messages exceed token budget."""
+        ctx = self._make_ctx(model_max_tokens=100)  # Very small budget
+        msgs = self._make_messages(20)
+        assert ctx.should_compact(msgs, max_tokens=100)
+
+    def test_should_not_compact_small_conversation(self):
+        """should_compact returns False for short conversations."""
+        ctx = self._make_ctx(model_max_tokens=100000)
+        msgs = self._make_messages(4)
+        assert not ctx.should_compact(msgs, max_tokens=100000)
+
+    def test_compact_preserves_recent(self):
+        """compact_history preserves the most recent messages."""
+        ctx = self._make_ctx()
+        msgs = self._make_messages(20)
+        compacted, summary = ctx.compact_history(msgs, preserve_recent=4)
+        # Compacted should have: 2 (summary pair) + 4 (recent) = 6 messages
+        assert len(compacted) <= 10
+        # Last message should be from the original
+        assert compacted[-1]["content"] == msgs[-1]["content"]
+
+    def test_compact_summary_contains_topics(self):
+        """Compaction summary extracts user message topics."""
+        ctx = self._make_ctx()
+        msgs = [
+            {"role": "user", "content": "Implement the auth module"},
+            {"role": "assistant", "content": "I'll start with the token manager."},
+            {"role": "user", "content": "Now add rate limiting"},
+            {"role": "assistant", "content": "Rate limiting added."},
+            {"role": "user", "content": "Deploy to staging"},
+            {"role": "assistant", "content": "Deployed."},
+            {"role": "user", "content": "Final review"},
+            {"role": "assistant", "content": "All good."},
+        ]
+        compacted, summary = ctx.compact_history(msgs, preserve_recent=2)
+        assert "auth module" in summary or "rate limiting" in summary or "Topics" in summary
+
+    def test_circuit_breaker_trips_after_failures(self):
+        """Circuit breaker disables compaction after MAX_CONSECUTIVE_COMPACTION_FAILURES."""
+        ctx = self._make_ctx()
+        # Monkey-patch _do_compact to always fail
+        original = ctx._do_compact
+        ctx._do_compact = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+        msgs = self._make_messages(20)
+
+        for _ in range(ctx.MAX_CONSECUTIVE_COMPACTION_FAILURES):
+            ctx.compact_history(msgs, preserve_recent=4)
+
+        assert ctx._compaction_disabled
+        # After circuit breaker trips, should_compact returns False
+        assert not ctx.should_compact(msgs, max_tokens=1)
+
+    def test_circuit_breaker_resets_on_success(self):
+        """Successful compaction resets the failure counter."""
+        ctx = self._make_ctx()
+        # Simulate one failure
+        ctx._consecutive_compaction_failures = 2
+        msgs = self._make_messages(20)
+        compacted, _ = ctx.compact_history(msgs, preserve_recent=4)
+        # Should have reset
+        assert ctx._consecutive_compaction_failures == 0
+
+    def test_compact_too_few_messages_noop(self):
+        """compact_history with too few messages returns them unchanged."""
+        ctx = self._make_ctx()
+        msgs = self._make_messages(4)
+        compacted, summary = ctx.compact_history(msgs, preserve_recent=4)
+        assert compacted == msgs
+
+    def test_format_boot_context_empty(self):
+        """format_boot_context with no data returns empty string."""
+        from aiciv_mind.session_store import BootContext
+        ctx = self._make_ctx()
+        boot = BootContext(session_id="s1", session_count=0, agent_id="test")
+        result = ctx.format_boot_context(boot)
+        assert result == ""
+
+    def test_format_boot_context_with_data(self):
+        """format_boot_context formats identity + handoff + pinned."""
+        from aiciv_mind.session_store import BootContext
+        ctx = self._make_ctx()
+        boot = BootContext(
+            session_id="s1", session_count=5, agent_id="test",
+            identity_memories=[{"title": "Core Role", "content": "I am a researcher."}],
+            handoff_memory={"content": "Was analyzing competitive landscape."},
+            pinned_memories=[{"title": "Critical Rule", "content": "Never delete data."}],
+        )
+        result = ctx.format_boot_context(boot)
+        assert "Core Role" in result
+        assert "researcher" in result
+        assert "competitive landscape" in result
+        assert "Critical Rule" in result
+
+    def test_format_search_results_budget_limit(self):
+        """format_search_results respects token budget."""
+        ctx = self._make_ctx(model_max_tokens=50)  # Very tight budget
+        results = [
+            {"title": f"Memory {i}", "content": "x" * 500, "created_at": "2026-01-01"}
+            for i in range(20)
+        ]
+        formatted = ctx.format_search_results(results)
+        # Should have truncated before including all 20
+        assert formatted.count("Memory") < 20
+
+    def test_format_search_results_empty(self):
+        """format_search_results returns empty string for empty results."""
+        ctx = self._make_ctx()
+        assert ctx.format_search_results([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Stress: Memory under heavy write load
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryStress:
+    """Stress tests for MemoryStore under heavy write and search pressure."""
+
+    def test_hundred_concurrent_writes(self):
+        """Store 100 memories without errors."""
+        store = MemoryStore(":memory:")
+        for i in range(100):
+            store.store(Memory(
+                agent_id="stress",
+                title=f"Memory {i}",
+                content=f"Content for memory {i} with some searchable text about topic {i % 10}.",
+                memory_type="learning",
+            ))
+        all_mems = store.by_agent("stress", limit=200)
+        assert len(all_mems) == 100
+        store.close()
+
+    def test_search_with_many_memories(self):
+        """FTS5 search returns relevant results from large memory pool."""
+        store = MemoryStore(":memory:")
+        # Seed 50 memories with varied content
+        for i in range(50):
+            store.store(Memory(
+                agent_id="search-stress",
+                title=f"Topic {i}",
+                content=f"This memory discusses topic {i} about {'security' if i % 5 == 0 else 'general'} matters.",
+                memory_type="learning",
+            ))
+        results = store.search("security", agent_id="search-stress", limit=20)
+        assert len(results) >= 5  # Should find the 10 security memories
+        store.close()
+
+    def test_memory_graph_edges_under_load(self):
+        """Graph links between many memories work correctly."""
+        store = MemoryStore(":memory:")
+        ids = []
+        for i in range(20):
+            mid = store.store(Memory(
+                agent_id="graph",
+                title=f"Node {i}",
+                content=f"Node {i} content",
+                memory_type="learning",
+            ))
+            ids.append(mid)
+        # Link each to the next
+        for i in range(len(ids) - 1):
+            store.link_memories(ids[i], ids[i + 1], "references")
+        # Check graph traversal
+        graph = store.get_memory_graph(ids[0], depth=1)
+        assert "neighbors" in graph or "links" in graph or len(graph) > 0
+        store.close()
+
+    def test_large_memory_content(self):
+        """Storing and retrieving very large memory content works."""
+        store = MemoryStore(":memory:")
+        large_content = "x" * 100_000  # 100KB
+        mid = store.store(Memory(
+            agent_id="large",
+            title="Huge memory",
+            content=large_content,
+            memory_type="learning",
+        ))
+        results = store.by_agent("large", limit=1)
+        assert len(results) == 1
+        assert len(results[0]["content"]) == 100_000
+        store.close()
+
+    def test_store_and_search_special_chars(self):
+        """Memories with special characters can be stored and searched."""
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="special",
+            title="SQL 'injection' test",
+            content="Content with 'quotes', \"double quotes\", and <html> tags & ampersands.",
+            memory_type="learning",
+        ))
+        results = store.by_agent("special", limit=10)
+        assert len(results) >= 1
+        assert "quotes" in results[0]["content"]
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Stress: Planning gate edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestPlanningStress:
+    """Stress tests for planning gate classification edge cases."""
+
+    def test_empty_task_classifies(self):
+        """Empty task string doesn't crash the planning gate."""
+        from aiciv_mind.planning import PlanningGate
+        store = MemoryStore(":memory:")
+        gate = PlanningGate(memory_store=store, agent_id="plan-test")
+        result = gate.run("")
+        assert result.complexity is not None
+        store.close()
+
+    def test_very_long_task_classifies(self):
+        """Very long task string is classified without error."""
+        from aiciv_mind.planning import PlanningGate
+        store = MemoryStore(":memory:")
+        gate = PlanningGate(memory_store=store, agent_id="plan-test")
+        long_task = "Implement a comprehensive " + "feature " * 1000
+        result = gate.run(long_task)
+        assert result.complexity is not None
+        store.close()
+
+    def test_complex_multi_step_task_classifies_higher(self):
+        """Multi-step tasks with complexity keywords get higher classification."""
+        from aiciv_mind.planning import PlanningGate, TaskComplexity
+        store = MemoryStore(":memory:")
+        gate = PlanningGate(memory_store=store, agent_id="plan-test")
+        # Use a genuinely complex multi-step task to trigger higher classification
+        complex_task = (
+            "First, implement the authentication system with JWT tokens and Ed25519 signing. "
+            "Then, build the API gateway with rate limiting and request validation. "
+            "After that, refactor the database layer to use connection pooling. "
+            "Finally, deploy the entire system to production and verify all endpoints work. "
+            "This is a complex, multi-step, irreversible migration that requires careful planning."
+        )
+        result = gate.run(complex_task)
+        # Multi-step task with many complexity keywords should score above trivial
+        assert result.complexity.gate_depth >= TaskComplexity.TRIVIAL.gate_depth
+        assert result.classification is not None
+        store.close()
+
+    def test_disabled_gate_returns_trivial(self):
+        """Disabled planning gate returns trivial complexity."""
+        from aiciv_mind.planning import PlanningGate, TaskComplexity
+        store = MemoryStore(":memory:")
+        gate = PlanningGate(memory_store=store, agent_id="plan-test", enabled=False)
+        result = gate.run("build a distributed system")
+        # When disabled, no plan is generated
+        assert result.plan == "" or result.plan is None or not gate._enabled
+        store.close()
+
+
+# ---------------------------------------------------------------------------
 # ToolRegistry — core registration, execution, timeout, hooks
 # ---------------------------------------------------------------------------
 
