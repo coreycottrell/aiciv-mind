@@ -62,9 +62,11 @@ memory:
   max_context_memories: 10
 
 sub_minds:
-  - id: "blog-writer"
-    manifest: "manifests/sub-minds/blog-writer.yaml"
+  - mind_id: "blog-writer"
+    manifest_path: "manifests/sub-minds/blog-writer.yaml"
     description: "Blog post drafting specialist — research, write, format HTML"
-  - id: "email-composer"
-    manifest: "manifests/sub-minds/email-composer.yaml"
+    auto_spawn: false
+  - mind_id: "email-composer"
+    manifest_path: "manifests/sub-minds/email-composer.yaml"
     description: "Email drafting specialist — audience-aware tone and content"
+    auto_spawn: false

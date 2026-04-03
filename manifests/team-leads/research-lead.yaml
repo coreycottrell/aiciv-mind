@@ -54,12 +54,15 @@ memory:
 
 # Sub-minds this team lead can spawn for parallel research threads
 sub_minds:
-  - id: "research-web"
-    manifest: "manifests/sub-minds/research-web.yaml"
+  - mind_id: "research-web"
+    manifest_path: "manifests/sub-minds/research-web.yaml"
     description: "Web search specialist — searches and summarizes external sources"
-  - id: "research-memory"
-    manifest: "manifests/sub-minds/research-memory.yaml"
+    auto_spawn: false
+  - mind_id: "research-memory"
+    manifest_path: "manifests/sub-minds/research-memory.yaml"
     description: "Memory search specialist — exhausts internal knowledge before going external"
-  - id: "research-code"
-    manifest: "manifests/sub-minds/research-code.yaml"
+    auto_spawn: false
+  - mind_id: "research-code"
+    manifest_path: "manifests/sub-minds/research-code.yaml"
     description: "Codebase research specialist — grep, glob, read files"
+    auto_spawn: false

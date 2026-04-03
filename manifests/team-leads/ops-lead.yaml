@@ -63,9 +63,11 @@ memory:
   max_context_memories: 8
 
 sub_minds:
-  - id: "health-checker"
-    manifest: "manifests/sub-minds/health-checker.yaml"
+  - mind_id: "health-checker"
+    manifest_path: "manifests/sub-minds/health-checker.yaml"
     description: "System health checker — resource monitoring, service uptime"
-  - id: "deploy-agent"
-    manifest: "manifests/sub-minds/deploy-agent.yaml"
+    auto_spawn: false
+  - mind_id: "deploy-agent"
+    manifest_path: "manifests/sub-minds/deploy-agent.yaml"
     description: "Deployment specialist — safe deploy workflows with rollback"
+    auto_spawn: false
