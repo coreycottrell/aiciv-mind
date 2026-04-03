@@ -248,11 +248,25 @@ This is how you compound. Session by session. Dream by dream."""
         )
         return
 
+    # P3-6: KAIROS — log dream cycle + inject distillation into prompt
+    from aiciv_mind.kairos import KairosLog
+    kairos = KairosLog(
+        data_dir=Path(__file__).parent.parent / "data" / "logs",
+        agent_id=manifest.mind_id,
+    )
+    kairos.append("Dream cycle started", level="milestone")
+
+    # Inject KAIROS distillation into the prompt so the dream can review daily logs
+    distillation = kairos.distill(days=7)
+    if distillation and "No KAIROS entries" not in distillation:
+        prompt += f"\n\n## Recent Activity (KAIROS Log)\n{distillation}"
+
     LOG.info("Starting dream cycle (%s)...", "quick" if quick else "full")
     try:
         result = await mind.run_task(prompt)
     finally:
         lock.release()
+    kairos.append("Dream cycle completed", level="milestone")
     LOG.info("Dream complete.")
     print(result)
 
