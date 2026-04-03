@@ -6833,3 +6833,702 @@ class TestDaemonTools:
         register_daemon_tools(reg)
         names = reg.names()
         assert "daemon_health" in names
+
+
+# ===========================================================================
+# Round 19 — Core modules: context_manager, consolidation_lock, learning,
+#             model_router, skill_discovery, fork_context, context (contextvars)
+# ===========================================================================
+
+
+class TestContextManager:
+    """Battle-test ContextManager: boot format, search results, compaction."""
+
+    def test_format_boot_context_with_identity(self):
+        """Boot context includes identity memories."""
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+
+        ctx = ContextManager(max_context_memories=5)
+        boot = BootContext(
+            session_id="sess-001",
+            session_count=3,
+            agent_id="root",
+            identity_memories=[
+                {"title": "Who I am", "content": "I am Root, the aiciv-mind primary."},
+            ],
+        )
+        result = ctx.format_boot_context(boot)
+        assert "Session Context" in result
+        assert "sess-001" in result
+        assert "My Identity" in result
+        assert "Who I am" in result
+
+    def test_format_boot_context_with_handoff(self):
+        """Boot context includes handoff from previous session."""
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+
+        ctx = ContextManager()
+        boot = BootContext(
+            session_id="sess-002",
+            session_count=5,
+            agent_id="root",
+            identity_memories=[
+                {"title": "Identity", "content": "I am Root."},
+            ],
+            handoff_memory={"content": "Was debugging the hub connection."},
+        )
+        result = ctx.format_boot_context(boot)
+        assert "Previous Session Handoff" in result
+        assert "debugging the hub" in result
+
+    def test_format_boot_context_empty(self):
+        """Boot context returns empty string when nothing meaningful."""
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+
+        ctx = ContextManager()
+        boot = BootContext(
+            session_id="sess-empty",
+            session_count=0,
+            agent_id="root",
+        )
+        result = ctx.format_boot_context(boot)
+        assert result == ""
+
+    def test_format_search_results(self):
+        """Search results include title, content, and staleness caveat."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        results = [
+            {"title": "Hub Architecture", "content": "The hub uses FastAPI.", "created_at": "2026-03-20"},
+            {"title": "Auth Token Flow", "content": "JWT with Ed25519.", "created_at": "2026-03-19"},
+        ]
+        text = ctx.format_search_results(results)
+        assert "Relevant memories" in text
+        assert "HINTS, not facts" in text
+        assert "Hub Architecture" in text
+        assert "Auth Token Flow" in text
+
+    def test_format_search_results_empty(self):
+        """Empty search results return empty string."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        assert ctx.format_search_results([]) == ""
+
+    def test_should_compact_false_short_history(self):
+        """Compaction is not triggered for short histories."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        assert ctx.should_compact(msgs, max_tokens=100) is False
+
+    def test_should_compact_true_long_history(self):
+        """Compaction is triggered when token estimate exceeds threshold."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        msgs = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 1000}
+            for i in range(20)
+        ]
+        assert ctx.should_compact(msgs, max_tokens=100) is True
+
+    def test_compact_history_preserves_recent(self):
+        """Compaction keeps recent messages verbatim."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        msgs = [
+            {"role": "user", "content": f"old message {i}"} if i % 2 == 0
+            else {"role": "assistant", "content": f"old response {i}"}
+            for i in range(12)
+        ]
+        compacted, summary = ctx.compact_history(msgs, preserve_recent=4)
+        # Should have summary pair + 4 recent = 6
+        assert len(compacted) <= 8
+        assert "COMPACTED CONTEXT" in compacted[0]["content"]
+        # Recent messages preserved
+        assert compacted[-1]["content"] == msgs[-1]["content"]
+
+    def test_compaction_circuit_breaker(self):
+        """After MAX_CONSECUTIVE_COMPACTION_FAILURES, compaction is disabled."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        msgs = [{"role": "user", "content": "x"}]  # Too short to compact
+
+        # Manually trip the circuit breaker
+        for _ in range(ctx.MAX_CONSECUTIVE_COMPACTION_FAILURES):
+            ctx._consecutive_compaction_failures += 1
+        ctx._compaction_disabled = True
+
+        assert ctx.should_compact(
+            [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 1000} for i in range(20)],
+            max_tokens=100,
+        ) is False
+
+    def test_estimate_tokens(self):
+        """Token estimation is roughly len/4."""
+        from aiciv_mind.context_manager import ContextManager
+
+        ctx = ContextManager()
+        assert ctx.estimate_tokens("hello world") == len("hello world") // 4
+
+    def test_extract_message_text_variants(self):
+        """_extract_message_text handles str, list of dicts, and content blocks."""
+        from aiciv_mind.context_manager import ContextManager
+
+        # String content
+        assert ContextManager._extract_message_text({"content": "hello"}) == "hello"
+
+        # List of text blocks
+        assert "world" in ContextManager._extract_message_text({
+            "content": [{"type": "text", "text": "world"}],
+        })
+
+        # Empty
+        assert ContextManager._extract_message_text({}) == ""
+
+
+class TestConsolidationLock:
+    """Battle-test ConsolidationLock: acquire, release, stale detection."""
+
+    def test_acquire_and_release(self, tmp_path):
+        """Lock can be acquired and released."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        lock = ConsolidationLock(tmp_path / "test.lock")
+        assert lock.acquire() is True
+        assert lock.is_held_by_us is True
+        assert lock.is_held() is True
+        lock.release()
+        assert lock.is_held_by_us is False
+        assert lock.is_held() is False
+
+    def test_reentrant_acquire(self, tmp_path):
+        """Re-acquiring while already held returns True."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        lock = ConsolidationLock(tmp_path / "reentrant.lock")
+        assert lock.acquire() is True
+        assert lock.acquire() is True  # Should be reentrant
+        lock.release()
+
+    def test_context_manager(self, tmp_path):
+        """Sync context manager acquires and releases."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        lock = ConsolidationLock(tmp_path / "ctx.lock")
+        with lock:
+            assert lock.is_held_by_us
+            assert (tmp_path / "ctx.lock").exists()
+        assert not lock.is_held_by_us
+
+    def test_stale_lock_from_dead_pid(self, tmp_path):
+        """Lock from a dead PID is stolen."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        import json
+
+        lock_path = tmp_path / "stale.lock"
+        # Write a lock file with a certainly-dead PID
+        lock_path.write_text(json.dumps({
+            "pid": 999999999,  # Almost certainly not running
+            "started_at": 0,
+            "operation": "old-dream",
+        }))
+
+        lock = ConsolidationLock(lock_path)
+        # Should be able to steal this
+        assert lock.acquire() is True
+        lock.release()
+
+    def test_holder_info(self, tmp_path):
+        """holder_info returns info when lock is held."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        lock = ConsolidationLock(tmp_path / "info.lock", operation="test-op")
+        lock.acquire()
+        info = lock.holder_info()
+        assert info is not None
+        assert info["operation"] == "test-op"
+        lock.release()
+
+    def test_holder_info_none_when_free(self, tmp_path):
+        """holder_info returns None when no lock held."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        lock = ConsolidationLock(tmp_path / "free.lock")
+        assert lock.holder_info() is None
+
+    def test_async_context_manager(self, tmp_path):
+        """Async context manager acquires and releases."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        async def _test():
+            lock = ConsolidationLock(tmp_path / "async.lock")
+            async with lock:
+                assert lock.is_held_by_us
+            assert not lock.is_held_by_us
+
+        asyncio.run(_test())
+
+    def test_lock_held_exception(self, tmp_path):
+        """ConsolidationLockHeld raised when lock can't be acquired in context."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock, ConsolidationLockHeld
+        import json, os
+
+        lock_path = tmp_path / "held.lock"
+        # Write a lock from our own PID (so it's "alive")
+        lock_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "started_at": 0,
+            "operation": "blocking",
+        }))
+
+        # A second lock instance should fail to acquire via context manager
+        lock2 = ConsolidationLock(lock_path)
+        with pytest.raises(ConsolidationLockHeld):
+            with lock2:
+                pass
+
+
+class TestTaskOutcomeAndLearning:
+    """Battle-test TaskOutcome, SessionLearner, SessionSummary."""
+
+    def test_task_outcome_success(self):
+        """TaskOutcome.succeeded is True when no errors and sufficient result."""
+        from aiciv_mind.learning import TaskOutcome
+
+        outcome = TaskOutcome(
+            task="Write a test",
+            result="Test written successfully and passes.",
+            tools_used=["write_file", "bash"],
+            tool_call_count=3,
+        )
+        assert outcome.succeeded is True
+
+    def test_task_outcome_failure(self):
+        """TaskOutcome.succeeded is False with errors."""
+        from aiciv_mind.learning import TaskOutcome
+
+        outcome = TaskOutcome(
+            task="Deploy",
+            result="Failed to deploy.",
+            tool_errors=["Timeout on push"],
+            tool_call_count=1,
+        )
+        assert outcome.succeeded is False
+
+    def test_task_outcome_efficiency(self):
+        """efficiency_score rewards low call counts, penalizes errors."""
+        from aiciv_mind.learning import TaskOutcome
+
+        # Efficient: 3 calls, no errors
+        efficient = TaskOutcome(task="t", result="ok", tool_call_count=3)
+        # Inefficient: 20 calls, 2 errors
+        inefficient = TaskOutcome(
+            task="t", result="ok",
+            tool_call_count=20,
+            tool_errors=["err1", "err2"],
+        )
+        assert efficient.efficiency_score > inefficient.efficiency_score
+
+    def test_session_learner_empty(self):
+        """SessionLearner with no outcomes returns empty summary."""
+        from aiciv_mind.learning import SessionLearner
+
+        learner = SessionLearner(agent_id="test")
+        summary = learner.summarize()
+        assert summary.task_count == 0
+        assert summary.insights == []
+
+    def test_session_learner_with_outcomes(self):
+        """SessionLearner accumulates outcomes and produces insights."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+
+        learner = SessionLearner(agent_id="test")
+
+        for i in range(5):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result="Done" * 10,
+                tools_used=["bash", "read_file"],
+                tool_call_count=4,
+                elapsed_s=10.0,
+            ))
+
+        assert learner.task_count == 5
+        summary = learner.summarize()
+        assert summary.task_count == 5
+        assert summary.success_count == 5
+        assert summary.success_rate == 1.0
+        assert summary.total_tool_calls == 20
+        assert len(summary.most_used_tools) > 0
+
+    def test_session_learner_generates_insights(self):
+        """High error rate triggers an insight."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+
+        learner = SessionLearner(agent_id="test")
+
+        for i in range(4):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result="Failed" * 5,
+                tools_used=["bash"],
+                tool_errors=["timeout", "crash"],
+                tool_call_count=3,
+            ))
+
+        summary = learner.summarize()
+        # High error rate insight
+        assert any("error rate" in i.lower() for i in summary.insights)
+
+    def test_write_session_learning(self, memory_store):
+        """write_session_learning stores a learning memory."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+
+        learner = SessionLearner(agent_id="learn-test")
+
+        for _ in range(3):
+            learner.record(TaskOutcome(
+                task="Test task",
+                result="Completed successfully with detail.",
+                tool_call_count=2,
+            ))
+
+        mem_id = learner.write_session_learning(memory_store)
+        assert mem_id is not None
+
+    def test_write_session_learning_skips_insufficient(self, memory_store):
+        """write_session_learning returns None when too few tasks."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+
+        learner = SessionLearner(agent_id="learn-test")
+        learner.record(TaskOutcome(task="One", result="Ok" * 20, tool_call_count=1))
+        assert learner.write_session_learning(memory_store) is None
+
+    def test_session_summary_to_dict(self):
+        """SessionSummary.to_dict returns serializable dict."""
+        from aiciv_mind.learning import SessionSummary
+
+        summary = SessionSummary(task_count=5, success_count=4, success_rate=0.8)
+        d = summary.to_dict()
+        assert d["task_count"] == 5
+        assert d["success_rate"] == 0.8
+
+
+class TestModelRouter:
+    """Battle-test ModelRouter: classification, selection, outcome tracking."""
+
+    def test_classify_code_task(self):
+        """Code tasks are classified correctly."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        assert router.classify_task("Fix the bug in main.py") == "code"
+
+    def test_classify_reasoning_task(self):
+        """Reasoning tasks are classified correctly."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        assert router.classify_task("Analyze why the deploy failed and explain") == "reasoning"
+
+    def test_classify_general_task(self):
+        """Unclassifiable tasks default to 'general'."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        assert router.classify_task("xyz abc 123") == "general"
+
+    def test_select_code_model(self):
+        """Code tasks route to qwen2.5-coder."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        assert router.select("Fix the function in test.py") == "qwen2.5-coder"
+
+    def test_select_override(self):
+        """Override bypasses classification."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        assert router.select("anything", override="custom-model") == "custom-model"
+
+    def test_select_default_for_unknown(self):
+        """Unknown task types use the default model when no profile matches."""
+        from aiciv_mind.model_router import ModelRouter, ModelProfile
+
+        # Use profiles with NO 'general' strength — forces fallback
+        router = ModelRouter(
+            profiles=[ModelProfile(model_id="niche", strengths=["niche-only"], cost_tier="cheap", speed_tier="fast")],
+            default_model="fallback-model",
+        )
+        assert router.select("xyz abc 123") == "fallback-model"
+
+    def test_record_outcome_and_stats(self):
+        """Outcomes are recorded and retrievable via get_stats."""
+        from aiciv_mind.model_router import ModelRouter
+
+        router = ModelRouter()
+        router.record_outcome("Fix code.py", "qwen2.5-coder", success=True, tokens_used=500)
+        router.record_outcome("Fix code.py", "qwen2.5-coder", success=False, tokens_used=300)
+
+        stats = router.get_stats()
+        key = "qwen2.5-coder:code"
+        assert key in stats
+        assert stats[key]["total"] == 2
+        assert stats[key]["success"] == 1
+
+    def test_stats_persistence(self, tmp_path):
+        """Stats are saved to file when stats_path is set."""
+        from aiciv_mind.model_router import ModelRouter
+
+        stats_file = tmp_path / "stats.json"
+        router = ModelRouter(stats_path=str(stats_file))
+        router.record_outcome("test task", "minimax-m27", success=True)
+
+        assert stats_file.exists()
+
+        # Load into new router
+        router2 = ModelRouter(stats_path=str(stats_file))
+        assert len(router2._outcomes) == 1
+
+
+class TestSkillDiscovery:
+    """Battle-test SkillDiscovery: registration, suggestion, session reset."""
+
+    def test_register_and_suggest(self):
+        """Registered skill is suggested when path matches."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**", "**/hub_tools.py"])
+
+        suggestions = disc.suggest("/src/hub/routers/feeds.py")
+        assert len(suggestions) == 1
+        assert suggestions[0].skill_id == "hub-engagement"
+
+    def test_no_duplicate_suggestions(self):
+        """Same skill is not suggested twice in one session."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**"])
+
+        disc.suggest("/src/hub/file1.py")
+        suggestions = disc.suggest("/src/hub/file2.py")
+        assert len(suggestions) == 0  # Already suggested
+
+    def test_reset_session(self):
+        """Session reset allows re-suggestion."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**"])
+
+        disc.suggest("/src/hub/file1.py")
+        disc.reset_session()
+        suggestions = disc.suggest("/src/hub/file2.py")
+        assert len(suggestions) == 1
+
+    def test_unregister(self):
+        """Unregistered skills are no longer suggested."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        disc.register("test-skill", ["test/**"])
+        disc.unregister("test-skill")
+
+        suggestions = disc.suggest("/test/file.py")
+        assert len(suggestions) == 0
+
+    def test_drain_pending(self):
+        """drain_pending returns and clears accumulated suggestions."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        disc.register("a", ["*.py"])
+        disc.register("b", ["*.js"])
+
+        disc.suggest("test.py")
+        disc.suggest("test.js")
+
+        pending = disc.drain_pending()
+        assert len(pending) == 2
+        assert disc.drain_pending() == []  # Cleared
+
+    def test_load_from_skills_dir(self, tmp_path):
+        """load_from_skills_dir parses SKILL.md frontmatter."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        skill_dir = tmp_path / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+skill_id: test-skill
+trigger_paths:
+  - "test/**"
+  - "*.test.py"
+---
+
+# Test Skill
+""")
+        disc = SkillDiscovery()
+        count = disc.load_from_skills_dir(str(tmp_path))
+        assert count == 1
+        assert "test-skill" in disc.registered_skills
+
+    def test_format_suggestions(self):
+        """format_suggestions produces readable text."""
+        from aiciv_mind.skill_discovery import SkillDiscovery, SkillSuggestion
+
+        disc = SkillDiscovery()
+        suggestions = [
+            SkillSuggestion("hub-engage", "hub/**", "/src/hub/x.py"),
+        ]
+        text = disc.format_suggestions(suggestions)
+        assert "hub-engage" in text
+        assert "load_skill" in text
+
+    def test_format_suggestions_empty(self):
+        """Empty suggestions return empty string."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+
+        disc = SkillDiscovery()
+        assert disc.format_suggestions([]) == ""
+
+
+class TestForkContext:
+    """Battle-test ForkContext: snapshot, enter, exit, isolation."""
+
+    def test_snapshot_and_enter(self):
+        """Fork context enters with clean messages and skill system prompt."""
+        from aiciv_mind.fork_context import ForkContext
+
+        original_msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi!"},
+        ]
+        fork = ForkContext(
+            messages=original_msgs,
+            system_prompt="You are Root.",
+            skill_content="# Hub Engagement\nDo stuff.",
+            skill_id="hub-engagement",
+        )
+        fork.snapshot()
+        clean_msgs, fork_system = fork.enter_fork()
+
+        assert clean_msgs == []
+        assert "Hub Engagement" in fork_system
+        assert fork.is_forked
+
+    def test_exit_restores_context(self):
+        """Exit fork restores original messages with summary appended."""
+        from aiciv_mind.fork_context import ForkContext
+
+        original_msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi!"},
+        ]
+        fork = ForkContext(
+            messages=original_msgs,
+            system_prompt="You are Root.",
+            skill_content="# Skill",
+            skill_id="test-skill",
+        )
+        fork.snapshot()
+        fork.enter_fork()
+
+        fork_msgs = [{"role": "assistant", "content": "Did the skill."}]
+        restored, restored_system = fork.exit_fork("Skill completed", fork_msgs)
+
+        assert len(restored) == 3  # 2 original + 1 summary
+        assert restored[0]["content"] == "Hello"
+        assert "test-skill" in restored[-1]["content"]
+        assert restored_system == "You are Root."
+        assert not fork.is_forked
+
+    def test_exit_without_enter(self):
+        """Exit without entering returns original state."""
+        from aiciv_mind.fork_context import ForkContext
+
+        original_msgs = [{"role": "user", "content": "x"}]
+        fork = ForkContext(
+            messages=original_msgs,
+            system_prompt="sys",
+            skill_content="skill",
+        )
+        restored, system = fork.exit_fork("result", [])
+        assert restored == original_msgs
+        assert system == "sys"
+
+    def test_fork_result_dataclass(self):
+        """ForkResult holds execution results."""
+        from aiciv_mind.fork_context import ForkResult
+
+        result = ForkResult(
+            output="Analysis complete",
+            messages_consumed=5,
+            elapsed_ms=123.4,
+            skill_id="test",
+            success=True,
+        )
+        assert result.output == "Analysis complete"
+        assert result.messages_consumed == 5
+        assert result.success
+
+
+class TestContextVars:
+    """Battle-test mind_context isolation via contextvars."""
+
+    def test_current_mind_id_default(self):
+        """current_mind_id returns None outside any context."""
+        from aiciv_mind.context import current_mind_id
+        # Outside any mind context, should be None (or whatever default is)
+        # Just verify it doesn't crash
+        result = current_mind_id()
+        assert result is None or isinstance(result, str)
+
+    def test_set_and_reset_mind_id(self):
+        """set_mind_id and reset_mind_id work correctly."""
+        from aiciv_mind.context import set_mind_id, reset_mind_id, current_mind_id
+
+        token = set_mind_id("test-mind")
+        assert current_mind_id() == "test-mind"
+        reset_mind_id(token)
+
+    def test_mind_context_async(self):
+        """mind_context scopes identity to async execution path."""
+        from aiciv_mind.context import mind_context, current_mind_id
+
+        async def _test():
+            async with mind_context("root"):
+                assert current_mind_id() == "root"
+                async with mind_context("sub-mind"):
+                    assert current_mind_id() == "sub-mind"
+                assert current_mind_id() == "root"
+
+        asyncio.run(_test())
+
+    def test_mind_context_cleanup_on_error(self):
+        """mind_context restores previous ID even on exception."""
+        from aiciv_mind.context import mind_context, current_mind_id, set_mind_id, reset_mind_id
+
+        async def _test():
+            token = set_mind_id("outer")
+            try:
+                async with mind_context("inner"):
+                    assert current_mind_id() == "inner"
+                    raise ValueError("boom")
+            except ValueError:
+                pass
+            assert current_mind_id() == "outer"
+            reset_mind_id(token)
+
+        asyncio.run(_test())
