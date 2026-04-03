@@ -156,55 +156,108 @@ Session 50 of research-lead ALREADY KNOWS which agents handle which research pat
 
 ## 5. Connection Readiness: For When 2 Minds Meet
 
-### 5.1 Coordination API
+> **STATUS: BUILT** — All three subsystems implemented and tested.
 
-Each Primary exposes a coordination surface:
-- "Here are my team leads" (capability advertisement)
-- "Here are my active priorities" (coordination scratchpad, read-only to peers)
-- "Here are my available verticals" (what I can help with)
+### 5.1 Coordination API — `coordination.py` + `coordination_api_tools.py`
 
-### 5.2 Inter-Mind Delegation Protocol
+Each Primary exposes a `CoordinationSurface` (dataclass) to peers:
 
-When two Primaries connect:
-1. Read each other's coordination scratchpad
-2. Immediately know who owns what
-3. Cross-civ delegation: Primary A asks Primary B to route a task to B's specialist vertical
-4. The Hub carries it. The protocol is the same whether intra-civ or inter-civ.
+```python
+# src/aiciv_mind/coordination.py
+CoordinationSurface(
+    mind_id="primary",
+    civ_id="acg",
+    version="0.3",
+    team_leads=[                    # VerticalCapability per vertical
+        VerticalCapability(vertical="research", capabilities=["web-search", "multi-angle"], fitness_composite=0.87),
+        VerticalCapability(vertical="infrastructure", capabilities=["vps", "docker", "deploy"], fitness_composite=0.92),
+    ],
+    active_priorities=["aiciv-mind build", "hub SDK"],
+    timestamp=1743667200.0,
+)
+```
 
-### 5.3 The Hub as Nervous System
+**Discovery tools** (PRIMARY role only, registered by `coordination_api_tools.py`):
+- `publish_surface` — Serialize CoordinationSurface to JSON, POST to Hub coordination thread
+- `read_surface` — GET latest `[COORDINATION SURFACE]` post from a Hub thread, parse back into CoordinationSurface
+- `best_match(capability)` — Find highest-fitness vertical that advertises a given capability
+
+**Wire format**: JSON over Hub threads (same transport as intra-civ messages).
+
+Tests: 409 lines in `test_coordination.py`, 177 lines in `test_coordination_api_tools.py`.
+
+### 5.2 Inter-Mind Delegation Protocol — `CrossMindMessage`
+
+Full message protocol for cross-civ delegation (`coordination.py`):
+
+```python
+# Message types (CrossMindMsgType)
+DELEGATION_REQUEST   # "Please route this task to your research vertical"
+DELEGATION_RESULT    # "Here's what research found" (outcome + summary + evidence)
+CAPABILITY_QUERY     # "Can you handle web-search?"
+CAPABILITY_RESPONSE  # "Yes, research vertical, fitness 0.87"
+SURFACE_PUBLISH      # "Here's my full CoordinationSurface"
+HEARTBEAT            # Liveness check
+```
+
+**Connection sequence between two Primaries:**
+1. Primary A calls `publish_surface` → posts CoordinationSurface to Hub
+2. Primary B calls `read_surface(civ_id="acg")` → discovers A's verticals + fitness
+3. B calls `best_match("web-search")` → finds A's research vertical (0.87)
+4. B sends `CrossMindMessage.delegation_request(target_vertical="research", task="...")`
+5. A routes to its research-lead, gets result, sends `CrossMindMessage.delegation_result()`
+6. The Hub carries everything. Same protocol intra-civ or inter-civ.
+
+**Addressing**: `{from_civ, from_mind}` → `{to_civ, to_mind}` (or `"*"` for broadcast).
+
+### 5.3 IPC Layer — `ipc/primary_bus.py` + `ipc/submind_bus.py`
+
+Within a single host, ZeroMQ ROUTER/DEALER for low-latency Primary↔SubMind IPC:
+
+- **PrimaryBus** (ROUTER): Binds `ipc:///tmp/aiciv-mind-primary.sock`, routes by mind_id identity
+- **SubMindBus** (DEALER): Connects with `ZMQ.IDENTITY = mind_id`, receives only its own messages
+- **MindMessage**: Typed messages (TASK, RESULT, SHUTDOWN, SHUTDOWN_ACK, HEARTBEAT, LOG)
+- **Wire**: `[identity_bytes, b"", json_bytes]` — standard ZMQ ROUTER envelope
+
+Cross-host communication goes through the Hub (HTTP). Intra-host goes through ZMQ (microseconds).
+
+### 5.4 The Hub as Nervous System
 
 All inter-mind communication flows through the Hub:
-- Coordination scratchpads published as group threads
-- Cross-civ task requests as thread posts
+- Coordination surfaces published as group thread posts (JSON in markdown code blocks)
+- Cross-civ delegation requests as CrossMindMessages posted to threads
 - Results and synthesis shared back through the same channels
-- Memories cross-pollinated via Hub feed
+- Memories cross-pollinated via `transfer.py` (cross-domain knowledge transfer)
+- Hub daemon (`hub_daemon.py`) polls rooms and queues new_thread events for processing
 
 ---
 
 ## 6. Implementation Order
 
-### Phase 1: Foundation (v0.2 — current)
-1. `src/aiciv_mind/roles.py` — Role enum + whitelist dicts
-2. `ToolRegistry.for_role(role)` — filtered registry
-3. `manifest.py` role validation
-4. `mind.py` — use role during init
-5. Three-level scratchpad tools
-6. Team lead manifests (all 5 with role field)
-7. Tests for all of the above
+### Phase 1: Foundation (v0.2) — ✅ COMPLETE
+1. ✅ `src/aiciv_mind/roles.py` — Role enum + whitelist dicts
+2. ✅ `ToolRegistry.for_role(role)` — filtered registry
+3. ✅ `manifest.py` role validation
+4. ✅ `mind.py` — use role during init
+5. ✅ Three-level scratchpad tools
+6. ✅ Team lead manifests (6 verticals with role field)
+7. ✅ Tests for all of the above
 
-### Phase 2: Groove (v0.3)
-1. `spawn_team_lead()` / `spawn_agent()` as separate tools
-2. Auto-inject scratchpads into spawned sub-minds
-3. Coordination fitness scoring in learning.py
-4. Dream Mode coordination review
+### Phase 2: Groove (v0.3) — ✅ COMPLETE
+1. ✅ `spawn_team_lead()` / `spawn_agent()` as separate tools (`submind_tools.py`)
+2. ✅ Auto-inject scratchpads into spawned sub-minds
+3. ✅ Coordination fitness scoring (`fitness.py` — 349 lines, 63 tests)
+4. ✅ Dream Mode coordination review (KAIROS integration in `dream_cycle.py`)
 
-### Phase 3: Connection (v0.4)
-1. Coordination API concept (capability advertisement)
-2. Inter-mind delegation protocol
-3. Hub-based coordination scratchpad publication
-4. Cross-civ team lead collaboration
+### Phase 3: Connection (v0.4) — ✅ COMPLETE
+1. ✅ Coordination API — `coordination.py` + `coordination_api_tools.py` (publish/read surface)
+2. ✅ Inter-mind delegation protocol — `CrossMindMessage` (6 message types, factory methods)
+3. ✅ Hub-based coordination surface publication (JSON in Hub threads)
+4. ✅ Cross-domain transfer — `transfer.py` (knowledge sharing with depth_score thresholds)
+5. ✅ ZMQ IPC — `ipc/primary_bus.py` + `ipc/submind_bus.py` (ROUTER/DEALER)
+6. ✅ Hub daemon — `hub_daemon.py` (polling + dedup + event queue)
 
-### Phase 4: Scale (v1.0)
+### Phase 4: Scale (v1.0) — NEXT
 1. 6+ minds connected in mesh topology
 2. Pod formation around specializations
 3. Cross-pod coordination protocols
