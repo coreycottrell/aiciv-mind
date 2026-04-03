@@ -510,8 +510,17 @@ class Mind:
             if not tool_use_blocks and text_blocks:
                 # Some models (M2.7 via Ollama) emit tool calls as JSON text
                 # instead of structured tool_use blocks. Parse them out.
+                logger.info(
+                    "[%s] No native tool_use blocks. Trying text parser on %d chars: %s",
+                    self.manifest.mind_id, len(final_text), final_text[:300],
+                )
                 tool_use_blocks = self._parse_text_tool_calls(final_text)
                 synthetic_calls = bool(tool_use_blocks)
+                if not tool_use_blocks:
+                    logger.info(
+                        "[%s] Text parser found 0 tool calls. Full text: %s",
+                        self.manifest.mind_id, final_text[:500],
+                    )
 
             if not tool_use_blocks:
                 break
