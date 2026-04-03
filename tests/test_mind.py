@@ -965,3 +965,46 @@ async def test_tool_execution_timeout_returns_error(memory_store):
         for msg in tool_result_msgs
         for item in msg["content"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests: tool result truncation
+# ---------------------------------------------------------------------------
+
+
+async def test_oversized_tool_result_truncated(minimal_manifest, memory_store):
+    """Tool results exceeding _MAX_TOOL_RESULT_CHARS are truncated with a marker."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    # Generate a result way larger than the 30K limit
+    huge_output = "x" * 50_000
+
+    async def big_tool(args):
+        return huge_output
+
+    mind._tools.register(
+        "big_tool",
+        {"name": "big_tool", "description": "Big output", "input_schema": {"type": "object", "properties": {}}},
+        big_tool,
+    )
+
+    tc = make_tool_use_block("call_big", "big_tool", {})
+    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    second = make_response(text="Got truncated result.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        result = await mind.run_task("Get big output", inject_memories=False)
+
+    assert result == "Got truncated result."
+    # Find the tool result in messages and verify truncation
+    tool_result_msgs = [
+        m for m in mind._messages
+        if m.get("role") == "user" and isinstance(m.get("content"), list)
+    ]
+    assert len(tool_result_msgs) == 1
+    content = tool_result_msgs[0]["content"][0]["content"]
+    assert "TRUNCATED" in content
+    assert len(content) < 50_000  # Should be ~30K + marker, not 50K

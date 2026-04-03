@@ -1173,9 +1173,14 @@ class Mind:
 
         return results
 
+    # Max chars in a single tool result before truncation.
+    # 30K chars ≈ 7500 tokens — keeps any single result from blowing context.
+    _MAX_TOOL_RESULT_CHARS: int = 30_000
+
     async def _execute_one_tool(self, block: Any) -> str:
         """Execute a single tool_use block. Returns string result.
-        Applies tools_config.exec_timeout_s to prevent runaway commands."""
+        Applies tools_config.exec_timeout_s to prevent runaway commands.
+        Truncates oversized results to _MAX_TOOL_RESULT_CHARS."""
         tool_input = block.input if hasattr(block, "input") else {}
         logger.info("[%s] Tool: %s(%s)", self.manifest.mind_id, block.name, str(tool_input)[:100])
         timeout = self.manifest.tools_config.exec_timeout_s
@@ -1191,7 +1196,18 @@ class Mind:
                 return f"ERROR: Tool {block.name} timed out after {timeout}s"
         else:
             result = await coro
-        logger.debug("[%s] Tool result: %s", self.manifest.mind_id, str(result)[:200])
+        result = str(result)
+        if len(result) > self._MAX_TOOL_RESULT_CHARS:
+            truncated_len = len(result)
+            result = (
+                result[:self._MAX_TOOL_RESULT_CHARS]
+                + f"\n\n... [TRUNCATED: {truncated_len} chars → {self._MAX_TOOL_RESULT_CHARS}]"
+            )
+            logger.warning(
+                "[%s] Tool %s result truncated: %d → %d chars",
+                self.manifest.mind_id, block.name, truncated_len, self._MAX_TOOL_RESULT_CHARS,
+            )
+        logger.debug("[%s] Tool result: %s", self.manifest.mind_id, result[:200])
         return result
 
     @property
