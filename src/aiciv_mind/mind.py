@@ -66,6 +66,14 @@ class Mind:
         from aiciv_mind.pattern_detector import PatternDetector
         self._pattern_detector = PatternDetector(agent_id=manifest.mind_id)
 
+        # P3-6: KAIROS — append-only daily log for persistent minds
+        from aiciv_mind.kairos import KairosLog
+        _mind_root = Path(__file__).parent.parent.parent
+        self._kairos = KairosLog(
+            data_dir=_mind_root / "data" / "logs",
+            agent_id=manifest.mind_id,
+        )
+
         # Attach hook governance if configured
         if manifest.hooks.enabled:
             from aiciv_mind.tools.hooks import HookRunner
@@ -180,6 +188,13 @@ class Mind:
 
     async def _run_task_body(self, task: str, inject_memories: bool) -> str:
         """Task execution body — always runs inside a mind_context scope."""
+
+        # P3-6: KAIROS — log task start
+        try:
+            task_preview = task[:120].replace("\n", " ")
+            self._kairos.append(f"Task started: {task_preview}")
+        except Exception:
+            pass  # KAIROS is observability — never crashes the loop
 
         # ── Planning Gate (P3) ─────────────────────────────────────────
         # Fires BEFORE execution.  Classifies task complexity, searches
@@ -624,6 +639,7 @@ class Mind:
             pass  # Lifecycle hooks must NEVER crash the task return
 
         # P3-5: Log detected patterns at task end
+        patterns = []
         try:
             patterns = self._pattern_detector.detected_patterns()
             if patterns:
@@ -638,6 +654,20 @@ class Mind:
                 )
         except Exception:
             pass  # Pattern detection is observability — never crashes
+
+        # P3-6: KAIROS — log task completion + any pattern alerts
+        try:
+            task_preview = task[:80].replace("\n", " ")
+            self._kairos.append(
+                f"Task completed: {task_preview} ({tool_call_count} tool calls)",
+            )
+            if patterns:
+                for p in patterns[:3]:
+                    self._kairos.append(
+                        f"Pattern: {p.description}", level="warn",
+                    )
+        except Exception:
+            pass  # KAIROS is observability — never crashes
 
         return final_text
 
