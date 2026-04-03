@@ -55,4 +55,29 @@
 - **Fix**: Add M2.7 tool call format parser to mind.py (or force Anthropic-compatible format via system prompt)
 - **Verification**: TBD — fix, then spawn codewright-lead with same task, verify file written
 - **Retry result**: TBD
-- **Status**: DIAGNOSED, NOT YET FIXED — **HIGHEST PRIORITY** (blocks ALL sub-mind file writes)
+- **Status**: ~~DIAGNOSED, NOT YET FIXED~~ **FIXED** — Commits `155c09a`, `e828a82`, `379bfc4` add 3 parser variants. 897 tests pass. Parser proven live on Root primary.
+- **Retry result**: Primary's parser works. Sub-mind parser needs verification (see Task 0.2 retry below).
+
+---
+
+## Task 0.2 Retry — Phase 0 Evolution Test (2026-04-03 23:40 UTC)
+
+### FAIL: Codewright-lead sub-mind crashed with empty error
+- **Observed**: spawn_team_lead succeeded (pane %188), but sub-mind result: `{"success": false, "error": ""}`
+- **Expected**: Codewright-lead reads identity.json, replaces placeholders, writes files
+- **Principle gap**: P2 (System > Symptom) — error reporting hid the real cause
+- **Root cause**: `asyncio.TimeoutError` from 120s `call_timeout_s` on first LLM call. KAIROS log confirms: task started at `23:40:50`, result at `23:42:50` = exactly 120s. `str(TimeoutError())` returns `""`, making the error invisible in the result file. Multiple sub-minds were competing for LiteLLM proxy slots concurrently.
+- **Fix**: Two changes:
+  1. `mind.py _call_model()`: Re-raise `TimeoutError` with descriptive message (`"Model call TIMED OUT after Xs"`) instead of bare re-raise
+  2. `run_submind.py on_task()`: Use `str(e) or repr(e)` fallback so exceptions with empty `str()` still produce diagnosable error messages
+- **Verification**: `test_model_call_timeout_raises` passes with `match="TIMED OUT"` — error message is now non-empty
+- **Retry result**: TBD — need to retry after fix is deployed
+- **Status**: ~~INVESTIGATING~~ **FIXED** — diagnostic + error reporting. Timeout itself may recur under load; consider increasing `call_timeout_s` for team leads.
+
+### OBSERVATION: Root claimed false completion (Challenger gap)
+- **Observed**: Root said "write_file 3×: Letters to Thalweg, Cortex, coordination entry written" but NO files exist at /home/corey/projects/AI-CIV/aiciv-mind/letters/root-to-*.md
+- **Expected**: Challenger P9 filesystem verification catches this
+- **Principle gap**: P9 (Challenger) — Root's tool count claim was about PRIMARY tools (scratchpad_append, coordination_write), not sub-mind file writes. Root conflated its own tool usage with the delegated work.
+- **Root cause**: Root's batch processing generated tool claims before codewright-lead completed. The Challenger caught "no write tools used" but Root dismissed it.
+- **Fix**: Challenger should cross-reference claimed file paths against disk after IPC result returns
+- **Status**: DOCUMENTED

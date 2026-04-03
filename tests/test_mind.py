@@ -846,7 +846,7 @@ async def test_model_call_timeout_raises(memory_store):
     with patch.object(
         mind._client.chat.completions, "create", new_callable=AsyncMock, side_effect=slow_create,
     ):
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError, match="TIMED OUT"):
             await mind.run_task("Do something slow", inject_memories=False)
 
     # After timeout: orphaned user message was popped (no alternation corruption)

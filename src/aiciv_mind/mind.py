@@ -988,12 +988,13 @@ class Mind:
                 raw_response = await asyncio.wait_for(coro, timeout=timeout)
             except asyncio.TimeoutError:
                 latency_ms = int((time.monotonic() - t0) * 1000)
-                logger.error(
-                    "[%s] Model call TIMED OUT after %.0fs (%dms). "
-                    "Context may be too large for model.",
-                    self.manifest.mind_id, timeout, latency_ms,
+                msg = (
+                    f"[{self.manifest.mind_id}] Model call TIMED OUT after "
+                    f"{timeout:.0f}s ({latency_ms}ms). "
+                    f"Context may be too large for model."
                 )
-                raise
+                logger.error(msg)
+                raise TimeoutError(msg) from None
         else:
             raw_response = await coro
         latency_ms = int((time.monotonic() - t0) * 1000)

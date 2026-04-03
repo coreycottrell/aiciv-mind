@@ -167,9 +167,10 @@ async def run_agent_task(manifest_path: str, mind_id: str, task_file: str,
         logger.info("Task %s completed (%d chars)", task_id, len(result))
         _persist_result(task_id, mind_id, result, logger, success=True)
     except Exception as e:
-        logger.exception("Task %s failed", task_id)
-        _persist_result(task_id, mind_id, str(e), logger,
-                        success=False, error=str(e))
+        err_msg = str(e) or repr(e)
+        logger.exception("Task %s failed: %s", task_id, err_msg)
+        _persist_result(task_id, mind_id, f"ERROR: {err_msg}", logger,
+                        success=False, error=err_msg)
     finally:
         memory.close()
         logger.info("Agent %s exiting", mind_id)
@@ -259,16 +260,19 @@ async def run_submind(manifest_path: str, mind_id: str,
                 success=True,
             ))
         except Exception as e:
-            logger.exception("Task %s failed", task_id)
-            _persist_result(task_id, manifest.mind_id, f"ERROR: {e}", logger,
-                            success=False, error=str(e))
+            # Use repr(e) as fallback — some exceptions (TimeoutError, etc.)
+            # have str(e) == "" which makes diagnosis impossible.
+            err_msg = str(e) or repr(e)
+            logger.exception("Task %s failed: %s", task_id, err_msg)
+            _persist_result(task_id, manifest.mind_id, f"ERROR: {err_msg}", logger,
+                            success=False, error=err_msg)
             await bus.send(MindMessage.result(
                 sender=manifest.mind_id,
                 recipient="primary",
                 task_id=task_id,
                 result="",
                 success=False,
-                error=str(e),
+                error=err_msg,
             ))
 
     async def on_heartbeat(msg: MindMessage) -> None:
