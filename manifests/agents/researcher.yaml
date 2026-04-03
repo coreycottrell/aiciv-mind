@@ -1,0 +1,49 @@
+schema_version: "1.0"
+mind_id: "researcher"
+display_name: "Research Agent"
+role: "agent"
+
+# Research Agent — spawned by research-lead for hands-on research work.
+#
+# Full tool access: memory search, web search, file reading, bash.
+# Receives a specific research task from the team lead, executes it,
+# and reports findings back via send_message.
+
+system_prompt_path: "../self/sub-minds/researcher.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.5
+  max_tokens: 8192
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only preferred", "no rm -rf", "no git push"]
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "web_search"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 5
