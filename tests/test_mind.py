@@ -910,3 +910,58 @@ async def test_compaction_uses_model_limit_when_lower(memory_store):
     # summary pair (2) + preserve_recent (4) + new user (1) + assistant (1) = 8
     assert len(mind._messages) < 15  # Way less than the original 42
     assert result == "Done after compaction"
+
+
+# ---------------------------------------------------------------------------
+# Tests: tool execution timeout
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_execution_timeout_returns_error(memory_store):
+    """When a tool exceeds exec_timeout_s, an ERROR string is returned
+    to the model (not an exception — the loop continues)."""
+    from aiciv_mind.manifest import ToolsConfig
+
+    manifest = MindManifest(
+        mind_id="tool-timeout-test",
+        display_name="Tool Timeout Test",
+        role="worker",
+        system_prompt="You are a test agent.",
+        model=ModelConfig(preferred="ollama/test"),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+        tools_config=ToolsConfig(exec_timeout_s=0.1),
+    )
+    mind = Mind(manifest=manifest, memory=memory_store)
+
+    async def slow_tool(args):
+        await asyncio.sleep(5)
+        return "Never reached"
+
+    mind._tools.register(
+        "slow_tool",
+        {"name": "slow_tool", "description": "Slow", "input_schema": {"type": "object", "properties": {}}},
+        slow_tool,
+    )
+
+    tc = make_tool_use_block("call_slow", "slow_tool", {})
+    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    second = make_response(text="Handled the timeout.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        result = await mind.run_task("Run slow tool", inject_memories=False)
+
+    assert result == "Handled the timeout."
+    # The tool result fed back to model should contain the timeout error
+    tool_result_msgs = [
+        m for m in mind._messages
+        if m.get("role") == "user" and isinstance(m.get("content"), list)
+    ]
+    assert any(
+        "timed out" in str(item.get("content", ""))
+        for msg in tool_result_msgs
+        for item in msg["content"]
+    )

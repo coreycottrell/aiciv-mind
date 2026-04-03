@@ -78,6 +78,12 @@ class CompactionConfig(BaseModel):
     max_context_tokens: int = 50000  # Compact when estimated tokens exceed this
 
 
+class ToolsConfig(BaseModel):
+    """Tool execution configuration."""
+
+    exec_timeout_s: float = 60.0  # Max seconds per tool execution (0 = no timeout)
+
+
 class HooksConfig(BaseModel):
     """Pre/post tool hook configuration for governance."""
 
@@ -125,6 +131,7 @@ class MindManifest(BaseModel):
     planning: PlanningConfig = PlanningConfig()
     verification: VerificationConfig = VerificationConfig()
     compaction: CompactionConfig = CompactionConfig()
+    tools_config: ToolsConfig = ToolsConfig()
     hooks: HooksConfig = HooksConfig()
     sub_minds: list[SubMindRef] = []
 

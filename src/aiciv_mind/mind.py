@@ -1174,10 +1174,23 @@ class Mind:
         return results
 
     async def _execute_one_tool(self, block: Any) -> str:
-        """Execute a single tool_use block. Returns string result."""
+        """Execute a single tool_use block. Returns string result.
+        Applies tools_config.exec_timeout_s to prevent runaway commands."""
         tool_input = block.input if hasattr(block, "input") else {}
         logger.info("[%s] Tool: %s(%s)", self.manifest.mind_id, block.name, str(tool_input)[:100])
-        result = await self._tools.execute(block.name, tool_input)
+        timeout = self.manifest.tools_config.exec_timeout_s
+        coro = self._tools.execute(block.name, tool_input)
+        if timeout > 0:
+            try:
+                result = await asyncio.wait_for(coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] Tool %s TIMED OUT after %.0fs",
+                    self.manifest.mind_id, block.name, timeout,
+                )
+                return f"ERROR: Tool {block.name} timed out after {timeout}s"
+        else:
+            result = await coro
         logger.debug("[%s] Tool result: %s", self.manifest.mind_id, str(result)[:200])
         return result
 
