@@ -145,8 +145,10 @@ class Mind:
 
         # Gap 1: Challenger System — persistent adversary that validates every turn
         from aiciv_mind.challenger import ChallengerSystem
+        _mind_root_for_challenger = str(Path(__file__).parent.parent.parent)
         self._challenger = ChallengerSystem(
             completion_protocol=None,  # Will be set after _completion_protocol init
+            mind_root=_mind_root_for_challenger,
         )
 
         # P3-6: KAIROS — append-only daily log for persistent minds

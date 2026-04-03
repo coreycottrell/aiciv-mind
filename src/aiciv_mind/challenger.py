@@ -14,6 +14,11 @@ Checks:
     2. Empty work claims — claims of doing work with no write tools used
     3. Spawn-without-verify — spawning agents without verifying their results
     4. Stall detection — many iterations with only read tools (no writes)
+    5. Filesystem verification — checks whether files/paths mentioned in claims
+       actually exist on disk. Catches the false-completion pattern where a mind
+       claims files were created/written but they don't exist.
+    6. State file verification — cross-checks evolution-status.json claims against
+       actual filesystem evidence (test outputs, proof files, etc.)
 
 Integration point: called from mind.py's _run_task_body after tool execution,
 before the P9 auto-verify block. If should_inject is True, the caller injects
@@ -22,9 +27,12 @@ injection_text as a user message to redirect the mind.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -110,16 +118,19 @@ class ChallengerSystem:
         completion_protocol: Any = None,
         memory_store: Any = None,
         enabled: bool = True,
+        mind_root: str | None = None,
     ):
         self._protocol = completion_protocol
         self._memory = memory_store
         self._enabled = enabled
+        self._mind_root = mind_root  # For state file verification
 
         # Accumulated state across turns (reset per task via reset())
         self._write_tools_seen: list[str] = []
         self._spawn_tools_seen: list[str] = []
         self._verify_after_spawn: bool = False
         self._total_challenges_injected: int = 0
+        self._claimed_files: list[str] = []  # Paths claimed in responses
 
     # ------------------------------------------------------------------
     # Public API
@@ -131,6 +142,7 @@ class ChallengerSystem:
         self._spawn_tools_seen.clear()
         self._verify_after_spawn = False
         self._total_challenges_injected = 0
+        self._claimed_files.clear()
 
     def challenge_turn(
         self,
@@ -194,6 +206,18 @@ class ChallengerSystem:
 
         # 4. Stall detection
         sev, msgs = self._check_stall(iteration)
+        if msgs:
+            challenges.extend(msgs)
+            max_severity = _max_severity(max_severity, sev)
+
+        # 5. Filesystem verification — check that claimed file paths exist
+        sev, msgs = self._check_filesystem_claims(response_text, tool_results)
+        if msgs:
+            challenges.extend(msgs)
+            max_severity = _max_severity(max_severity, sev)
+
+        # 6. State file verification — cross-check evolution-status.json
+        sev, msgs = self._check_state_file_integrity()
         if msgs:
             challenges.extend(msgs)
             max_severity = _max_severity(max_severity, sev)
@@ -410,6 +434,123 @@ class ChallengerSystem:
             f"You appear to be reading/searching without producing output. "
             f"Write output or explain why you're still gathering information."
         ]
+
+    # ------------------------------------------------------------------
+    # Check 5: Filesystem verification
+    # ------------------------------------------------------------------
+
+    # Regex to extract absolute file paths from text
+    _PATH_RE = re.compile(r'(/(?:home|tmp|var|etc|usr)[^\s\'"`,;)}\]>]+)')
+
+    # Verbs that claim a file was created/written/modified
+    _FILE_CLAIM_VERBS = re.compile(
+        r'\b(?:created|wrote|written|saved|generated|produced|built|output'
+        r'|stored|committed|deployed)\b.*?(/[^\s\'"`,;)}\]>]+)',
+        re.IGNORECASE,
+    )
+
+    def _check_filesystem_claims(
+        self,
+        response_text: str,
+        tool_results: list[str],
+    ) -> tuple[str, list[str]]:
+        """
+        Check 5: Filesystem verification.
+
+        Extract absolute file paths from the response where the mind claims
+        to have created/written/stored something, then verify those paths
+        actually exist on disk.
+
+        Only triggers on completion-like responses to avoid false positives
+        during mid-task exploration.
+        """
+        if not response_text:
+            return "info", []
+
+        text_lower = response_text.lower()
+        has_completion_signal = any(
+            signal in text_lower for signal in _COMPLETION_SIGNALS
+        )
+
+        # Only do filesystem verification on completion claims
+        if not has_completion_signal:
+            return "info", []
+
+        # Extract paths from "created/wrote/saved FILE" patterns
+        missing_files: list[str] = []
+        for match in self._FILE_CLAIM_VERBS.finditer(response_text):
+            claimed_path = match.group(1).rstrip(".")
+            if not os.path.exists(claimed_path):
+                missing_files.append(claimed_path)
+                self._claimed_files.append(claimed_path)
+
+        if not missing_files:
+            return "info", []
+
+        return "critical", [
+            f"Filesystem verification FAILED: you claim completion but these "
+            f"files do not exist on disk: {', '.join(missing_files[:5])}. "
+            f"Verify your work actually produced output before claiming completion."
+        ]
+
+    # ------------------------------------------------------------------
+    # Check 6: State file verification
+    # ------------------------------------------------------------------
+
+    def _check_state_file_integrity(self) -> tuple[str, list[str]]:
+        """
+        Check 6: State file cross-check.
+
+        If mind_root is set, read evolution-status.json and verify that
+        tasks marked as completed have corresponding proof files on disk.
+
+        This catches the false-completion pattern where state files claim
+        tasks are done but no evidence exists.
+        """
+        if not self._mind_root:
+            return "info", []
+
+        status_path = Path(self._mind_root) / "evolution-status.json"
+        if not status_path.exists():
+            return "info", []
+
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return "info", []
+
+        # Check each completed phase for evidence
+        challenges: list[str] = []
+        phases = status.get("phases", {})
+        test_civ_dir = Path(self._mind_root) / "test-civ"
+
+        for phase_name, phase_data in phases.items():
+            if not isinstance(phase_data, dict):
+                continue
+            if not phase_data.get("completed", False):
+                continue
+
+            # Phase claims completion — check for evidence files
+            # Evidence lives in test-civ/memories/ for evolution phases 0-3
+            phase_num = phase_name.split("_")[0] if "_" in phase_name else ""
+            if phase_num in ("0", "1", "2", "3"):
+                evidence_dir = test_civ_dir / "memories"
+                if not evidence_dir.exists():
+                    challenges.append(
+                        f"Phase '{phase_name}' is marked COMPLETE in "
+                        f"evolution-status.json but {evidence_dir} does not exist. "
+                        f"Where is the evidence?"
+                    )
+                elif not any(evidence_dir.iterdir()):
+                    challenges.append(
+                        f"Phase '{phase_name}' is marked COMPLETE but "
+                        f"{evidence_dir} is empty. Completion without evidence."
+                    )
+
+        if not challenges:
+            return "info", []
+
+        return "warning", challenges
 
     # ------------------------------------------------------------------
     # Injection formatting
