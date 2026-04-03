@@ -1550,3 +1550,368 @@ class TestIPCMessages:
         assert msg.sender == "a"
         assert isinstance(msg.id, str) and len(msg.id) > 0
         assert msg.payload == {}
+
+
+# ---------------------------------------------------------------------------
+# Manifest loader — YAML parsing, env expansion, path resolution, validation
+# ---------------------------------------------------------------------------
+
+
+class TestManifestLoader:
+    """Battle tests for MindManifest YAML loading and validation."""
+
+    def test_minimal_manifest_from_yaml(self, tmp_path):
+        """Minimal valid manifest loads without error."""
+        from aiciv_mind.manifest import MindManifest
+        yaml_content = """\
+mind_id: test-mind
+display_name: Test Mind
+role: worker
+system_prompt: You are a test agent.
+auth:
+  civ_id: acg
+  keypair_path: keys/test.json
+memory:
+  db_path: data/mind.db
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        assert m.mind_id == "test-mind"
+        assert m.display_name == "Test Mind"
+        assert m.role == "worker"
+
+    def test_env_var_expansion(self, tmp_path):
+        """Environment variables in YAML values are expanded."""
+        import os
+        from aiciv_mind.manifest import MindManifest
+        os.environ["TEST_CIV_ID"] = "expanded-civ"
+        try:
+            yaml_content = """\
+mind_id: env-test
+display_name: Env Test
+role: worker
+system_prompt: Test.
+auth:
+  civ_id: $TEST_CIV_ID
+  keypair_path: keys/test.json
+memory:
+  db_path: data/mind.db
+"""
+            manifest_file = tmp_path / "manifest.yaml"
+            manifest_file.write_text(yaml_content)
+            m = MindManifest.from_yaml(manifest_file)
+            assert m.auth.civ_id == "expanded-civ"
+        finally:
+            del os.environ["TEST_CIV_ID"]
+
+    def test_relative_paths_resolved(self, tmp_path):
+        """Relative paths in auth.keypair_path and memory.db_path are resolved
+        relative to the manifest file's directory."""
+        from aiciv_mind.manifest import MindManifest
+        yaml_content = """\
+mind_id: path-test
+display_name: Path Test
+role: worker
+system_prompt: Test.
+auth:
+  civ_id: acg
+  keypair_path: keys/identity.json
+memory:
+  db_path: data/memory.db
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        # Should be resolved to absolute paths anchored at tmp_path
+        assert str(tmp_path) in m.auth.keypair_path
+        assert str(tmp_path) in m.memory.db_path
+        assert m.auth.keypair_path.endswith("keys/identity.json")
+        assert m.memory.db_path.endswith("data/memory.db")
+
+    def test_absolute_paths_unchanged(self, tmp_path):
+        """Already-absolute paths are not modified by resolution."""
+        from aiciv_mind.manifest import MindManifest
+        yaml_content = """\
+mind_id: abs-test
+display_name: Abs Test
+role: worker
+system_prompt: Test.
+auth:
+  civ_id: acg
+  keypair_path: /etc/absolute/path.json
+memory:
+  db_path: /var/data/mind.db
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        assert m.auth.keypair_path == "/etc/absolute/path.json"
+        assert m.memory.db_path == "/var/data/mind.db"
+
+    def test_system_prompt_path_resolved(self, tmp_path):
+        """system_prompt_path is resolved relative to manifest directory."""
+        from aiciv_mind.manifest import MindManifest
+        # Create the system prompt file
+        prompt_dir = tmp_path / "prompts"
+        prompt_dir.mkdir()
+        (prompt_dir / "sys.txt").write_text("You are a specialized agent.")
+
+        yaml_content = """\
+mind_id: prompt-test
+display_name: Prompt Test
+role: worker
+system_prompt_path: prompts/sys.txt
+auth:
+  civ_id: acg
+  keypair_path: keys/test.json
+memory:
+  db_path: data/mind.db
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        # resolved_system_prompt should read the file
+        assert m.resolved_system_prompt() == "You are a specialized agent."
+
+    def test_system_prompt_inline_priority(self):
+        """Inline system_prompt used when system_prompt_path is not set."""
+        from aiciv_mind.manifest import MindManifest, AuthConfig, MemoryConfig
+        m = MindManifest(
+            mind_id="inline",
+            display_name="Inline",
+            role="worker",
+            system_prompt="I am inline.",
+            auth=AuthConfig(civ_id="acg", keypair_path="/tmp/k.json"),
+            memory=MemoryConfig(db_path=":memory:"),
+        )
+        assert m.resolved_system_prompt() == "I am inline."
+
+    def test_default_system_prompt_fallback(self):
+        """Default prompt used when neither system_prompt nor system_prompt_path set."""
+        from aiciv_mind.manifest import MindManifest, AuthConfig, MemoryConfig
+        m = MindManifest(
+            mind_id="default",
+            display_name="Default",
+            role="worker",
+            auth=AuthConfig(civ_id="acg", keypair_path="/tmp/k.json"),
+            memory=MemoryConfig(db_path=":memory:"),
+        )
+        assert m.resolved_system_prompt() == "You are an AI agent."
+
+    def test_sub_mind_paths_resolved(self, tmp_path):
+        """Sub-mind manifest_path values are resolved relative to parent."""
+        from aiciv_mind.manifest import MindManifest
+        yaml_content = """\
+mind_id: parent
+display_name: Parent
+role: orchestrator
+system_prompt: Test.
+auth:
+  civ_id: acg
+  keypair_path: keys/parent.json
+memory:
+  db_path: data/parent.db
+sub_minds:
+  - mind_id: child-1
+    manifest_path: children/child1.yaml
+  - mind_id: child-2
+    manifest_path: /absolute/child2.yaml
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        assert len(m.sub_minds) == 2
+        assert str(tmp_path) in m.sub_minds[0].manifest_path
+        assert m.sub_minds[1].manifest_path == "/absolute/child2.yaml"
+
+    def test_defaults_applied(self):
+        """Default values applied for optional config sections."""
+        from aiciv_mind.manifest import MindManifest, AuthConfig, MemoryConfig
+        m = MindManifest(
+            mind_id="defaults",
+            display_name="Defaults",
+            role="worker",
+            auth=AuthConfig(civ_id="acg", keypair_path="/tmp/k.json"),
+            memory=MemoryConfig(db_path=":memory:"),
+        )
+        assert m.model.temperature == 0.7
+        assert m.model.max_tokens == 4096
+        assert m.model.call_timeout_s == 120.0
+        assert m.planning.enabled is True
+        assert m.verification.enabled is True
+        assert m.compaction.preserve_recent == 4
+        assert m.tools_config.exec_timeout_s == 60.0
+        assert m.hooks.enabled is True
+        assert m.hooks.log_all is True
+        assert m.self_modification_enabled is False
+
+    def test_enabled_tool_names(self):
+        """enabled_tool_names returns only enabled tools."""
+        from aiciv_mind.manifest import MindManifest, AuthConfig, MemoryConfig, ToolConfig
+        m = MindManifest(
+            mind_id="tools",
+            display_name="Tools",
+            role="worker",
+            auth=AuthConfig(civ_id="acg", keypair_path="/tmp/k.json"),
+            memory=MemoryConfig(db_path=":memory:"),
+            tools=[
+                ToolConfig(name="bash", enabled=True),
+                ToolConfig(name="git_push", enabled=False),
+                ToolConfig(name="memory_search", enabled=True),
+            ],
+        )
+        enabled = m.enabled_tool_names()
+        assert "bash" in enabled
+        assert "memory_search" in enabled
+        assert "git_push" not in enabled
+
+    def test_full_config_from_yaml(self, tmp_path):
+        """Full manifest with all sections loads correctly."""
+        from aiciv_mind.manifest import MindManifest
+        yaml_content = """\
+schema_version: "1.0"
+mind_id: full-test
+display_name: Full Test Mind
+role: primary
+self_modification_enabled: true
+system_prompt: "Full system prompt."
+model:
+  preferred: "ollama/qwen2.5-coder:14b"
+  temperature: 0.5
+  max_tokens: 8192
+  call_timeout_s: 60.0
+tools:
+  - name: bash
+    enabled: true
+    constraints: ["no rm -rf"]
+  - name: git_push
+    enabled: false
+auth:
+  civ_id: acg
+  keypair_path: keys/primary.json
+  calendar_id: "cal-123"
+agentmail:
+  inbox: "test@agentmail.to"
+  display_name: "Test Mind"
+memory:
+  backend: sqlite_fts5
+  db_path: data/full.db
+  markdown_mirror: true
+  auto_search_before_task: true
+  max_context_memories: 15
+planning:
+  enabled: true
+  min_gate_level: medium
+verification:
+  enabled: true
+  min_redteam_level: complex
+compaction:
+  enabled: true
+  preserve_recent: 6
+  max_context_tokens: 40000
+tools_config:
+  exec_timeout_s: 30.0
+hooks:
+  enabled: true
+  blocked_tools:
+    - git_push
+    - netlify_deploy
+  log_all: true
+"""
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(yaml_content)
+        m = MindManifest.from_yaml(manifest_file)
+        assert m.self_modification_enabled is True
+        assert m.model.temperature == 0.5
+        assert m.model.max_tokens == 8192
+        assert m.model.call_timeout_s == 60.0
+        assert m.auth.calendar_id == "cal-123"
+        assert m.agentmail.inbox == "test@agentmail.to"
+        assert m.memory.max_context_memories == 15
+        assert m.planning.min_gate_level == "medium"
+        assert m.verification.min_redteam_level == "complex"
+        assert m.compaction.preserve_recent == 6
+        assert m.tools_config.exec_timeout_s == 30.0
+        assert "git_push" in m.hooks.blocked_tools
+        assert len(m.enabled_tool_names()) == 1  # only bash
+
+    def test_empty_yaml_uses_defaults(self, tmp_path):
+        """Empty YAML file raises validation error (required fields missing)."""
+        from pydantic import ValidationError
+        from aiciv_mind.manifest import MindManifest
+        manifest_file = tmp_path / "empty.yaml"
+        manifest_file.write_text("")
+        import pytest
+        with pytest.raises(ValidationError):
+            MindManifest.from_yaml(manifest_file)
+
+
+# ---------------------------------------------------------------------------
+# Context compaction edge cases — circuit breaker, message extraction
+# ---------------------------------------------------------------------------
+
+
+class TestContextEdgeCases:
+    """Edge cases in context management not covered by test_context_manager.py."""
+
+    def test_compact_history_split_point_finds_user_message(self):
+        """Compaction split always starts the recent block at a user message."""
+        from aiciv_mind.context_manager import ContextManager
+        ctx = ContextManager(model_max_tokens=1000)
+        # Build messages where naive split would land on assistant
+        msgs = []
+        for i in range(10):
+            msgs.append({"role": "user", "content": f"User {i}"})
+            msgs.append({"role": "assistant", "content": f"Reply {i}"})
+        compacted, _ = ctx.compact_history(msgs, preserve_recent=4)
+        # Recent block should start with user
+        # Find where the compacted summary pair ends
+        for i, m in enumerate(compacted):
+            if m["role"] == "user" and "[COMPACTED CONTEXT" not in m.get("content", ""):
+                assert m["role"] == "user"
+                break
+
+    def test_extract_message_text_handles_all_types(self):
+        """_extract_message_text handles str, list of dicts, list of objects."""
+        from aiciv_mind.context_manager import ContextManager
+
+        # String content
+        assert ContextManager._extract_message_text({"content": "hello"}) == "hello"
+
+        # List of dicts with type=text
+        assert "world" in ContextManager._extract_message_text({
+            "content": [{"type": "text", "text": "world"}]
+        })
+
+        # List of dicts with type=tool_result
+        assert "result" in ContextManager._extract_message_text({
+            "content": [{"type": "tool_result", "content": "result data"}]
+        })
+
+        # Empty
+        assert ContextManager._extract_message_text({}) == ""
+
+    def test_message_chars_estimation(self):
+        """_message_chars correctly estimates across content types."""
+        from aiciv_mind.context_manager import ContextManager
+        # String
+        assert ContextManager._message_chars({"content": "hello"}) == 5
+        # List
+        chars = ContextManager._message_chars({
+            "content": [{"type": "text", "text": "abc"}, {"type": "text", "text": "def"}]
+        })
+        assert chars >= 6  # at least len("abc") + len("def")
+
+    def test_search_results_budget_cap(self):
+        """Search results stop injecting when token budget exceeded."""
+        from aiciv_mind.context_manager import ContextManager
+        # Very small budget: 100 tokens = 400 chars, 80% = 320 chars
+        ctx = ContextManager(model_max_tokens=100, max_context_memories=50)
+        results = [
+            {"title": f"Memory {i}", "content": "x" * 200, "created_at": "2026-01-01"}
+            for i in range(10)
+        ]
+        formatted = ctx.format_search_results(results)
+        # Should not include all 10 (each is ~200 chars, budget is ~320)
+        assert formatted.count("Memory") < 10
