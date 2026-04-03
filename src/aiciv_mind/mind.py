@@ -450,6 +450,37 @@ class Mind:
                             tool_errors.append(line.strip()[:200])
                             break
 
+                # ── Coordination metrics (P7 Loop 2: fitness scoring) ──────
+                # Record coordination metrics when spawn/delegation tools are used.
+                # This feeds the fitness scoring system that was previously dead code.
+                try:
+                    from aiciv_mind.fitness import CoordinationMetrics
+                    is_error = "ERROR:" in result_content
+                    if b.name == "spawn_team_lead":
+                        role = self.manifest.parsed_role()
+                        self._session_learner.record_coordination(CoordinationMetrics(
+                            role=role,
+                            delegation_target=b.input.get("mind_id", ""),
+                            delegation_correct=None if is_error else True,
+                            delegation_latency_ms=tool_exec_ms,
+                        ))
+                    elif b.name == "spawn_agent":
+                        role = self.manifest.parsed_role()
+                        self._session_learner.record_coordination(CoordinationMetrics(
+                            role=role,
+                            agent_spawned=b.input.get("mind_id", ""),
+                            agent_selection_correct=None if is_error else True,
+                            delegation_latency_ms=tool_exec_ms,
+                        ))
+                    elif b.name == "send_message":
+                        role = self.manifest.parsed_role()
+                        self._session_learner.record_coordination(CoordinationMetrics(
+                            role=role,
+                            result_synthesized=True,
+                        ))
+                except (ValueError, AttributeError, KeyError):
+                    pass  # Free-form roles or mock manifests — skip coordination tracking
+
             if synthetic_calls:
                 # For text-embedded tool calls, inject results as plain text
                 # so the model sees them naturally (it never produced tool_use IDs)
@@ -596,6 +627,21 @@ class Mind:
                 memories_consulted=planning_result.memories_consulted,
             )
             self._session_learner.record(outcome)
+
+            # Record agent-level coordination metrics (tool effectiveness)
+            try:
+                role = self.manifest.parsed_role()
+                from aiciv_mind.fitness import CoordinationMetrics
+                from aiciv_mind.roles import Role
+                if role == Role.AGENT:
+                    self._session_learner.record_coordination(CoordinationMetrics(
+                        role=role,
+                        tools_attempted=tool_call_count,
+                        tools_succeeded=tool_call_count - len(tool_errors),
+                        task_completed=outcome.succeeded,
+                    ))
+            except (ValueError, AttributeError, KeyError):
+                pass  # Free-form roles — skip
         except Exception:
             pass  # Learner must NEVER crash the task return
 
