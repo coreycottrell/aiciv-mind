@@ -210,6 +210,9 @@ class MemoryStore:
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # busy_timeout: wait up to 5s for locks instead of failing immediately.
+        # Critical for concurrent sub-mind access to the same DB file.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
