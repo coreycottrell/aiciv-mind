@@ -801,10 +801,20 @@ class Mind:
 
         t0 = time.monotonic()
         timeout = self.manifest.model.call_timeout_s
-        coro = self._client.messages.create(**kwargs)
+
+        # Use streaming to avoid Anthropic SDK 10-minute timeout on large
+        # contexts.  messages.stream() returns an async context manager;
+        # get_final_message() collects chunks into a full Message object
+        # (with .content, .stop_reason, .usage) so callers work unchanged.
+        async def _stream_and_collect() -> Any:
+            async with self._client.messages.stream(**kwargs) as stream:
+                return await stream.get_final_message()
+
         if timeout > 0:
             try:
-                response = await asyncio.wait_for(coro, timeout=timeout)
+                response = await asyncio.wait_for(
+                    _stream_and_collect(), timeout=timeout,
+                )
             except asyncio.TimeoutError:
                 latency_ms = int((time.monotonic() - t0) * 1000)
                 logger.error(
@@ -814,7 +824,7 @@ class Mind:
                 )
                 raise
         else:
-            response = await coro
+            response = await _stream_and_collect()
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         self._log_cache_stats(response)

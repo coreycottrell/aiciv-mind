@@ -77,6 +77,16 @@ def make_response(text=None, tool_blocks=None, stop_reason="end_turn") -> MagicM
     return resp
 
 
+def make_stream_ctx(response: MagicMock) -> MagicMock:
+    """Wrap a response in an async context manager mimicking messages.stream()."""
+    stream = AsyncMock()
+    stream.get_final_message = AsyncMock(return_value=response)
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=stream)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx
+
+
 # ---------------------------------------------------------------------------
 # Tests: basic loop
 # ---------------------------------------------------------------------------
@@ -87,8 +97,8 @@ async def test_run_task_no_tools_returns_text(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=make_response(text="Hello world!"),
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(make_response(text="Hello world!")),
     ):
         result = await mind.run_task("Say hello", inject_memories=False)
 
@@ -104,8 +114,8 @@ async def test_run_task_single_tool_call(minimal_manifest, memory_store):
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hi\n"
@@ -126,8 +136,8 @@ async def test_tool_result_appended_as_tool_result_block(minimal_manifest, memor
     second = make_response(text="Listed.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(mind._tools, "execute", new_callable=AsyncMock, return_value="a.txt"):
             await mind.run_task("List files", inject_memories=False)
@@ -149,11 +159,11 @@ async def test_system_prompt_passed_to_api(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
     captured = []
 
-    async def capture(**kwargs):
+    def capture(**kwargs):
         captured.append(kwargs)
-        return make_response(text="ok")
+        return make_stream_ctx(make_response(text="ok"))
 
-    with patch.object(mind._client.messages, "create", new_callable=AsyncMock, side_effect=capture):
+    with patch.object(mind._client.messages, "stream", side_effect=capture):
         await mind.run_task("test", inject_memories=False)
 
     assert "system" in captured[0]
@@ -165,11 +175,11 @@ async def test_model_name_from_manifest(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
     captured = []
 
-    async def capture(**kwargs):
+    def capture(**kwargs):
         captured.append(kwargs)
-        return make_response(text="ok")
+        return make_stream_ctx(make_response(text="ok"))
 
-    with patch.object(mind._client.messages, "create", new_callable=AsyncMock, side_effect=capture):
+    with patch.object(mind._client.messages, "stream", side_effect=capture):
         await mind.run_task("test", inject_memories=False)
 
     assert captured[0]["model"] == "ollama/qwen2.5-coder:14b"
@@ -185,8 +195,8 @@ async def test_multiple_tool_calls_all_executed(minimal_manifest, memory_store):
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="out"
@@ -213,13 +223,13 @@ async def test_stop_exits_loop_early(minimal_manifest, memory_store):
 
     call_count = 0
 
-    async def mock_create(**kwargs):
+    def mock_create(**kwargs):
         nonlocal call_count
         call_count += 1
         mind.stop()
-        return loop_response
+        return make_stream_ctx(loop_response)
 
-    with patch.object(mind._client.messages, "create", new_callable=AsyncMock, side_effect=mock_create):
+    with patch.object(mind._client.messages, "stream", side_effect=mock_create):
         with patch.object(mind._tools, "execute", new_callable=AsyncMock, return_value="out"):
             await mind.run_task("loop task", inject_memories=False)
 
@@ -273,8 +283,8 @@ async def test_run_task_empty_response(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=make_response(),  # no text, no tools
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(make_response()),  # no text, no tools
     ):
         result = await mind.run_task("Do nothing", inject_memories=False)
 
@@ -401,8 +411,8 @@ async def test_native_tool_use_with_end_turn_still_executes(minimal_manifest, me
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hi\n"
@@ -426,8 +436,8 @@ async def test_native_tool_use_with_stop_reason_executes(minimal_manifest, memor
     second = make_response(text="Listed.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="a.txt"
@@ -454,8 +464,8 @@ async def test_native_text_plus_tool_use_end_turn_executes(minimal_manifest, mem
     second = make_response(text="I found 3 relevant memories.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock,
@@ -477,8 +487,8 @@ async def test_multiple_native_tools_end_turn_all_execute(minimal_manifest, memo
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="out"
@@ -495,8 +505,8 @@ async def test_no_tool_use_end_turn_breaks_correctly(minimal_manifest, memory_st
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=make_response(text="All done!", stop_reason="end_turn"),
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(make_response(text="All done!", stop_reason="end_turn")),
     ):
         result = await mind.run_task("Just chat", inject_memories=False)
 
@@ -518,8 +528,8 @@ async def test_synthetic_tool_calls_still_work(minimal_manifest, memory_store):
     second = make_response(text="Got it: hello")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
@@ -548,8 +558,8 @@ async def test_json_format_tool_call_parsing(minimal_manifest, memory_store):
     second = make_response(text="/home/corey/projects")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="/home/corey"
@@ -572,8 +582,8 @@ async def test_openai_function_format_parsing(minimal_manifest, memory_store):
     second = make_response(text="Files listed.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="a.py"
@@ -593,8 +603,8 @@ async def test_case_insensitive_tool_name_parsing(minimal_manifest, memory_store
     second = make_response(text="test")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="test"
@@ -621,8 +631,8 @@ async def test_tool_call_block_format_parsing(minimal_manifest, memory_store):
     second = make_response(text="Today is Wednesday.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="Wed Apr 2"
@@ -648,8 +658,8 @@ async def test_xml_invoke_with_wrapper_parsing(minimal_manifest, memory_store):
     second = make_response(text="You are root.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="corey"
@@ -684,8 +694,8 @@ async def test_minimax_json_array_tool_call_parsing(minimal_manifest, memory_sto
     second = make_response(text="Output: hello")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
@@ -705,8 +715,8 @@ async def test_minimax_json_array_with_args_key(minimal_manifest, memory_store):
     second = make_response(text="Listed files.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="file1.py"
@@ -725,8 +735,8 @@ async def test_unrecognized_tool_name_ignored(minimal_manifest, memory_store):
     first = make_response(text=json_text, stop_reason="end_turn")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=first,
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(first),
     ):
         # Should NOT crash — unrecognized tool names are skipped
         result = await mind.run_task("Try bad tool", inject_memories=False)
@@ -749,8 +759,8 @@ async def test_synthetic_result_injected_as_user_text(minimal_manifest, memory_s
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="ok"
@@ -797,8 +807,8 @@ async def test_read_only_tools_can_run_concurrently(minimal_manifest, memory_sto
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         result = await mind.run_task("Read both", inject_memories=False)
 
@@ -833,12 +843,17 @@ async def test_model_call_timeout_raises(memory_store):
     )
     mind = Mind(manifest=manifest, memory=memory_store)
 
-    async def slow_create(**kwargs):
-        await asyncio.sleep(5)  # Way longer than 0.1s timeout
-        return make_response(text="Never reached")
+    class SlowCtx:
+        async def __aenter__(self):
+            await asyncio.sleep(5)  # Way longer than 0.1s timeout
+        async def __aexit__(self, *a):
+            pass
+
+    def slow_stream(**kwargs):
+        return SlowCtx()
 
     with patch.object(
-        mind._client.messages, "create", side_effect=slow_create,
+        mind._client.messages, "stream", side_effect=slow_stream,
     ):
         with pytest.raises(TimeoutError):
             await mind.run_task("Do something slow", inject_memories=False)
@@ -854,8 +869,8 @@ async def test_model_call_no_timeout_when_zero(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=make_response(text="Fast response"),
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(make_response(text="Fast response")),
     ):
         result = await mind.run_task("Quick task", inject_memories=False)
 
@@ -901,8 +916,8 @@ async def test_compaction_uses_model_limit_when_lower(memory_store):
     # 30000 < 50000 → without the fix, compaction would NOT trigger
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        return_value=make_response(text="Done after compaction"),
+        mind._client.messages, "stream",
+        return_value=make_stream_ctx(make_response(text="Done after compaction")),
     ):
         result = await mind.run_task("Test compaction", inject_memories=False)
 
@@ -949,8 +964,8 @@ async def test_tool_execution_timeout_returns_error(memory_store):
     second = make_response(text="Handled the timeout.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         result = await mind.run_task("Run slow tool", inject_memories=False)
 
@@ -993,8 +1008,8 @@ async def test_oversized_tool_result_truncated(minimal_manifest, memory_store):
     second = make_response(text="Got truncated result.")
 
     with patch.object(
-        mind._client.messages, "create", new_callable=AsyncMock,
-        side_effect=[first, second],
+        mind._client.messages, "stream",
+        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
     ):
         result = await mind.run_task("Get big output", inject_memories=False)
 
