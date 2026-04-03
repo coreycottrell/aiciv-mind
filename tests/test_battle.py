@@ -5516,3 +5516,320 @@ class TestGraphTools:
         # Result format depends on get_superseded implementation
         assert isinstance(result, str)
         store.close()
+
+
+# ===========================================================================
+# Round 16 — Handoff audit checks, trust scoring, handoff context, helpers
+# ===========================================================================
+
+
+class TestHandoffAuditHelpers:
+    """Unit tests for handoff_audit_tools helper functions."""
+
+    def test_hours_since_recent(self):
+        """_hours_since returns small value for recent timestamp."""
+        from aiciv_mind.tools.handoff_audit_tools import _hours_since
+        from datetime import datetime, timezone
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        hours = _hours_since(now_str)
+        assert hours is not None
+        assert hours < 1.0
+
+    def test_hours_since_invalid(self):
+        """_hours_since returns None for invalid timestamp."""
+        from aiciv_mind.tools.handoff_audit_tools import _hours_since
+
+        assert _hours_since("not-a-date") is None
+        assert _hours_since("") is None
+
+    def test_parse_handoff_content_json(self):
+        """_parse_handoff_content parses valid JSON."""
+        import json
+        from aiciv_mind.tools.handoff_audit_tools import _parse_handoff_content
+
+        data = {"current_work": "testing", "next_steps": "ship"}
+        result = _parse_handoff_content(json.dumps(data))
+        assert result["current_work"] == "testing"
+
+    def test_parse_handoff_content_raw_text(self):
+        """_parse_handoff_content wraps raw text as summary."""
+        from aiciv_mind.tools.handoff_audit_tools import _parse_handoff_content
+
+        result = _parse_handoff_content("just some text about the session")
+        assert "summary" in result
+        assert "just some text" in result["summary"]
+
+    def test_row_to_dict_from_dict(self):
+        """_row_to_dict passes dicts through."""
+        from aiciv_mind.tools.handoff_audit_tools import _row_to_dict
+
+        d = {"a": 1, "b": 2}
+        assert _row_to_dict(d) == d
+
+    def test_compute_trust_score_all_pass(self):
+        """All PASS results → score ~1.0."""
+        from aiciv_mind.tools.handoff_audit_tools import _compute_trust_score
+
+        results = [
+            {"status": "PASS", "check": "a"},
+            {"status": "PASS", "check": "b"},
+            {"status": "PASS", "check": "c"},
+        ]
+        trust = _compute_trust_score(results)
+        assert trust["score"] == 1.0
+        assert trust["grade"] == "A"
+
+    def test_compute_trust_score_with_failures(self):
+        """FAIL results drag score down."""
+        from aiciv_mind.tools.handoff_audit_tools import _compute_trust_score
+
+        results = [
+            {"status": "PASS", "check": "a"},
+            {"status": "FAIL", "check": "b"},
+            {"status": "PASS", "check": "c"},
+        ]
+        trust = _compute_trust_score(results)
+        assert trust["score"] < 1.0
+        assert trust["failed"] == 1
+
+    def test_compute_trust_score_error_zeroes(self):
+        """ERROR in any check → score = 0.0."""
+        from aiciv_mind.tools.handoff_audit_tools import _compute_trust_score
+
+        results = [
+            {"status": "PASS", "check": "a"},
+            {"status": "ERROR", "check": "b"},
+        ]
+        trust = _compute_trust_score(results)
+        assert trust["score"] == 0.0
+        assert trust["grade"] == "F"
+
+    def test_compute_trust_score_empty(self):
+        """No results → score 1.0 with NO_CHECKS label."""
+        from aiciv_mind.tools.handoff_audit_tools import _compute_trust_score
+
+        trust = _compute_trust_score([])
+        assert trust["score"] == 1.0
+        assert trust["label"] == "NO_CHECKS"
+
+
+class TestHandoffAuditChecks:
+    """Tests for individual handoff_audit check functions."""
+
+    def test_check_handoff_exists_no_handoff(self):
+        """handoff_exists check fails when no handoff memory exists."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools.handoff_audit_tools import _check_handoff_exists
+
+        store = MemoryStore(":memory:")
+        result = _check_handoff_exists(store, {})
+        assert result["status"] == "FAIL"
+        assert result["check"] == "handoff_exists"
+        store.close()
+
+    def test_check_handoff_exists_with_handoff(self):
+        """handoff_exists check passes when handoff exists."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_handoff_exists
+
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="test", title="Session handoff",
+            content="Last thing done", memory_type="handoff",
+        ))
+        result = _check_handoff_exists(store, {})
+        assert result["status"] == "PASS"
+        assert "handoff_id" in result
+        store.close()
+
+    def test_check_tool_existence_no_handoff(self):
+        """tool_existence check skips when no handoff exists."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.handoff_audit_tools import _check_tool_existence
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        result = _check_tool_existence(store, registry, None)
+        assert result["status"] == "SKIP"
+        store.close()
+
+    def test_check_context_completeness_structured(self):
+        """context_completeness passes for well-structured JSON handoff."""
+        import json
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_context_completeness
+
+        store = MemoryStore(":memory:")
+        content = json.dumps({
+            "current_work": "Battle testing",
+            "next_steps": "Deploy to prod",
+            "tools_used": ["memory_search", "bash"],
+            "open_issues": [],
+            "session_id": "s-123",
+        })
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content=content, memory_type="handoff",
+        ))
+        result = _check_context_completeness(store, None)
+        assert result["status"] == "PASS"
+        assert len(result["missing_required"]) == 0
+        store.close()
+
+    def test_check_context_completeness_unstructured(self):
+        """context_completeness flags unstructured text handoff."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_context_completeness
+
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content="Just some raw text about what happened",
+            memory_type="handoff",
+        ))
+        result = _check_context_completeness(store, None)
+        assert result["status"] == "FAIL"
+        assert len(result["missing_required"]) > 0
+        store.close()
+
+    def test_check_prior_handoff_contradiction_first_handoff(self):
+        """prior_handoff_contradiction returns INFO for first handoff."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_prior_handoff_contradiction
+
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content="First ever handoff", memory_type="handoff",
+        ))
+        result = _check_prior_handoff_contradiction(store, None)
+        assert result["status"] == "INFO"
+        store.close()
+
+    def test_check_temporal_staleness_fresh(self):
+        """temporal_staleness passes for fresh handoff."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_temporal_staleness
+
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content="Fresh content", memory_type="handoff",
+        ))
+        result = _check_temporal_staleness(store, None)
+        assert result["status"] == "PASS"
+        assert result.get("hours_old", 0) < 1
+        store.close()
+
+    def test_check_session_overlap_no_overlap(self):
+        """session_overlap passes when no sessions started after handoff."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import _check_session_overlap
+
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content="Session done", memory_type="handoff",
+        ))
+        result = _check_session_overlap(store, None)
+        assert result["status"] == "PASS"
+        store.close()
+
+
+class TestHandoffAuditEndToEnd:
+    """End-to-end tests for the full handoff_audit function."""
+
+    def test_full_audit_no_handoff(self):
+        """Full audit with no handoff returns low trust score."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools.handoff_audit_tools import handoff_audit
+
+        store = MemoryStore(":memory:")
+        report = handoff_audit(memory_store=store)
+        assert report["trust_score"]["score"] < 1.0
+        assert report["trust_score"]["failed"] >= 1
+        assert len(report["check_results"]) > 0
+        store.close()
+
+    def test_full_audit_with_handoff(self):
+        """Full audit with a well-formed handoff returns higher trust."""
+        import json
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import handoff_audit
+
+        store = MemoryStore(":memory:")
+        content = json.dumps({
+            "current_work": "Writing battle tests",
+            "next_steps": "Push to main",
+            "tools_used": [],
+            "session_id": "test-session",
+        })
+        store.store(Memory(
+            agent_id="test", title="Session handoff",
+            content=content, memory_type="handoff",
+        ))
+        report = handoff_audit(memory_store=store, tool_input={"verbose": True})
+        assert report["trust_score"]["score"] > 0.5
+        assert len(report["check_results"]) == 7  # all 7 checks in verbose mode
+        store.close()
+
+    def test_full_audit_verbose_vs_default(self):
+        """Verbose mode shows more results than default."""
+        import json
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools.handoff_audit_tools import handoff_audit
+
+        store = MemoryStore(":memory:")
+        content = json.dumps({
+            "current_work": "Testing",
+            "next_steps": "Deploy",
+        })
+        store.store(Memory(
+            agent_id="test", title="Handoff",
+            content=content, memory_type="handoff",
+        ))
+
+        default_report = handoff_audit(memory_store=store, tool_input={})
+        verbose_report = handoff_audit(memory_store=store, tool_input={"verbose": True})
+
+        assert len(verbose_report["check_results"]) >= len(default_report["check_results"])
+        store.close()
+
+
+class TestHandoffContextTool:
+    """Tests for the handoff_context tool."""
+
+    def test_handoff_context_basic(self):
+        """handoff_context produces a report with available sections."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.handoff_tools import register_handoff_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_handoff_tools(registry, memory_store=store)
+
+        result = asyncio.run(registry.execute("handoff_context", {}))
+        assert "Handoff Context" in result
+        assert "Memory Stats" in result
+        store.close()
+
+    def test_handoff_context_shows_tool_inventory(self):
+        """handoff_context includes tool list when registry is available."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.handoff_tools import register_handoff_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_handoff_tools(registry, memory_store=store)
+
+        result = asyncio.run(registry.execute("handoff_context", {}))
+        assert "Available Tools" in result
+        # handoff_context itself should be listed
+        assert "handoff_context" in result
+        store.close()
