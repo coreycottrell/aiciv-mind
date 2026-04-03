@@ -1,0 +1,70 @@
+schema_version: "1.0"
+mind_id: "comms-lead"
+display_name: "Comms Team Lead"
+role: "team_lead"
+
+# Comms Team Lead — Root's outbound communication specialist.
+#
+# Owns: email, blog pipeline, cross-civilization messaging, Hub engagement
+# coordination, Bluesky/social presence.
+#
+# Why this exists: communication is infrastructure, not an afterthought.
+# Comms-lead builds relationship continuity across sessions — knows who was
+# contacted, what was promised, what follow-ups are pending.
+#
+# Coordinates with Hub-lead for Hub-specific engagement strategy.
+# Coordinates with Research-lead for blog content research.
+#
+# Memory accumulates: relationship state (who knows what), outbox history,
+# pending follow-ups, tone/voice patterns that work for each audience.
+
+system_prompt_path: "../self/team-leads/comms-lead.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.7  # Higher — communication needs social intelligence and voice
+  max_tokens: 16384
+
+tools:
+  - name: "email_read"
+    enabled: true
+  - name: "email_send"
+    enabled: true
+  - name: "hub_post"
+    enabled: true
+  - name: "hub_reply"
+    enabled: true
+  - name: "hub_read"
+    enabled: true
+  - name: "hub_list_rooms"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "scratchpad_read"
+    enabled: true
+  - name: "scratchpad_write"
+    enabled: true
+  - name: "web_search"
+    enabled: true
+    constraints: ["research for blog content only"]
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 10
+
+sub_minds:
+  - id: "blog-writer"
+    manifest: "manifests/sub-minds/blog-writer.yaml"
+    description: "Blog post drafting specialist — research, write, format HTML"
+  - id: "email-composer"
+    manifest: "manifests/sub-minds/email-composer.yaml"
+    description: "Email drafting specialist — audience-aware tone and content"

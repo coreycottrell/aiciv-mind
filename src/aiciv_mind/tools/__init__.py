@@ -166,6 +166,40 @@ class ToolRegistry:
         """Return sorted list of all registered tool names."""
         return list(self._tools.keys())
 
+    def filter_by_role(self, role) -> "ToolRegistry":
+        """
+        Return a new ToolRegistry containing only tools allowed for the given role.
+
+        Uses ROLE_TOOL_WHITELIST from aiciv_mind.roles.  If the whitelist is None
+        (Role.AGENT), returns a copy with all tools.  Otherwise, keeps only tools
+        whose names are in the whitelist.
+
+        The hooks reference is shared (not copied) so governance still applies.
+        """
+        from aiciv_mind.roles import tools_for_role
+
+        whitelist = tools_for_role(role)
+        if whitelist is None:
+            # Agent role — keep everything
+            filtered = ToolRegistry()
+            filtered._tools = dict(self._tools)
+            filtered._handlers = dict(self._handlers)
+            filtered._read_only = dict(self._read_only)
+            filtered._timeouts = dict(self._timeouts)
+            filtered._hooks = self._hooks
+            return filtered
+
+        filtered = ToolRegistry()
+        for name in whitelist:
+            if name in self._tools:
+                filtered._tools[name] = self._tools[name]
+                filtered._handlers[name] = self._handlers[name]
+                filtered._read_only[name] = self._read_only[name]
+                if name in self._timeouts:
+                    filtered._timeouts[name] = self._timeouts[name]
+        filtered._hooks = self._hooks
+        return filtered
+
     @classmethod
     def default(
         cls,
@@ -262,6 +296,10 @@ class ToolRegistry:
         if scratchpad_dir is not None:
             from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
             register_scratchpad_tools(registry, scratchpad_dir, mind_lead_scratchpad_dir)
+
+            # Three-level scratchpad system: team + coordination tools
+            from aiciv_mind.tools.coordination_tools import register_coordination_tools
+            register_coordination_tools(registry, scratchpad_dir, writer_id=agent_id)
 
         if manifest_path is not None:
             from aiciv_mind.tools.sandbox_tools import register_sandbox_tools

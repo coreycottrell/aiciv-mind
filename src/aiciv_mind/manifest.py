@@ -119,7 +119,7 @@ class MindManifest(BaseModel):
     schema_version: str = "1.0"
     mind_id: str
     display_name: str
-    role: str
+    role: str  # "primary", "team_lead", or "agent" — determines available tools
     self_modification_enabled: bool = False
     system_prompt: str | None = None
     system_prompt_path: str | None = None
@@ -182,6 +182,18 @@ class MindManifest(BaseModel):
     def enabled_tool_names(self) -> list[str]:
         """Return names of all enabled tools."""
         return [t.name for t in self.tools if t.enabled]
+
+    def parsed_role(self):
+        """
+        Return the Role enum for this manifest's role string.
+
+        Raises ValueError if the role string is not a recognized hierarchy level
+        (primary, team_lead, agent).  Free-form role strings like "worker" or
+        "tester" are valid for the manifest but cannot be used for role-based
+        tool filtering — call this only when filtering is needed.
+        """
+        from aiciv_mind.roles import Role
+        return Role.from_str(self.role)
 
 
 # ---------------------------------------------------------------------------

@@ -10804,7 +10804,7 @@ class TestContextManagerBoot:
         from aiciv_mind.session_store import BootContext
         cm = ContextManager()
         boot = BootContext(
-            session_id="s-4", session_count=1,
+            session_id="s-4", session_count=1, agent_id="test",
             pinned_memories=[{"title": "Critical", "content": "Never delete prod DB"}],
         )
         result = cm.format_boot_context(boot)
@@ -10816,7 +10816,7 @@ class TestContextManagerBoot:
         from aiciv_mind.session_store import BootContext
         cm = ContextManager()
         boot = BootContext(
-            session_id="s-5", session_count=3,
+            session_id="s-5", session_count=3, agent_id="test",
             evolution_trajectory="Developing capability in reasoning",
         )
         result = cm.format_boot_context(boot)
@@ -10827,7 +10827,7 @@ class TestContextManagerBoot:
         from aiciv_mind.session_store import BootContext
         cm = ContextManager()
         boot = BootContext(
-            session_id="s-6", session_count=2,
+            session_id="s-6", session_count=2, agent_id="test",
             top_by_depth_memories=[
                 {"title": "Core Skill", "content": "Pattern matching", "access_count": 42},
             ],
