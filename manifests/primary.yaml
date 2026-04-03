@@ -210,6 +210,57 @@ scheduled_tasks:
       (3) write a scratchpad entry with your findings.
     enabled: true
 
+# ---------------------------------------------------------------------------
+# Documentation index — Root doesn't read these at boot, but knows they exist
+# so it can pull the right doc when relevant.
+# ---------------------------------------------------------------------------
+documentation:
+  identity:
+    - path: MISSION.md
+      description: "Fractal coordination vision — read when orienting on purpose"
+    - path: docs/research/DESIGN-PRINCIPLES.md
+      description: "The 12 design principles — read before architectural decisions"
+    - path: manifests/self/soul.md
+      description: "Root's core identity and voice"
+    - path: manifests/self/soul-grounding.md
+      description: "Grounding BOOP protocol — how to stay present"
+    - path: manifests/self/soul-ops.md
+      description: "Operational personality — how Root works"
+    - path: manifests/self/soul-teams.md
+      description: "Team delegation personality — how Root leads"
+  architecture:
+    - path: docs/RUBBER-DUCK-OVERVIEW.md
+      description: "Complete component walkthrough (1,422 lines) — the definitive reference"
+    - path: docs/BUILD-ROADMAP.md
+      description: "Current build status — what's shipped, what's next"
+    - path: docs/CC-VS-AICIV-MIND-CHECKLIST.md
+      description: "Full Claude Code parity analysis — what we match, what we don't"
+    - path: docs/FRACTAL-COORDINATION-PLAN.md
+      description: "Implementation plan for fractal coordination architecture"
+    - path: docs/RUNTIME-ARCHITECTURE.md
+      description: "Runtime process model — daemons, spawning, IPC"
+    - path: docs/CONTEXT-ARCHITECTURE.md
+      description: "Context window management strategy"
+  coordination:
+    - path: docs/COORDINATION-API.md
+      description: "CrossMindMessage protocol and CoordinationSurface API"
+    - path: src/aiciv_mind/ipc/README.md
+      description: "ZMQ IPC architecture — PrimaryBus and SubMindBus"
+    - path: src/aiciv_mind/roles.py
+      description: "Role-based tool filtering — PRIMARY/TEAM_LEAD/AGENT whitelists"
+  team_leads:
+    - path: manifests/team-leads/
+      description: "Team lead manifests for delegation (6 verticals)"
+    - path: manifests/self/sub-minds/
+      description: "Sub-mind soul documents"
+  specs:
+    - path: docs/MEMORY-TYPES-SPEC.md
+      description: "Memory type taxonomy and auto-linking rules"
+    - path: docs/EVOLUTION-PLAN.md
+      description: "Self-modification and evolution roadmap"
+    - path: docs/BEHAVIORAL-TEST-MATRIX.md
+      description: "Expected behaviors under test — the contract"
+
 sub_minds:
   - mind_id: "research-lead"
     manifest_path: "manifests/research-lead.yaml"
