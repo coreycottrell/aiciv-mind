@@ -96,6 +96,7 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
             session_name="aiciv-mind",
             mind_root=Path(__file__).parent,
             registry=mind_registry,
+            memory_store=memory,
         )
         logging.getLogger("aiciv_mind.main").info("Sub-mind IPC ready")
     except Exception as e:
@@ -172,6 +173,10 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
     # Session lifecycle + context management
     session_store = SessionStore(memory, agent_id=manifest.mind_id)
     boot = session_store.boot()
+
+    # Wire session_id into spawner for persistent tracking
+    if spawner is not None:
+        spawner._session_id = boot.session_id
 
     ctx_mgr = ContextManager(
         max_context_memories=manifest.memory.max_context_memories,

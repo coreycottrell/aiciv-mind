@@ -25,17 +25,23 @@ class SubMindSpawner:
         session_name: str,
         mind_root: str | Path,
         registry: MindRegistry | None = None,
+        memory_store=None,
+        session_id: str | None = None,
     ) -> None:
         """
         Args:
             session_name: tmux session name (created if doesn't exist)
             mind_root: path to aiciv-mind repo root (where run_submind.py lives)
             registry: optional MindRegistry to auto-register spawned handles
+            memory_store: optional MemoryStore for persistent agent registration
+            session_id: current session ID for touch_agent tracking
         """
         import libtmux
         self._session_name = session_name
         self._mind_root = Path(mind_root).resolve()
         self._registry = registry
+        self._memory_store = memory_store
+        self._session_id = session_id
         self._server = libtmux.Server()
         self._session = None
 
@@ -116,6 +122,18 @@ class SubMindSpawner:
 
         if self._registry is not None:
             self._registry.register(handle)
+
+        # Persistent registry: register agent in DB and bump spawn count
+        if self._memory_store is not None:
+            try:
+                self._memory_store.register_agent(
+                    agent_id=mind_id,
+                    manifest_path=str(manifest_path),
+                    role="sub-mind",
+                )
+                self._memory_store.touch_agent(mind_id, session_id=self._session_id)
+            except Exception as e:
+                logger.warning("Persistent agent registration failed for '%s': %s", mind_id, e)
 
         logger.info(
             "Spawned sub-mind '%s' in tmux window (pane %s)", mind_id, pane.pane_id

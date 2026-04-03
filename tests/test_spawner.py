@@ -337,3 +337,65 @@ def test_is_alive_no_pid_shell_means_dead(mock_libtmux, tmp_path) -> None:
     )
 
     assert spawner.is_alive(handle) is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: persistent agent registry (P2-4)
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_registers_in_memory_store(mock_libtmux, tmp_path) -> None:
+    """spawn() calls memory_store.register_agent and touch_agent when provided."""
+    mock_memory = MagicMock()
+
+    sp = SubMindSpawner(
+        session_name="test-session",
+        mind_root=tmp_path,
+        memory_store=mock_memory,
+        session_id="sess-001",
+    )
+
+    manifest = tmp_path / "sub.yaml"
+    manifest.touch()
+
+    handle = sp.spawn("research-lead", manifest)
+
+    mock_memory.register_agent.assert_called_once()
+    call_kwargs = mock_memory.register_agent.call_args
+    assert call_kwargs.kwargs["agent_id"] == "research-lead"
+    assert call_kwargs.kwargs["role"] == "sub-mind"
+
+    mock_memory.touch_agent.assert_called_once_with("research-lead", session_id="sess-001")
+
+
+def test_spawn_without_memory_store_works(mock_libtmux, tmp_path) -> None:
+    """spawn() without memory_store still works (no persistent registration)."""
+    sp = SubMindSpawner(
+        session_name="test-session",
+        mind_root=tmp_path,
+    )
+
+    manifest = tmp_path / "sub.yaml"
+    manifest.touch()
+
+    handle = sp.spawn("solo-mind", manifest)
+    assert handle.mind_id == "solo-mind"
+
+
+def test_spawn_memory_store_error_doesnt_block(mock_libtmux, tmp_path) -> None:
+    """If memory_store.register_agent raises, spawn still succeeds."""
+    mock_memory = MagicMock()
+    mock_memory.register_agent.side_effect = RuntimeError("DB locked")
+
+    sp = SubMindSpawner(
+        session_name="test-session",
+        mind_root=tmp_path,
+        memory_store=mock_memory,
+    )
+
+    manifest = tmp_path / "sub.yaml"
+    manifest.touch()
+
+    # Should not raise — error is logged and swallowed
+    handle = sp.spawn("flaky-mind", manifest)
+    assert handle.mind_id == "flaky-mind"
