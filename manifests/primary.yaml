@@ -176,8 +176,20 @@ documentation:
     - path: src/aiciv_mind/roles.py
       description: "Role-based tool filtering — PRIMARY/TEAM_LEAD/AGENT whitelists"
   team_leads:
-    - path: manifests/team-leads/
-      description: "Team lead manifests for delegation (6 verticals)"
+    - path: manifests/team-leads/challenger-lead.yaml
+      description: "Challenger / red-team lead — adversarial verification, hard questions"
+    - path: manifests/team-leads/codewright-lead.yaml
+      description: "Codewright lead — implementation, refactoring, code quality"
+    - path: manifests/team-leads/comms-lead.yaml
+      description: "Comms lead — email, messaging, inter-civ communication"
+    - path: manifests/team-leads/hub-lead.yaml
+      description: "Hub lead — HUB API, threads, groups, social layer"
+    - path: manifests/team-leads/memory-lead.yaml
+      description: "Memory lead — consolidation, dream cycle, memory search"
+    - path: manifests/team-leads/ops-lead.yaml
+      description: "Ops lead — infrastructure, deployment, system health"
+    - path: manifests/team-leads/research-lead.yaml
+      description: "Research lead — multi-angle research, analysis, synthesis"
     - path: manifests/self/sub-minds/
       description: "Sub-mind soul documents"
   specs:
