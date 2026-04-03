@@ -161,26 +161,12 @@ def _parse_handoff_content(content_raw: str) -> dict[str, Any]:
 
 
 def _row_to_dict(row) -> dict:
-    """Convert a sqlite3.Row (or any row-like) to a dict by column name."""""
-    if isinstance(row, dict):
-        return row
-    try:
-        cols = [desc[0] for desc in row.cursor.description]
-        return dict(zip(cols, row))
-    except Exception:
-        return dict(enumerate(row))
-
-
-
-def _row_to_dict(row) -> dict:
     """Convert a sqlite3.Row (or any row-like) to a dict by column name."""
     if isinstance(row, dict):
         return row
-    try:
-        cols = [desc[0] for desc in row.cursor.description]
-        return dict(zip(cols, row))
-    except Exception:
-        return dict(enumerate(row))
+    if hasattr(row, "keys"):  # sqlite3.Row
+        return {k: row[k] for k in row.keys()}
+    return dict(enumerate(row))
 
 
 # ---------------------------------------------------------------------------
@@ -428,12 +414,6 @@ def _check_tool_existence(
                         referenced_tools.append(entry)
                     elif isinstance(entry, dict):
                         referenced_tools.append(entry.get("name", ""))
-
-        # Also scan raw text for tool-like references (e.g. "used tool X")
-        tool_pattern = re.compile(
-            r"(?:used|invoked|called|ran|executed)[\s\w]*(?:tool)?[\s]+\ (?:")
-        for match in tool_pattern.finditer(content):
-            pass  # We use the structured field primarily
 
         # Check each referenced tool against the registry
         available = registry.names()
@@ -769,7 +749,7 @@ def _check_context_completeness(
                 "findings": [],
             }
 
-        parsed = _parse_handoff_content(dict(row).get("content", ""))
+        parsed = _parse_handoff_content(_row_to_dict(row).get("content", ""))
 
         # Treat raw summary-only content as automatically missing required fields
         if "summary" in parsed and len(parsed) == 1:
@@ -877,7 +857,7 @@ def _check_session_overlap(
                 "findings": [],
             }
 
-        handoff_time = dict(handoff_row).get("created_at", "")
+        handoff_time = _row_to_dict(handoff_row).get("created_at", "")
 
         # Get session journal entries after the handoff
         tables = memory_store._conn.execute(
@@ -909,7 +889,7 @@ def _check_session_overlap(
                     ),
                     "findings": findings,
                     "overlapping_sessions": [
-                        dict(r) for r in overlap_rows
+                        _row_to_dict(r) for r in overlap_rows
                     ],
                 }
 

@@ -39,6 +39,7 @@ from aiciv_mind.tools.handoff_audit_tools import (
 def mock_memory_store():
     """Minimal in-memory SQLite memory store."""
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE memories (
             id TEXT PRIMARY KEY,
@@ -187,6 +188,9 @@ class TestCheckContextCompleteness:
         insert_handoff(mock_memory_store._conn, "handoff-1", {
             "current_work": "working on X",
             "next_steps": ["finish Y"],
+            "tools_used": ["memory_search"],
+            "open_issues": [],
+            "session_id": "session-123",
         }, 1)
         result = _check_context_completeness(mock_memory_store, None)
         assert result["status"] == "PASS"
