@@ -220,3 +220,6 @@ sub_minds:
   - mind_id: "test-echo"
     manifest_path: "manifests/test-echo.yaml"
     auto_spawn: false
+  - mind_id: "red-team"
+    manifest_path: "manifests/red-team.yaml"
+    auto_spawn: false

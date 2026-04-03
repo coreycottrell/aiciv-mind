@@ -1,0 +1,47 @@
+schema_version: "1.0"
+mind_id: "red-team"
+display_name: "Red Team — Adversarial Verification Agent"
+role: "agent"
+
+# Red Team — Root's dedicated adversary.
+#
+# Activated when a mind claims a complex task is complete.
+# Receives: the task, the claimed output, and available evidence.
+# Returns: APPROVED/CHALLENGED/BLOCKED with specific reasoning.
+#
+# This is NOT a rubber stamp. The Red Team's job is to find flaws.
+# If it can't find flaws, THAT is its strongest endorsement.
+#
+# Red Team has memory_search access so it can check whether similar
+# completion types have historically been reliable or flawed.
+
+system_prompt_path: "self/red-team.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.8  # Higher — creative adversarial thinking needs exploration
+  max_tokens: 4096
+
+tools:
+  - name: "memory_search"
+    enabled: true
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only operations only", "no writes", "no git push"]
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true  # Check historical verification patterns
+  max_context_memories: 8
+
+sub_minds: []
