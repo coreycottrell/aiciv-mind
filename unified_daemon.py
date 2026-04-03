@@ -554,6 +554,20 @@ def make_shutdown_handler(mind, memory, session_store, primary_bus=None):
                 primary_bus.close()
             except Exception:
                 pass
+        # Clean up remaining sub-mind windows on daemon shutdown
+        try:
+            import libtmux
+            srv = libtmux.Server()
+            sess = srv.sessions.get(session_name="aiciv-subminds", default=None)
+            if sess:
+                for w in list(sess.windows):
+                    try:
+                        w.kill()
+                    except Exception:
+                        pass
+                log.info("Killed all sub-mind windows on shutdown")
+        except Exception:
+            pass
         log.info("Shutdown complete.")
         sys.exit(0)
     return handler
@@ -582,11 +596,17 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
     # Event queue — all input sources push here, main loop pulls
     event_queue: asyncio.Queue[MindEvent] = asyncio.Queue()
 
+    # Track sub-minds that have completed work (result received and queued).
+    # The reaper uses this to know which windows are safe to clean up.
+    completed_minds: set[str] = set()
+    # Windows that should never be reaped (future: persistent ops-lead)
+    REAPER_KEEP_ALIVE: set[str] = set()
+
     # Register persistent RESULT handler on PrimaryBus.
     # When a team lead finishes work, the result arrives here and gets
     # injected into Root's event queue as a CONSCIOUS event.
     if primary_bus:
-        from aiciv_mind.ipc.messages import MsgType
+        from aiciv_mind.ipc.messages import MsgType, MindMessage
 
         async def on_submind_result(msg):
             task_id = msg.payload.get("task_id", "?")
@@ -602,6 +622,7 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
                 body = f"[ERROR from {sender}] task={task_id}: {error}"
 
             log.info("Sub-mind result: %s task=%s success=%s", sender, task_id, success)
+            completed_minds.add(sender)
             await event_queue.put(MindEvent(
                 source="ipc",
                 priority=1,
@@ -1132,6 +1153,126 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
                 except Exception as e:
                     log.error("IPC synthesis failed: %s", e)
 
+    # ── Pane Reaper ───────────────────────────────────────────────
+    REAPER_INTERVAL = 90     # seconds between sweeps
+    REAPER_GRACE = 30        # seconds after SHUTDOWN before force-kill
+    REAPER_MIN_AGE = 120     # don't reap windows younger than this
+
+    async def pane_reaper():
+        """Clean up orphaned sub-mind tmux windows.
+
+        Sub-minds block on shutdown_event.wait() after completing their task,
+        so every finished sub-mind is a live python3 process consuming ~75MB RAM.
+        The reaper sends SHUTDOWN via IPC first, then force-kills after a grace period.
+
+        Phase 1: Dead shells — process exited, tmux still shows a shell prompt.
+        Phase 2: Idle sub-minds — result received, still blocking on shutdown_event.
+        """
+        import libtmux
+
+        server = libtmux.Server()
+        await asyncio.sleep(REAPER_INTERVAL)  # let boot settle
+
+        while True:
+            try:
+                session = server.sessions.get(
+                    session_name="aiciv-subminds", default=None
+                )
+                if session is None:
+                    await asyncio.sleep(REAPER_INTERVAL)
+                    continue
+
+                reaped = 0
+                shutdowns_sent = 0
+                shutdown_targets: list[str] = []
+
+                for window in list(session.windows):
+                    wname = window.window_name
+                    if wname in REAPER_KEEP_ALIVE:
+                        continue
+
+                    pane = window.active_pane
+                    if pane is None:
+                        continue
+
+                    cmd = pane.pane_current_command or ""
+
+                    # Phase 1: Dead shells — process exited, tmux shows shell
+                    if cmd in ("bash", "zsh", "sh", ""):
+                        try:
+                            window.kill()
+                            reaped += 1
+                            log.info("Reaper: killed dead window '%s'", wname)
+                        except Exception as e:
+                            log.warning("Reaper: failed to kill '%s': %s", wname, e)
+                        continue
+
+                    # Phase 2: Idle sub-minds — completed work, still running
+                    if wname in completed_minds:
+                        # Check age to avoid reaping fresh spawns
+                        try:
+                            pid = int(pane.pane_pid)
+                            age = time.time() - os.stat(f"/proc/{pid}").st_mtime
+                        except (ValueError, OSError):
+                            age = float("inf")
+
+                        if age < REAPER_MIN_AGE:
+                            continue
+
+                        # Send graceful SHUTDOWN via IPC
+                        if primary_bus:
+                            try:
+                                msg = MindMessage.shutdown("primary", wname)
+                                await primary_bus.send(msg)
+                                shutdowns_sent += 1
+                                shutdown_targets.append(wname)
+                                log.info("Reaper: sent SHUTDOWN to '%s'", wname)
+                            except Exception as e:
+                                log.warning(
+                                    "Reaper: SHUTDOWN send failed for '%s': %s",
+                                    wname, e,
+                                )
+
+                # Grace period, then force-kill remaining completed minds
+                if shutdowns_sent > 0:
+                    await asyncio.sleep(REAPER_GRACE)
+                    try:
+                        session = server.sessions.get(
+                            session_name="aiciv-subminds", default=None
+                        )
+                        if session:
+                            for window in list(session.windows):
+                                wname = window.window_name
+                                if wname in REAPER_KEEP_ALIVE:
+                                    continue
+                                if wname in shutdown_targets:
+                                    try:
+                                        window.kill()
+                                        reaped += 1
+                                        log.info(
+                                            "Reaper: force-killed '%s' after grace",
+                                            wname,
+                                        )
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        log.warning("Reaper: grace cleanup error: %s", e)
+
+                    # Clear only the minds we actually attempted to shut down
+                    for name in shutdown_targets:
+                        completed_minds.discard(name)
+
+                if reaped > 0 or shutdowns_sent > 0:
+                    log.info(
+                        "Reaper sweep: %d killed, %d shutdowns sent",
+                        reaped, shutdowns_sent,
+                    )
+
+            except Exception as e:
+                log.error("Reaper error: %s", e, exc_info=True)
+
+            await asyncio.sleep(REAPER_INTERVAL)
+
     # ── Launch all listeners ─────────────────────────────────────────
     tasks = [
         asyncio.create_task(tg_listener(), name="tg"),
@@ -1139,9 +1280,10 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
         asyncio.create_task(scheduler(), name="scheduler"),
         asyncio.create_task(hub_poller(), name="hub"),
         asyncio.create_task(process_events(), name="processor"),
+        asyncio.create_task(pane_reaper(), name="reaper"),
     ]
 
-    components = ["TG", "ACG queue", "scheduler", "processor"]
+    components = ["TG", "ACG queue", "scheduler", "processor", "reaper"]
     if enable_hub:
         components.insert(3, "Hub")
     log.info("Unified daemon running — %s", " + ".join(components))
