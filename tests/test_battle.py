@@ -1915,3 +1915,308 @@ class TestContextEdgeCases:
         formatted = ctx.format_search_results(results)
         # Should not include all 10 (each is ~200 chars, budget is ~320)
         assert formatted.count("Memory") < 10
+
+
+# ---------------------------------------------------------------------------
+# Model router — task classification, model selection, outcome tracking
+# ---------------------------------------------------------------------------
+
+
+class TestModelRouter:
+    """Battle tests for dynamic model routing."""
+
+    def test_code_task_routes_to_coder(self):
+        """Code-related tasks route to the code model."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        model = router.select("Fix the bug in the Python function")
+        assert model == "qwen2.5-coder"
+
+    def test_reasoning_task_routes_to_kimi(self):
+        """Reasoning/analysis tasks route to the reasoning model."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        model = router.select("Analyze why the system architecture fails under load")
+        assert model == "kimi-k2"
+
+    def test_memory_task_routes_to_cheap(self):
+        """Memory operations route to the cheap/fast model."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        model = router.select("Remember this important fact about the project")
+        assert model == "minimax-m27"
+
+    def test_unknown_task_uses_default(self):
+        """Tasks matching no patterns use the default model."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        model = router.select("xyzzy plugh")
+        assert model == "minimax-m27"  # default
+
+    def test_override_bypasses_classification(self):
+        """Override parameter forces a specific model."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        model = router.select("Fix the code bug", override="custom-model")
+        assert model == "custom-model"
+
+    def test_classify_task_types(self):
+        """Task classifier correctly identifies different task types."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        assert router.classify_task("Write a Python function") == "code"
+        assert router.classify_task("Explain why this design fails") == "reasoning"
+        assert router.classify_task("Search for related documents") == "research"
+        assert router.classify_task("Hello, how are you?") == "conversation"
+        assert router.classify_task("Remember to fix the memory store") == "memory-ops"
+        assert router.classify_task("Calculate 2 + 2") == "math"
+
+    def test_record_and_get_stats(self):
+        """Outcome recording produces correct stats."""
+        from aiciv_mind.model_router import ModelRouter
+        router = ModelRouter()
+        router.record_outcome("Fix code bug", "qwen2.5-coder", True, 500)
+        router.record_outcome("Fix another bug", "qwen2.5-coder", True, 300)
+        router.record_outcome("Fix broken test", "qwen2.5-coder", False, 800)
+        stats = router.get_stats()
+        key = "qwen2.5-coder:code"
+        assert key in stats
+        assert stats[key]["total"] == 3
+        assert stats[key]["success"] == 2
+
+    def test_stats_persist_to_file(self, tmp_path):
+        """Stats persist to disk and survive reload."""
+        import json
+        from aiciv_mind.model_router import ModelRouter
+        stats_file = str(tmp_path / "stats.json")
+        router = ModelRouter(stats_path=stats_file)
+        router.record_outcome("Test task", "minimax-m27", True, 100)
+        router.record_outcome("Another task", "kimi-k2", False, 200)
+
+        # File should exist with data
+        data = json.loads((tmp_path / "stats.json").read_text())
+        assert len(data) == 2
+
+        # New router should load stats
+        router2 = ModelRouter(stats_path=stats_file)
+        assert len(router2._outcomes) == 2
+
+
+# ---------------------------------------------------------------------------
+# Skill discovery — progressive disclosure, path matching, frontmatter
+# ---------------------------------------------------------------------------
+
+
+class TestSkillDiscovery:
+    """Battle tests for progressive skill disclosure."""
+
+    def test_basic_suggestion(self):
+        """Registered skill is suggested when path matches."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**", "**/hub_tools.py"])
+        suggestions = disc.suggest("/src/hub/routers/feeds.py")
+        assert len(suggestions) == 1
+        assert suggestions[0].skill_id == "hub-engagement"
+
+    def test_no_duplicate_suggestions(self):
+        """Same skill is only suggested once per session."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**"])
+        disc.suggest("/src/hub/routers/feeds.py")
+        # Second access to hub path should not re-suggest
+        suggestions = disc.suggest("/src/hub/routers/threads.py")
+        assert len(suggestions) == 0
+
+    def test_reset_session_allows_re_suggestion(self):
+        """After session reset, skills can be suggested again."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**"])
+        disc.suggest("/src/hub/routers/feeds.py")
+        disc.reset_session()
+        suggestions = disc.suggest("/src/hub/routers/feeds.py")
+        assert len(suggestions) == 1
+
+    def test_glob_star_pattern(self):
+        """Single * pattern matches within path component."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("python-files", ["*.py"])
+        suggestions = disc.suggest("/src/main.py")
+        assert len(suggestions) == 1
+
+    def test_double_star_recursive_pattern(self):
+        """** pattern matches across directories."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("deep-tools", ["**/tools/*.py"])
+        suggestions = disc.suggest("/src/aiciv_mind/tools/bash.py")
+        assert len(suggestions) == 1
+
+    def test_no_match_returns_empty(self):
+        """Non-matching path returns no suggestions."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("hub-engagement", ["hub/**"])
+        suggestions = disc.suggest("/src/memory.py")
+        assert len(suggestions) == 0
+
+    def test_drain_pending_clears_buffer(self):
+        """drain_pending returns and clears accumulated suggestions."""
+        from aiciv_mind.skill_discovery import SkillDiscovery
+        disc = SkillDiscovery()
+        disc.register("skill-a", ["*.py"])
+        disc.register("skill-b", ["*.md"])
+        disc.suggest("/test.py")
+        disc.suggest("/readme.md")
+        pending = disc.drain_pending()
+        assert len(pending) == 2
+        assert disc.drain_pending() == []
+
+    def test_extract_trigger_paths_from_frontmatter(self):
+        """Frontmatter trigger_paths extraction works correctly."""
+        from aiciv_mind.skill_discovery import _extract_trigger_paths
+        content = """\
+---
+skill_id: hub-engagement
+trigger_paths:
+  - "hub/**"
+  - "**/hub_tools.py"
+---
+
+# Hub Engagement
+This skill helps with hub operations.
+"""
+        paths = _extract_trigger_paths(content)
+        assert paths == ["hub/**", "**/hub_tools.py"]
+
+    def test_extract_trigger_paths_no_frontmatter(self):
+        """No frontmatter returns None."""
+        from aiciv_mind.skill_discovery import _extract_trigger_paths
+        assert _extract_trigger_paths("# Just a title\nSome content.") is None
+
+    def test_extract_trigger_paths_no_trigger_key(self):
+        """Frontmatter without trigger_paths returns None."""
+        from aiciv_mind.skill_discovery import _extract_trigger_paths
+        content = """\
+---
+skill_id: some-skill
+---
+Content here.
+"""
+        assert _extract_trigger_paths(content) is None
+
+    def test_format_suggestions(self):
+        """format_suggestions produces readable output."""
+        from aiciv_mind.skill_discovery import SkillDiscovery, SkillSuggestion
+        disc = SkillDiscovery()
+        suggestions = [
+            SkillSuggestion(skill_id="hub-engagement", matched_pattern="hub/**", triggered_by="/src/hub/x.py"),
+        ]
+        formatted = disc.format_suggestions(suggestions)
+        assert "hub-engagement" in formatted
+        assert "Skill Discovery" in formatted
+
+
+# ---------------------------------------------------------------------------
+# Fork context — isolated skill execution
+# ---------------------------------------------------------------------------
+
+
+class TestForkContext:
+    """Battle tests for fork context isolation."""
+
+    def test_snapshot_and_restore(self):
+        """Snapshot preserves messages, restore brings them back."""
+        from aiciv_mind.fork_context import ForkContext
+        original = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        fork = ForkContext(
+            messages=original,
+            system_prompt="You are helpful.",
+            skill_content="# Test Skill",
+            skill_id="test",
+        )
+        fork.snapshot()
+        assert fork.is_forked
+
+        # Enter fork — get clean context
+        clean_msgs, fork_system = fork.enter_fork()
+        assert len(clean_msgs) == 0
+        assert "test" in fork_system
+
+        # Exit fork — restore with summary
+        fork_result = "Skill completed successfully"
+        fork_messages = [{"role": "user", "content": "Do the thing"}]
+        restored, restored_system = fork.exit_fork(fork_result, fork_messages)
+
+        # Original messages restored + summary appended
+        assert len(restored) == 3  # 2 original + 1 summary
+        assert restored[0]["content"] == "Hello"
+        assert restored[1]["content"] == "Hi there"
+        assert "test" in restored[2]["content"]
+        assert restored_system == "You are helpful."
+        assert not fork.is_forked
+
+    def test_enter_fork_auto_snapshots(self):
+        """enter_fork auto-snapshots if not already done."""
+        from aiciv_mind.fork_context import ForkContext
+        fork = ForkContext(
+            messages=[{"role": "user", "content": "msg"}],
+            system_prompt="sys",
+            skill_content="skill",
+        )
+        assert not fork.is_forked
+        fork.enter_fork()
+        assert fork.is_forked
+
+    def test_exit_without_enter_returns_original(self):
+        """exit_fork without entering fork returns original unchanged."""
+        from aiciv_mind.fork_context import ForkContext
+        original = [{"role": "user", "content": "msg"}]
+        fork = ForkContext(
+            messages=original,
+            system_prompt="sys",
+            skill_content="skill",
+        )
+        restored, sys = fork.exit_fork("result", [])
+        assert restored == original
+        assert sys == "sys"
+
+    def test_deep_copy_isolation(self):
+        """Snapshot is a deep copy — modifying fork doesn't affect original."""
+        from aiciv_mind.fork_context import ForkContext
+        original = [{"role": "user", "content": "original msg"}]
+        fork = ForkContext(
+            messages=original,
+            system_prompt="sys",
+            skill_content="skill",
+        )
+        fork.snapshot()
+
+        # Mutate original
+        original.append({"role": "assistant", "content": "added after snapshot"})
+
+        # Restore should have the snapshot, not the mutated version
+        restored, _ = fork.exit_fork("done", [])
+        assert len(restored) == 2  # snapshot (1) + summary (1)
+        assert restored[0]["content"] == "original msg"
+
+    def test_fork_result_dataclass(self):
+        """ForkResult correctly stores all fields."""
+        from aiciv_mind.fork_context import ForkResult
+        r = ForkResult(
+            output="Done",
+            messages_consumed=5,
+            elapsed_ms=1234.5,
+            skill_id="test-skill",
+            success=True,
+        )
+        assert r.output == "Done"
+        assert r.messages_consumed == 5
+        assert r.skill_id == "test-skill"
+        assert r.success
