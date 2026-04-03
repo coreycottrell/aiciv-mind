@@ -184,6 +184,7 @@ _V011_COLUMNS: list[tuple[str, str]] = [
     ("depth_score",      "REAL NOT NULL DEFAULT 1.0"),
     ("is_pinned",        "INTEGER NOT NULL DEFAULT 0"),
     ("human_endorsed",   "INTEGER NOT NULL DEFAULT 0"),
+    ("citation_count",   "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -665,11 +666,12 @@ class MemoryStore:
         Recompute and store depth_score for a single memory.
 
         Formula:
-          depth_score = (min(access_count, 20) / 20 * 0.3) +
-                        (recency_score * 0.25) +   # 1.0=today, 0.5=this month, 0.1=older
+          depth_score = (min(access_count, 20) / 20 * 0.25) +
+                        (recency_score * 0.2) +    # 1.0=today, 0.5=this month, 0.1=older
                         (is_pinned * 0.2) +
-                        (human_endorsed * 0.15) +
-                        (confidence_score * 0.1)   # HIGH=1.0, MEDIUM=0.6, LOW=0.3
+                        (human_endorsed * 0.1) +
+                        (confidence_score * 0.1) +  # HIGH=1.0, MEDIUM=0.6, LOW=0.3
+                        (min(citation_count, 10) / 10 * 0.15)  # P1: graph citations boost depth
         """
         row = self._conn.execute(
             "SELECT * FROM memories WHERE id = ?", (memory_id,)
@@ -679,7 +681,6 @@ class MemoryStore:
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT")
         last = row["last_accessed_at"] or ""
-        recency = 1.0 if last.startswith(today) else max(0.0, 1.0 - len(last) * 0)
 
         # Simple recency: 1.0 today, 0.5 this week, 0.1 older
         if last.startswith(today[:10]):
@@ -694,12 +695,15 @@ class MemoryStore:
         conf_map = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
         conf = conf_map.get(str(row["confidence"]).upper(), 0.6)
 
+        citations = row["citation_count"] if row["citation_count"] is not None else 0
+
         score = (
-            min(row["access_count"], 20) / 20 * 0.3
-            + recency * 0.25
+            min(row["access_count"], 20) / 20 * 0.25
+            + recency * 0.2
             + int(row["is_pinned"]) * 0.2
-            + int(row["human_endorsed"]) * 0.15
+            + int(row["human_endorsed"]) * 0.1
             + conf * 0.1
+            + min(citations, 10) / 10 * 0.15
         )
 
         self._conn.execute(
@@ -1052,13 +1056,19 @@ class MemoryStore:
         if link_type not in valid_types:
             raise ValueError(f"link_type must be one of {valid_types}, got: {link_type}")
         lid = str(uuid.uuid4())
-        self._conn.execute(
+        cursor = self._conn.execute(
             """
             INSERT OR IGNORE INTO memory_links (id, source_id, target_id, link_type, reason)
             VALUES (?, ?, ?, ?, ?)
             """,
             (lid, source_id, target_id, link_type, reason),
         )
+        # Increment citation_count on target when a new link is actually inserted
+        if cursor.rowcount > 0:
+            self._conn.execute(
+                "UPDATE memories SET citation_count = citation_count + 1 WHERE id = ?",
+                (target_id,),
+            )
         self._conn.commit()
         return lid
 

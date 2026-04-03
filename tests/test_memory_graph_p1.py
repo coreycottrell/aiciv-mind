@@ -323,3 +323,79 @@ class TestManualLinking:
         assert len(superseded) == 1
         assert superseded[0]["id"] == m1.id
         assert superseded[0]["superseded_by"] == m2.id
+
+    def test_link_increments_citation_count(self, store_no_auto):
+        """P1: linking a memory increments citation_count on the target."""
+        m1 = _mem(title="Source", content="References target")
+        m2 = _mem(title="Target", content="Referenced by source")
+        store_no_auto.store(m1)
+        store_no_auto.store(m2)
+
+        # Before linking
+        row = store_no_auto._conn.execute(
+            "SELECT citation_count FROM memories WHERE id = ?", (m2.id,)
+        ).fetchone()
+        assert row["citation_count"] == 0
+
+        store_no_auto.link_memories(m1.id, m2.id, "references")
+
+        row = store_no_auto._conn.execute(
+            "SELECT citation_count FROM memories WHERE id = ?", (m2.id,)
+        ).fetchone()
+        assert row["citation_count"] == 1
+
+    def test_multiple_links_increment_citation_count(self, store_no_auto):
+        """Each unique link increments citation_count once."""
+        m1 = _mem(title="A", content="A")
+        m2 = _mem(title="B", content="B")
+        m3 = _mem(title="Target", content="Target")
+        store_no_auto.store(m1)
+        store_no_auto.store(m2)
+        store_no_auto.store(m3)
+
+        store_no_auto.link_memories(m1.id, m3.id, "references")
+        store_no_auto.link_memories(m2.id, m3.id, "compounds")
+
+        row = store_no_auto._conn.execute(
+            "SELECT citation_count FROM memories WHERE id = ?", (m3.id,)
+        ).fetchone()
+        assert row["citation_count"] == 2
+
+    def test_duplicate_link_does_not_increment_citation_count(self, store_no_auto):
+        """Duplicate links (INSERT OR IGNORE) do not double-count citations."""
+        m1 = _mem(title="A", content="A")
+        m2 = _mem(title="B", content="B")
+        store_no_auto.store(m1)
+        store_no_auto.store(m2)
+
+        store_no_auto.link_memories(m1.id, m2.id, "references")
+        store_no_auto.link_memories(m1.id, m2.id, "references")  # duplicate
+
+        row = store_no_auto._conn.execute(
+            "SELECT citation_count FROM memories WHERE id = ?", (m2.id,)
+        ).fetchone()
+        assert row["citation_count"] == 1
+
+    def test_citation_count_boosts_depth_score(self, store_no_auto):
+        """Memories with higher citation_count get higher depth_score."""
+        m1 = _mem(title="Highly cited", content="Important pattern")
+        m2 = _mem(title="Uncited", content="Isolated fact")
+        m3 = _mem(title="Citer A", content="Cites m1")
+        m4 = _mem(title="Citer B", content="Also cites m1")
+        for m in (m1, m2, m3, m4):
+            store_no_auto.store(m)
+
+        store_no_auto.link_memories(m3.id, m1.id, "references")
+        store_no_auto.link_memories(m4.id, m1.id, "compounds")
+
+        store_no_auto.update_depth_score(m1.id)
+        store_no_auto.update_depth_score(m2.id)
+
+        cited_score = store_no_auto._conn.execute(
+            "SELECT depth_score FROM memories WHERE id = ?", (m1.id,)
+        ).fetchone()["depth_score"]
+        uncited_score = store_no_auto._conn.execute(
+            "SELECT depth_score FROM memories WHERE id = ?", (m2.id,)
+        ).fetchone()["depth_score"]
+
+        assert cited_score > uncited_score
