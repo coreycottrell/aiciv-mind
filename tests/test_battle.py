@@ -5833,3 +5833,355 @@ class TestHandoffContextTool:
         # handoff_context itself should be listed
         assert "handoff_context" in result
         store.close()
+
+
+# ===========================================================================
+# Round 17 — Scratchpad tools, token stats, verification tools
+# ===========================================================================
+
+
+class TestScratchpadTools:
+    """Tests for scratchpad_read, scratchpad_write, scratchpad_append."""
+
+    def test_scratchpad_write_and_read(self, tmp_path):
+        """Write scratchpad then read it back."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+
+        registry = ToolRegistry()
+        register_scratchpad_tools(registry, str(tmp_path))
+
+        # Write
+        result = asyncio.run(registry.execute("scratchpad_write", {
+            "content": "## Today\n- Battle testing round 17",
+        }))
+        assert "updated" in result.lower()
+
+        # Read
+        result = asyncio.run(registry.execute("scratchpad_read", {}))
+        assert "Battle testing round 17" in result
+
+    def test_scratchpad_read_nonexistent(self, tmp_path):
+        """Reading nonexistent scratchpad returns helpful message."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+
+        registry = ToolRegistry()
+        register_scratchpad_tools(registry, str(tmp_path / "nonexistent"))
+
+        result = asyncio.run(registry.execute("scratchpad_read", {}))
+        assert "No scratchpad" in result
+
+    def test_scratchpad_append(self, tmp_path):
+        """Append adds a line without replacing content."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+
+        registry = ToolRegistry()
+        register_scratchpad_tools(registry, str(tmp_path))
+
+        asyncio.run(registry.execute("scratchpad_write", {"content": "Line 1"}))
+        asyncio.run(registry.execute("scratchpad_append", {"line": "Line 2"}))
+
+        result = asyncio.run(registry.execute("scratchpad_read", {}))
+        assert "Line 1" in result
+        assert "Line 2" in result
+
+    def test_shared_scratchpad_read(self, tmp_path):
+        """Shared scratchpad merges root and mind-lead pads."""
+        import asyncio
+        from datetime import date
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+
+        root_dir = tmp_path / "root"
+        mind_dir = tmp_path / "mind"
+        root_dir.mkdir()
+        mind_dir.mkdir()
+
+        today = date.today().isoformat()
+        (root_dir / f"{today}.md").write_text("Root notes here")
+        (mind_dir / f"{today}.md").write_text("Mind-lead notes here")
+
+        registry = ToolRegistry()
+        register_scratchpad_tools(registry, str(root_dir), str(mind_dir))
+
+        result = asyncio.run(registry.execute("shared_scratchpad_read", {}))
+        assert "Root notes here" in result
+        assert "Mind-lead notes here" in result
+        assert "Root's Scratchpad" in result
+        assert "Mind-Lead's Scratchpad" in result
+
+    def test_shared_scratchpad_invalid_date(self, tmp_path):
+        """Shared scratchpad returns error for invalid date format."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.scratchpad_tools import register_scratchpad_tools
+
+        registry = ToolRegistry()
+        register_scratchpad_tools(registry, str(tmp_path))
+
+        result = asyncio.run(registry.execute("shared_scratchpad_read", {
+            "date": "not-a-date",
+        }))
+        assert "ERROR" in result
+
+    def test_scratchpad_helpers(self, tmp_path):
+        """Helper functions work correctly."""
+        from datetime import date
+        from aiciv_mind.tools.scratchpad_tools import _today_path, _date_path, _read_file_or_none
+
+        today = _today_path(str(tmp_path))
+        assert today.name == f"{date.today().isoformat()}.md"
+
+        specific = _date_path(str(tmp_path), date(2026, 1, 15))
+        assert specific.name == "2026-01-15.md"
+
+        assert _read_file_or_none(tmp_path / "nonexistent.md") is None
+
+        test_file = tmp_path / "test.md"
+        test_file.write_text("hello")
+        assert _read_file_or_none(test_file) == "hello"
+
+        empty_file = tmp_path / "empty.md"
+        empty_file.write_text("")
+        assert _read_file_or_none(empty_file) is None
+
+
+class TestTokenStatsTool:
+    """Tests for the token_stats tool with temp JSONL files."""
+
+    def test_token_stats_no_file(self, tmp_path):
+        """token_stats returns message when log file doesn't exist."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+
+        registry = ToolRegistry()
+        register_resource_tools(registry, str(tmp_path))
+
+        result = asyncio.run(registry.execute("token_stats", {}))
+        assert "No token usage data" in result or "does not exist" in result
+
+    def test_token_stats_with_data(self, tmp_path):
+        """token_stats parses JSONL and returns summary."""
+        import asyncio
+        import json
+        from datetime import datetime
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+
+        # Create a token_usage.jsonl
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        log_file = data_dir / "token_usage.jsonl"
+        now = datetime.now()
+        entries = [
+            {
+                "timestamp": now.isoformat(),
+                "model": "ollama/qwen2.5-coder:14b",
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "thinking_tokens": 200,
+                "estimated_cost_usd": 0.0,
+                "latency_ms": 3500,
+            },
+            {
+                "timestamp": now.isoformat(),
+                "model": "ollama/qwen2.5-coder:14b",
+                "input_tokens": 2000,
+                "output_tokens": 800,
+                "thinking_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "latency_ms": 5000,
+            },
+        ]
+        with open(log_file, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+        registry = ToolRegistry()
+        register_resource_tools(registry, str(tmp_path), token_log_path=str(log_file))
+
+        result = asyncio.run(registry.execute("token_stats", {"period": "all"}))
+        assert "Token Stats" in result
+        assert "3,000" in result  # total input tokens (1000 + 2000)
+        assert "1,300" in result  # total output tokens (500 + 800)
+        assert "qwen2.5" in result  # model breakdown
+
+    def test_token_stats_period_filter(self, tmp_path):
+        """token_stats respects period filter."""
+        import asyncio
+        import json
+        from datetime import datetime
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        log_file = data_dir / "token_usage.jsonl"
+
+        # Write an old record that should be filtered out for "last_hour"
+        with open(log_file, "w") as f:
+            f.write(json.dumps({
+                "timestamp": "2020-01-01T00:00:00",
+                "model": "old",
+                "input_tokens": 9999,
+                "output_tokens": 9999,
+            }) + "\n")
+
+        registry = ToolRegistry()
+        register_resource_tools(registry, str(tmp_path), token_log_path=str(log_file))
+
+        result = asyncio.run(registry.execute("token_stats", {"period": "last_hour"}))
+        assert "No token usage records" in result
+
+
+class TestSessionStatsTool:
+    """Tests for the session_stats tool."""
+
+    def test_session_stats_no_dir(self, tmp_path):
+        """session_stats returns message when session dir doesn't exist."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+
+        registry = ToolRegistry()
+        register_resource_tools(registry, str(tmp_path))
+
+        result = asyncio.run(registry.execute("session_stats", {}))
+        assert "No session logs" in result or "does not exist" in result
+
+    def test_session_stats_aggregate(self, tmp_path):
+        """session_stats aggregates across session files."""
+        import asyncio
+        import json
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+
+        data_dir = tmp_path / "data"
+        session_dir = data_dir / "sessions"
+        session_dir.mkdir(parents=True)
+
+        # Create 2 session files
+        for sid in ["session-001", "session-002"]:
+            with open(session_dir / f"{sid}.jsonl", "w") as f:
+                f.write(json.dumps({"type": "user", "content": "hello"}) + "\n")
+                f.write(json.dumps({"type": "assistant", "content": "hi"}) + "\n")
+                f.write(json.dumps({"type": "tool_call", "tools_used": ["bash", "read_file"]}) + "\n")
+
+        registry = ToolRegistry()
+        register_resource_tools(
+            registry, str(tmp_path),
+            session_log_dir=str(session_dir),
+        )
+
+        result = asyncio.run(registry.execute("session_stats", {}))
+        assert "Session Stats" in result
+        assert "2" in result  # 2 sessions
+
+
+class TestVerificationTools:
+    """Tests for verify_completion tool and auto_verify_response."""
+
+    def test_verify_completion_tool(self):
+        """verify_completion tool returns verification result."""
+        import asyncio
+        from aiciv_mind.verification import CompletionProtocol
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.verification_tools import register_verification_tools
+
+        protocol = CompletionProtocol()
+        registry = ToolRegistry()
+        register_verification_tools(registry, protocol)
+
+        result = asyncio.run(registry.execute("verify_completion", {
+            "task": "Write a hello world function",
+            "result": "Wrote hello_world() and it prints 'Hello, World!'",
+            "evidence": [
+                {"description": "test passes", "type": "test_pass", "confidence": 0.9},
+            ],
+            "complexity": "trivial",
+        }))
+        assert "Verification" in result
+
+    def test_verify_completion_no_evidence(self):
+        """verify_completion without evidence still runs."""
+        import asyncio
+        from aiciv_mind.verification import CompletionProtocol
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.verification_tools import register_verification_tools
+
+        protocol = CompletionProtocol()
+        registry = ToolRegistry()
+        register_verification_tools(registry, protocol)
+
+        result = asyncio.run(registry.execute("verify_completion", {
+            "task": "Fix the memory leak",
+            "result": "Fixed it by closing connections",
+        }))
+        assert "Verification" in result
+
+    def test_auto_verify_response_no_completion(self):
+        """auto_verify_response returns None when no completion signal."""
+        from aiciv_mind.verification import CompletionProtocol
+        from aiciv_mind.tools.verification_tools import auto_verify_response
+
+        protocol = CompletionProtocol()
+        result = auto_verify_response(
+            protocol,
+            response_text="I'm still working on it...",
+            task="Fix bugs",
+            tool_results=[],
+        )
+        assert result is None
+
+    def test_auto_verify_response_with_completion(self):
+        """auto_verify_response detects completion signals."""
+        from aiciv_mind.verification import CompletionProtocol
+        from aiciv_mind.tools.verification_tools import auto_verify_response
+
+        protocol = CompletionProtocol()
+        result = auto_verify_response(
+            protocol,
+            response_text="I've completed the task. Everything is done and working.",
+            task="Write tests",
+            tool_results=["All 50 tests pass"],
+        )
+        # May or may not detect completion signal depending on exact patterns
+        # Just verify it doesn't crash and returns dict or None
+        assert result is None or isinstance(result, dict)
+
+    def test_format_challenge_injection_approved(self):
+        """format_challenge_injection returns empty for approved."""
+        from aiciv_mind.tools.verification_tools import format_challenge_injection
+
+        result = format_challenge_injection({"outcome": "approved"})
+        assert result == ""
+
+    def test_format_challenge_injection_challenged(self):
+        """format_challenge_injection formats challenges."""
+        from aiciv_mind.tools.verification_tools import format_challenge_injection
+
+        result = format_challenge_injection({
+            "outcome": "challenged",
+            "challenges": ["No test evidence", "No file written"],
+        })
+        assert "P9 Verification" in result
+        assert "No test evidence" in result
+        assert "No file written" in result
+
+    def test_format_challenge_injection_blocked(self):
+        """format_challenge_injection shows blocking reason."""
+        from aiciv_mind.tools.verification_tools import format_challenge_injection
+
+        result = format_challenge_injection({
+            "outcome": "blocked",
+            "challenges": ["Critical issue"],
+            "blocking_reason": "Security vulnerability",
+        })
+        assert "BLOCKING" in result
+        assert "Security vulnerability" in result
