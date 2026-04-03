@@ -52,11 +52,14 @@ class Mind:
         session_store: SessionStore | None = None,
         context_manager: ContextManager | None = None,
         boot_context_str: str = "",
+        model_router=None,  # Optional ModelRouter for dynamic model selection
     ) -> None:
         self.manifest = manifest
         self.memory = memory
         self.bus = bus
         self._tools = tools or ToolRegistry.default(memory_store=memory)
+        self._model_router = model_router
+        self._current_task: str = ""  # Track for model router outcome recording
 
         # Attach hook governance if configured
         if manifest.hooks.enabled:
@@ -159,6 +162,8 @@ class Mind:
 
         if fresh_context:
             self._messages = []
+
+        self._current_task = task  # for model router classification
 
         # Wrap entire task execution in mind_context so that any code
         # in the call stack can call current_mind_id() to identify which
@@ -695,8 +700,16 @@ class Mind:
 
     async def _call_model(self, system_prompt: str, tools_list: list[dict]) -> Any:
         """Single API call with current message history."""
+        # Model selection: use router if available, else manifest default
+        model_id = self.manifest.model.preferred
+        if self._model_router is not None and self._current_task:
+            try:
+                model_id = self._model_router.select(self._current_task)
+            except Exception as e:
+                logger.debug("ModelRouter.select failed, using default: %s", e)
+
         kwargs: dict[str, Any] = dict(
-            model=self.manifest.model.preferred,
+            model=model_id,
             max_tokens=self.manifest.model.max_tokens,
             temperature=self.manifest.model.temperature,
             system=system_prompt,

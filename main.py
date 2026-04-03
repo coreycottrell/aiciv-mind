@@ -191,6 +191,19 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
             boot.session_count,
         )
 
+    # Model router (P2-5: dynamic model selection per task)
+    model_router = None
+    try:
+        from aiciv_mind.model_router import ModelRouter
+        stats_path = str(Path(__file__).parent / "data" / "model_router_stats.json")
+        model_router = ModelRouter(
+            default_model=manifest.model.preferred,
+            stats_path=stats_path,
+        )
+        logging.getLogger("aiciv_mind.main").info("ModelRouter initialized (default: %s)", manifest.model.preferred)
+    except Exception as e:
+        logging.getLogger("aiciv_mind.main").info("ModelRouter not available: %s", e)
+
     # Create mind
     mind = Mind(
         manifest=manifest,
@@ -200,6 +213,7 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
         session_store=session_store,
         context_manager=ctx_mgr,
         boot_context_str=boot_str,
+        model_router=model_router,
     )
     _mind_ref[0] = mind  # now the message counter lambda works
 
