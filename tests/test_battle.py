@@ -7532,3 +7532,635 @@ class TestContextVars:
             reset_mind_id(token)
 
         asyncio.run(_test())
+
+
+# ===========================================================================
+# Round 20 — Verification deep, MindRegistry, IPC messages, SessionStore,
+#             MindManifest, evidence extraction, completion detection
+# ===========================================================================
+
+
+class TestVerificationDeep:
+    """Deep battle tests for the verification module (not just the tools)."""
+
+    def test_evidence_is_strong(self):
+        """Strong evidence: test_pass or api_response with high confidence."""
+        from aiciv_mind.verification import Evidence
+
+        strong = Evidence("Tests passed", "test_pass", confidence=0.8)
+        weak = Evidence("File created", "file_written", confidence=0.5)
+        assert strong.is_strong()
+        assert not weak.is_strong()
+
+    def test_extract_evidence_from_tool_results(self):
+        """extract_evidence finds evidence patterns in tool output."""
+        from aiciv_mind.verification import extract_evidence
+
+        results = ["All tests passed — 42 passed, 0 failed", "Wrote to /tmp/out.txt"]
+        evidence = extract_evidence(results)
+        types = [e.evidence_type for e in evidence]
+        assert "test_pass" in types
+        assert "file_written" in types
+
+    def test_extract_evidence_empty(self):
+        """No evidence extracted from unrelated output."""
+        from aiciv_mind.verification import extract_evidence
+
+        evidence = extract_evidence(["hello world, nothing happened"])
+        assert len(evidence) == 0
+
+    def test_detect_completion_signal(self):
+        """Completion signals are detected in text."""
+        from aiciv_mind.verification import detect_completion_signal
+
+        assert detect_completion_signal("The task is complete.") is True
+        assert detect_completion_signal("I'm still working on it.") is False
+        assert detect_completion_signal("All changes committed and pushed.") is True
+
+    def test_completion_protocol_disabled(self):
+        """Disabled protocol auto-approves."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+
+        protocol = CompletionProtocol(enabled=False)
+        result = protocol.verify("test", "done")
+        assert result.outcome == VerificationOutcome.APPROVED
+        assert result.scrutiny_level == "none"
+
+    def test_light_verification_approves_good_result(self):
+        """Light verification approves clean results."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome, Evidence
+
+        protocol = CompletionProtocol()
+        result = protocol.verify(
+            "simple task",
+            "Successfully created the file with all required content.",
+            complexity="trivial",
+        )
+        assert result.outcome == VerificationOutcome.APPROVED
+
+    def test_light_verification_catches_errors(self):
+        """Light verification challenges when result contains error signals."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+
+        protocol = CompletionProtocol()
+        result = protocol.verify(
+            "task",
+            "The operation failed with an exception in the module.",
+            complexity="trivial",
+        )
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("error" in c.lower() or "failed" in c.lower() for c in result.challenges)
+
+    def test_standard_verification_no_evidence(self):
+        """Standard verification challenges when no evidence provided."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+
+        protocol = CompletionProtocol()
+        result = protocol.verify(
+            "medium task",
+            "Everything is done and working perfectly now.",
+            evidence=[],
+            complexity="medium",
+        )
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("no concrete evidence" in c.lower() for c in result.challenges)
+
+    def test_standard_verification_with_strong_evidence(self):
+        """Standard verification with strong evidence uses light scrutiny."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome, Evidence
+
+        protocol = CompletionProtocol()
+        result = protocol.verify(
+            "fix the bug",
+            "Fixed. All 42 tests pass now.",
+            evidence=[Evidence("Tests pass", "test_pass", confidence=0.9)],
+            complexity="simple",
+        )
+        assert result.outcome == VerificationOutcome.APPROVED
+        assert result.scrutiny_level == "light"
+
+    def test_deep_verification_always_challenges(self):
+        """Deep verification always raises challenges (that's its job)."""
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome, Evidence
+
+        protocol = CompletionProtocol()
+        result = protocol.verify(
+            "complex architecture redesign",
+            "Redesigned the entire auth layer. Deployed.",
+            evidence=[Evidence("Tests pass", "test_pass", confidence=0.8)],
+            complexity="complex",
+        )
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert len(result.challenges) > 0
+        assert result.scrutiny_level == "deep"
+
+    def test_session_stats(self):
+        """CompletionProtocol tracks session-level stats."""
+        from aiciv_mind.verification import CompletionProtocol
+
+        protocol = CompletionProtocol()
+        protocol.verify("t1", "done " * 5, complexity="trivial")
+        protocol.verify("t2", "done " * 5, complexity="trivial")
+
+        stats = protocol.get_session_stats()
+        assert stats["total"] == 2
+
+    def test_build_verification_prompt_light(self):
+        """Light prompt is short."""
+        from aiciv_mind.verification import CompletionProtocol
+
+        protocol = CompletionProtocol()
+        prompt = protocol.build_verification_prompt("task", complexity="trivial")
+        assert "Light" in prompt
+        assert len(prompt) < 500
+
+    def test_build_verification_prompt_deep(self):
+        """Deep prompt includes all Red Team questions."""
+        from aiciv_mind.verification import CompletionProtocol
+
+        protocol = CompletionProtocol()
+        prompt = protocol.build_verification_prompt("task", complexity="complex")
+        assert "Red Team" in prompt
+        assert "Do we REALLY know this?" in prompt
+        assert "What could go wrong?" in prompt
+
+    def test_build_verification_prompt_disabled(self):
+        """Disabled protocol returns empty prompt."""
+        from aiciv_mind.verification import CompletionProtocol
+
+        protocol = CompletionProtocol(enabled=False)
+        assert protocol.build_verification_prompt("task") == ""
+
+
+class TestMindRegistry:
+    """Battle-test MindRegistry: register, query, heartbeat, unresponsive."""
+
+    def test_register_and_get(self):
+        """Register and retrieve a mind handle."""
+        from aiciv_mind.registry import MindRegistry, MindHandle, MindState
+
+        reg = MindRegistry()
+        handle = MindHandle(
+            mind_id="research-lead",
+            manifest_path="/path/to/manifest.yaml",
+            window_name="research",
+            pane_id="%5",
+            pid=12345,
+            zmq_identity=b"research-lead",
+        )
+        reg.register(handle)
+
+        assert reg.get("research-lead") is handle
+        assert reg.get("nonexistent") is None
+        assert len(reg) == 1
+
+    def test_all_running_and_alive(self):
+        """all_running and all_alive filter by state."""
+        from aiciv_mind.registry import MindRegistry, MindHandle, MindState
+
+        reg = MindRegistry()
+        h1 = MindHandle("a", "/a", "a", "%1", 1, b"a", state=MindState.RUNNING)
+        h2 = MindHandle("b", "/b", "b", "%2", 2, b"b", state=MindState.STARTING)
+        h3 = MindHandle("c", "/c", "c", "%3", 3, b"c", state=MindState.STOPPED)
+        reg.register(h1)
+        reg.register(h2)
+        reg.register(h3)
+
+        assert len(reg.all_running()) == 1
+        assert len(reg.all_alive()) == 2  # running + starting
+        assert len(reg.all()) == 3
+
+    def test_mark_state(self):
+        """mark_state updates a mind's state."""
+        from aiciv_mind.registry import MindRegistry, MindHandle, MindState
+
+        reg = MindRegistry()
+        reg.register(MindHandle("x", "/x", "x", "%1", 1, b"x"))
+        reg.mark_state("x", MindState.RUNNING)
+        assert reg.get("x").state == MindState.RUNNING
+
+    def test_record_heartbeat(self):
+        """record_heartbeat updates timestamp."""
+        from aiciv_mind.registry import MindRegistry, MindHandle, MindState
+        import time
+
+        reg = MindRegistry()
+        h = MindHandle("y", "/y", "y", "%1", 1, b"y", state=MindState.RUNNING)
+        reg.register(h)
+        assert h.last_heartbeat == 0.0
+
+        reg.record_heartbeat("y")
+        assert h.last_heartbeat > 0
+
+    def test_unresponsive_detection(self):
+        """unresponsive detects minds that haven't heartbeated within timeout."""
+        from aiciv_mind.registry import MindRegistry, MindHandle, MindState
+        import time
+
+        reg = MindRegistry()
+        h = MindHandle("z", "/z", "z", "%1", 1, b"z", state=MindState.RUNNING)
+        h.started_at = time.monotonic() - 100  # Started 100s ago
+        h.last_heartbeat = time.monotonic() - 60  # Last heartbeat 60s ago
+        reg.register(h)
+
+        unresponsive = reg.unresponsive(timeout_seconds=30)
+        assert len(unresponsive) == 1
+        assert unresponsive[0].mind_id == "z"
+
+    def test_remove(self):
+        """remove pops the handle from the registry."""
+        from aiciv_mind.registry import MindRegistry, MindHandle
+
+        reg = MindRegistry()
+        reg.register(MindHandle("r", "/r", "r", "%1", 1, b"r"))
+        removed = reg.remove("r")
+        assert removed is not None
+        assert removed.mind_id == "r"
+        assert len(reg) == 0
+
+    def test_iteration(self):
+        """Registry is iterable over handles."""
+        from aiciv_mind.registry import MindRegistry, MindHandle
+
+        reg = MindRegistry()
+        reg.register(MindHandle("a", "/a", "a", "%1", 1, b"a"))
+        reg.register(MindHandle("b", "/b", "b", "%2", 2, b"b"))
+
+        ids = [h.mind_id for h in reg]
+        assert "a" in ids
+        assert "b" in ids
+
+
+class TestIPCMessages:
+    """Battle-test MindMessage serialization and factory methods."""
+
+    def test_serialize_roundtrip(self):
+        """MindMessage survives bytes serialization roundtrip."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage(
+            type=MsgType.TASK,
+            sender="primary",
+            recipient="research-lead",
+            payload={"task_id": "t1", "objective": "Find papers"},
+        )
+        data = msg.to_bytes()
+        restored = MindMessage.from_bytes(data)
+
+        assert restored.type == MsgType.TASK
+        assert restored.sender == "primary"
+        assert restored.recipient == "research-lead"
+        assert restored.payload["objective"] == "Find papers"
+
+    def test_task_factory(self):
+        """MindMessage.task creates a proper TASK message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.task("root", "sub1", "t1", "Do research")
+        assert msg.type == MsgType.TASK
+        assert msg.payload["task_id"] == "t1"
+        assert msg.payload["objective"] == "Do research"
+
+    def test_result_factory(self):
+        """MindMessage.result creates a proper RESULT message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.result("sub1", "root", "t1", "Found 3 papers", success=True)
+        assert msg.type == MsgType.RESULT
+        assert msg.payload["success"] is True
+        assert msg.payload["result"] == "Found 3 papers"
+
+    def test_shutdown_roundtrip(self):
+        """Shutdown messages survive serialization."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.shutdown("root", "sub1", reason="session ending")
+        restored = MindMessage.from_bytes(msg.to_bytes())
+        assert restored.type == MsgType.SHUTDOWN
+        assert restored.payload["reason"] == "session ending"
+
+    def test_heartbeat_factory(self):
+        """Heartbeat messages are minimal."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.heartbeat("root", "sub1")
+        assert msg.type == MsgType.HEARTBEAT
+        ack = MindMessage.heartbeat_ack("sub1", "root")
+        assert ack.type == MsgType.HEARTBEAT_ACK
+
+    def test_permission_request_factory(self):
+        """Permission request carries tool info."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.permission_request(
+            "sub1", "root", "bash", {"command": "rm -rf"}, reason="dangerous"
+        )
+        assert msg.type == MsgType.PERMISSION_REQUEST
+        assert msg.payload["tool_name"] == "bash"
+
+    def test_permission_response_factory(self):
+        """Permission response carries approval and optional modified input."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.permission_response(
+            "root", "sub1", "req-123", approved=False, message="Denied"
+        )
+        assert msg.type == MsgType.PERMISSION_RESPONSE
+        assert msg.payload["approved"] is False
+
+    def test_completion_event(self):
+        """MindCompletionEvent serialization and context_line."""
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+
+        event = MindCompletionEvent(
+            mind_id="research-lead",
+            task_id="t1",
+            status="success",
+            summary="Found 3 relevant papers",
+            tokens_used=1200,
+            tool_calls=5,
+            duration_ms=3000,
+        )
+        d = event.to_dict()
+        restored = MindCompletionEvent.from_dict(d)
+        assert restored.mind_id == "research-lead"
+        assert restored.summary == "Found 3 relevant papers"
+
+        line = event.context_line()
+        assert "[research-lead]" in line
+        assert "SUCCESS" in line
+        assert "1200t" in line
+
+    def test_status_factory(self):
+        """Status messages carry progress info."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.status("sub1", "root", "t1", "50% through", pct=50)
+        assert msg.type == MsgType.STATUS
+        assert msg.payload["pct"] == 50
+
+    def test_log_factory(self):
+        """Log messages carry level and message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+
+        msg = MindMessage.log("sub1", "root", "WARNING", "Memory low")
+        assert msg.type == MsgType.LOG
+        assert msg.payload["level"] == "WARNING"
+
+
+class TestSessionStore:
+    """Battle-test SessionStore: boot, record_turn, shutdown."""
+
+    def test_boot_returns_context(self, memory_store):
+        """boot() returns a BootContext with session_id."""
+        from aiciv_mind.session_store import SessionStore
+
+        store = SessionStore(memory_store, agent_id="test-agent")
+        boot = store.boot()
+
+        assert boot.session_id is not None
+        assert boot.agent_id == "test-agent"
+        assert boot.session_count >= 0
+
+    def test_boot_loads_identity(self, memory_store):
+        """boot() loads identity memories."""
+        from aiciv_mind.session_store import SessionStore
+        from aiciv_mind.memory import Memory
+
+        # Store an identity memory
+        memory_store.store(Memory(
+            agent_id="identity-test",
+            title="Who I am",
+            content="I am the primary mind.",
+            memory_type="identity",
+        ))
+
+        store = SessionStore(memory_store, agent_id="identity-test")
+        boot = store.boot()
+
+        assert len(boot.identity_memories) >= 1
+        titles = [m["title"] for m in boot.identity_memories]
+        assert "Who I am" in titles
+
+    def test_record_turn(self, memory_store):
+        """record_turn increments turn count."""
+        from aiciv_mind.session_store import SessionStore
+
+        store = SessionStore(memory_store, agent_id="turn-test")
+        store.boot()
+        store.record_turn(topic="testing")
+        store.record_turn(topic="more testing")
+
+        session = memory_store.get_session(store.session_id)
+        assert session is not None
+        assert session["turn_count"] >= 2
+
+    def test_shutdown_writes_handoff(self, memory_store):
+        """shutdown() stores a handoff memory."""
+        from aiciv_mind.session_store import SessionStore
+
+        store = SessionStore(memory_store, agent_id="shutdown-test")
+        store.boot()
+        store.record_turn()
+
+        messages = [
+            {"role": "user", "content": "Fix the bug"},
+            {"role": "assistant", "content": "I fixed the authentication bug in auth.py."},
+        ]
+        store.shutdown(messages)
+
+        # Check handoff exists
+        handoffs = memory_store.by_type(
+            agent_id="shutdown-test",
+            memory_type="handoff",
+            limit=1,
+        )
+        assert len(handoffs) >= 1
+        assert "auth" in handoffs[0]["content"].lower()
+
+    def test_extract_last_assistant_text(self):
+        """_extract_last_assistant_text finds the last assistant message."""
+        from aiciv_mind.session_store import SessionStore
+
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "First response"},
+            {"role": "user", "content": "more"},
+            {"role": "assistant", "content": "Final answer with details"},
+        ]
+        text = SessionStore._extract_last_assistant_text(messages)
+        assert text == "Final answer with details"
+
+    def test_extract_last_assistant_text_empty(self):
+        """_extract_last_assistant_text returns placeholder for empty."""
+        from aiciv_mind.session_store import SessionStore
+
+        text = SessionStore._extract_last_assistant_text([])
+        assert "no text" in text.lower()
+
+
+class TestMindManifest:
+    """Battle-test MindManifest loading and validation."""
+
+    def test_from_yaml(self, tmp_path):
+        """MindManifest loads from a YAML file."""
+        from aiciv_mind.manifest import MindManifest
+
+        manifest_file = tmp_path / "test-mind.yaml"
+        manifest_file.write_text("""
+mind_id: test-mind
+display_name: Test Mind
+role: tester
+auth:
+  civ_id: test-civ
+  keypair_path: keys/test.pem
+memory:
+  backend: sqlite_fts5
+  db_path: data/memory.db
+""")
+        # Create the keypair path so resolution works
+        (tmp_path / "keys").mkdir()
+        (tmp_path / "keys" / "test.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert manifest.mind_id == "test-mind"
+        assert manifest.display_name == "Test Mind"
+        assert manifest.role == "tester"
+
+    def test_resolved_system_prompt_inline(self, tmp_path):
+        """resolved_system_prompt returns inline prompt."""
+        from aiciv_mind.manifest import MindManifest
+
+        manifest_file = tmp_path / "inline.yaml"
+        manifest_file.write_text("""
+mind_id: inline
+display_name: Inline Mind
+role: test
+system_prompt: "You are a helpful assistant."
+auth:
+  civ_id: x
+  keypair_path: k.pem
+memory:
+  db_path: m.db
+""")
+        (tmp_path / "k.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert manifest.resolved_system_prompt() == "You are a helpful assistant."
+
+    def test_resolved_system_prompt_file(self, tmp_path):
+        """resolved_system_prompt reads from file path."""
+        from aiciv_mind.manifest import MindManifest
+
+        (tmp_path / "prompt.txt").write_text("Custom system prompt from file.")
+        manifest_file = tmp_path / "file-prompt.yaml"
+        manifest_file.write_text("""
+mind_id: file-prompt
+display_name: File Prompt Mind
+role: test
+system_prompt_path: prompt.txt
+auth:
+  civ_id: x
+  keypair_path: k.pem
+memory:
+  db_path: m.db
+""")
+        (tmp_path / "k.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert "Custom system prompt from file" in manifest.resolved_system_prompt()
+
+    def test_resolved_system_prompt_default(self, tmp_path):
+        """resolved_system_prompt returns default when none configured."""
+        from aiciv_mind.manifest import MindManifest
+
+        manifest_file = tmp_path / "default.yaml"
+        manifest_file.write_text("""
+mind_id: default
+display_name: Default Mind
+role: test
+auth:
+  civ_id: x
+  keypair_path: k.pem
+memory:
+  db_path: m.db
+""")
+        (tmp_path / "k.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert manifest.resolved_system_prompt() == "You are an AI agent."
+
+    def test_enabled_tool_names(self, tmp_path):
+        """enabled_tool_names filters disabled tools."""
+        from aiciv_mind.manifest import MindManifest
+
+        manifest_file = tmp_path / "tools.yaml"
+        manifest_file.write_text("""
+mind_id: tools
+display_name: Tools Mind
+role: test
+auth:
+  civ_id: x
+  keypair_path: k.pem
+memory:
+  db_path: m.db
+tools:
+  - name: read_file
+    enabled: true
+  - name: bash
+    enabled: false
+  - name: write_file
+    enabled: true
+""")
+        (tmp_path / "k.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        names = manifest.enabled_tool_names()
+        assert "read_file" in names
+        assert "write_file" in names
+        assert "bash" not in names
+
+    def test_env_var_expansion(self, tmp_path):
+        """Environment variables are expanded in manifest values."""
+        from aiciv_mind.manifest import MindManifest
+        import os
+
+        os.environ["TEST_CIV_ID"] = "expanded-civ"
+        manifest_file = tmp_path / "env.yaml"
+        manifest_file.write_text("""
+mind_id: env-test
+display_name: Env Test
+role: test
+auth:
+  civ_id: $TEST_CIV_ID
+  keypair_path: k.pem
+memory:
+  db_path: m.db
+""")
+        (tmp_path / "k.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert manifest.auth.civ_id == "expanded-civ"
+        del os.environ["TEST_CIV_ID"]
+
+    def test_path_resolution(self, tmp_path):
+        """Relative paths are resolved to absolute."""
+        from aiciv_mind.manifest import MindManifest
+
+        manifest_file = tmp_path / "paths.yaml"
+        manifest_file.write_text("""
+mind_id: paths
+display_name: Paths
+role: test
+auth:
+  civ_id: x
+  keypair_path: keys/test.pem
+memory:
+  db_path: data/mem.db
+""")
+        (tmp_path / "keys").mkdir()
+        (tmp_path / "keys" / "test.pem").touch()
+
+        manifest = MindManifest.from_yaml(manifest_file)
+        assert str(tmp_path) in manifest.auth.keypair_path
+        assert str(tmp_path) in manifest.memory.db_path
