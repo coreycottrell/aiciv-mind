@@ -166,9 +166,9 @@ Current systems waste 30-70% of their compute on coordination overhead — figur
 | Phase | What | Status |
 |-------|------|--------|
 | v0.1 | Core loop, memory, tools, ZeroMQ IPC, SuiteClient | **SHIPPED** |
-| v0.2 | Role-based tool filtering, team lead manifests, scratchpad hierarchy | **IN PROGRESS** |
-| v0.3 | 2 minds connected, inter-mind coordination protocol | Next |
-| v0.4 | Dream Mode, fitness scoring, self-improving evolution | Next |
+| v0.2 | Role-based tool filtering, scratchpad hierarchy, fitness scoring, team lead manifests | **IN PROGRESS** |
+| v0.3 | 2 minds connected, inter-mind coordination protocol, Coordination API | Next |
+| v0.4 | Dream Mode coordination review, self-improving evolution | Next |
 | v1.0 | Production: Docker, 6+ minds, pods, federation | Target |
 
 ---

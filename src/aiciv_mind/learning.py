@@ -83,17 +83,28 @@ class SessionLearner:
 
     Wired into Mind — receives task outcomes after each task completes.
     At session end, `summarize()` produces cross-task learnings.
+
+    Also accumulates CoordinationMetrics for role-specific fitness scoring.
     """
 
     def __init__(self, agent_id: str = "", data_dir: Path | None = None):
         self._agent_id = agent_id
         self._outcomes: list[TaskOutcome] = []
+        self._coordination_metrics: list = []  # CoordinationMetrics instances
         self._session_start = time.monotonic()
         self._data_dir = data_dir
 
     def record(self, outcome: TaskOutcome) -> None:
         """Record a completed task outcome."""
         self._outcomes.append(outcome)
+
+    def record_coordination(self, metrics) -> None:
+        """Record coordination metrics for fitness scoring."""
+        self._coordination_metrics.append(metrics)
+
+    @property
+    def coordination_count(self) -> int:
+        return len(self._coordination_metrics)
 
     @property
     def task_count(self) -> int:
@@ -203,6 +214,24 @@ class SessionLearner:
                 "Consider refining search queries or adjusting max_context_memories."
             )
 
+        # Coordination fitness (if metrics were recorded)
+        coordination_fitness: dict[str, Any] = {}
+        if self._coordination_metrics:
+            try:
+                from aiciv_mind.fitness import score_for_role
+                from aiciv_mind.roles import Role
+
+                # Group by role and score each
+                for role in Role:
+                    role_metrics = [
+                        m for m in self._coordination_metrics if m.role == role
+                    ]
+                    if role_metrics:
+                        fitness = score_for_role(role, role_metrics)
+                        coordination_fitness[role.value] = fitness.to_dict()
+            except Exception as e:
+                logger.debug("Coordination fitness scoring failed: %s", e)
+
         return SessionSummary(
             task_count=total,
             success_count=succeeded,
@@ -228,6 +257,7 @@ class SessionLearner:
                 "useful": memory_useful,
                 "not_useful": memory_not_useful,
             },
+            coordination_fitness=coordination_fitness,
             insights=insights,
         )
 
@@ -306,6 +336,7 @@ class SessionSummary:
     planning_accuracy: dict[str, int] = field(default_factory=dict)
     verification_stats: dict[str, int] = field(default_factory=dict)
     memory_usefulness: dict[str, int] = field(default_factory=dict)
+    coordination_fitness: dict[str, Any] = field(default_factory=dict)
     insights: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,5 +354,6 @@ class SessionSummary:
             "planning_accuracy": self.planning_accuracy,
             "verification_stats": self.verification_stats,
             "memory_usefulness": self.memory_usefulness,
+            "coordination_fitness": self.coordination_fitness,
             "insights": self.insights,
         }
