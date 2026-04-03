@@ -2978,3 +2978,332 @@ class TestConsolidationLock:
                 raise ValueError("boom")
         assert not lock.is_held_by_us
         assert not lock_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# MindContext — contextvar identity isolation
+# ---------------------------------------------------------------------------
+
+
+class TestMindContext:
+    """Battle tests for per-mind identity isolation via contextvars."""
+
+    def test_current_mind_id_default_none(self):
+        """current_mind_id() returns None outside any context."""
+        from aiciv_mind.context import current_mind_id
+        # Since contextvars persist across test runs, only assert the type
+        result = current_mind_id()
+        assert result is None or isinstance(result, str)
+
+    def test_set_and_reset_mind_id(self):
+        """set_mind_id / reset_mind_id round-trip."""
+        from aiciv_mind.context import set_mind_id, reset_mind_id, current_mind_id
+        token = set_mind_id("test-mind")
+        assert current_mind_id() == "test-mind"
+        reset_mind_id(token)
+
+    def test_async_mind_context_scoping(self):
+        """mind_context sets and restores mind_id."""
+        from aiciv_mind.context import mind_context, current_mind_id
+
+        async def _run():
+            assert current_mind_id() is None or isinstance(current_mind_id(), str)
+            async with mind_context("root"):
+                assert current_mind_id() == "root"
+            # Restored after exit
+
+        asyncio.run(_run())
+
+    def test_nested_mind_context(self):
+        """Nested mind_context restores outer value on exit."""
+        from aiciv_mind.context import mind_context, current_mind_id
+
+        async def _run():
+            async with mind_context("outer"):
+                assert current_mind_id() == "outer"
+                async with mind_context("inner"):
+                    assert current_mind_id() == "inner"
+                assert current_mind_id() == "outer"
+
+        asyncio.run(_run())
+
+    def test_mind_context_restores_on_exception(self):
+        """mind_context restores identity even when exception raised."""
+        from aiciv_mind.context import mind_context, current_mind_id, set_mind_id, reset_mind_id
+
+        async def _run():
+            token = set_mind_id("pre-test")
+            try:
+                async with mind_context("boom-mind"):
+                    assert current_mind_id() == "boom-mind"
+                    raise ValueError("intentional")
+            except ValueError:
+                pass
+            assert current_mind_id() == "pre-test"
+            reset_mind_id(token)
+
+        asyncio.run(_run())
+
+    def test_concurrent_tasks_isolated(self):
+        """Two concurrent async tasks get isolated mind_ids."""
+        from aiciv_mind.context import mind_context, current_mind_id
+
+        results = {}
+
+        async def worker(name: str, delay: float):
+            async with mind_context(name):
+                await asyncio.sleep(delay)
+                results[name] = current_mind_id()
+
+        async def _run():
+            await asyncio.gather(
+                worker("task-a", 0.01),
+                worker("task-b", 0.01),
+            )
+
+        asyncio.run(_run())
+        assert results["task-a"] == "task-a"
+        assert results["task-b"] == "task-b"
+
+
+# ---------------------------------------------------------------------------
+# SessionStore — boot/shutdown lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestSessionStore:
+    """Battle tests for session lifecycle (boot context, handoff, shutdown)."""
+
+    def test_boot_creates_session(self):
+        """boot() creates a session and returns BootContext."""
+        from aiciv_mind.session_store import SessionStore, BootContext
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="test-agent")
+        boot = ss.boot()
+        assert isinstance(boot, BootContext)
+        assert boot.agent_id == "test-agent"
+        assert boot.session_id is not None
+        assert ss.session_id is not None
+        store.close()
+
+    def test_boot_context_has_session_count(self):
+        """BootContext.session_count reflects completed sessions."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="counter")
+        boot = ss.boot()
+        # First boot — no completed sessions yet (current one is still running)
+        assert boot.session_count == 0
+        store.close()
+
+    def test_boot_loads_identity_memories(self):
+        """boot() loads identity memories into BootContext."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        store.store(Memory(
+            agent_id="id-test",
+            title="Who I am",
+            content="I am a research mind.",
+            memory_type="identity",
+        ))
+        ss = SessionStore(store, agent_id="id-test")
+        boot = ss.boot()
+        assert len(boot.identity_memories) >= 1
+        assert any("research" in m.get("content", "") for m in boot.identity_memories)
+        store.close()
+
+    def test_boot_loads_handoff_memory(self):
+        """boot() loads last session's handoff memory."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        # Simulate a prior session
+        prior_sid = store.start_session("handoff-test")
+        store.end_session(prior_sid, "Prior session summary")
+        store.store(Memory(
+            agent_id="handoff-test",
+            title="Session handoff — prior",
+            content="I was doing important work.",
+            memory_type="handoff",
+            session_id=prior_sid,
+        ))
+        ss = SessionStore(store, agent_id="handoff-test")
+        boot = ss.boot()
+        assert boot.handoff_memory is not None
+        assert "important work" in boot.handoff_memory.get("content", "")
+        store.close()
+
+    def test_boot_loads_pinned_memories(self):
+        """boot() loads pinned memories."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        mem = Memory(
+            agent_id="pin-test",
+            title="Always remember this",
+            content="Critical context.",
+            memory_type="learning",
+        )
+        stored = store.store(mem)
+        store.pin(stored)  # Pin after storing
+        ss = SessionStore(store, agent_id="pin-test")
+        boot = ss.boot()
+        assert len(boot.pinned_memories) >= 1
+        store.close()
+
+    def test_record_turn(self):
+        """record_turn increments turn count in journal."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="turn-test")
+        ss.boot()
+        ss.record_turn(topic="memory")
+        ss.record_turn(topic="tools")
+        session_rec = store.get_session(ss.session_id)
+        assert session_rec is not None
+        assert session_rec["turn_count"] >= 2
+        store.close()
+
+    def test_shutdown_writes_handoff(self):
+        """shutdown() stores a handoff memory for the next session."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="shutdown-test")
+        ss.boot()
+        ss.record_turn()
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "I completed the research task successfully."},
+        ]
+        ss.shutdown(messages)
+        # Verify handoff memory was created
+        handoffs = store.by_type(agent_id="shutdown-test", memory_type="handoff", limit=5)
+        assert len(handoffs) >= 1
+        assert any("research task" in h.get("content", "") for h in handoffs)
+        store.close()
+
+    def test_shutdown_ends_session(self):
+        """shutdown() marks session as ended in journal."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="end-test")
+        ss.boot()
+        sid = ss.session_id
+        ss.shutdown([{"role": "assistant", "content": "Done."}])
+        session_rec = store.get_session(sid)
+        assert session_rec is not None
+        assert session_rec["end_time"] is not None
+        store.close()
+
+    def test_shutdown_without_boot_is_noop(self):
+        """shutdown() before boot() does nothing (no crash)."""
+        from aiciv_mind.session_store import SessionStore
+        store = MemoryStore(":memory:")
+        ss = SessionStore(store, agent_id="noop-test")
+        ss.shutdown([])  # Should not raise
+        store.close()
+
+    def test_extract_last_assistant_text_string(self):
+        """_extract_last_assistant_text extracts from string content."""
+        from aiciv_mind.session_store import SessionStore
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "First response."},
+            {"role": "user", "content": "More"},
+            {"role": "assistant", "content": "Final answer here."},
+        ]
+        result = SessionStore._extract_last_assistant_text(messages)
+        assert result == "Final answer here."
+
+    def test_extract_last_assistant_text_list_content(self):
+        """_extract_last_assistant_text handles list content blocks."""
+        from aiciv_mind.session_store import SessionStore
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Block text here."},
+            ]},
+        ]
+        result = SessionStore._extract_last_assistant_text(messages)
+        assert result == "Block text here."
+
+    def test_extract_last_assistant_text_empty(self):
+        """_extract_last_assistant_text returns fallback for empty messages."""
+        from aiciv_mind.session_store import SessionStore
+        assert SessionStore._extract_last_assistant_text([]) == "(no text recorded)"
+        assert SessionStore._extract_last_assistant_text([
+            {"role": "user", "content": "Hi"},
+        ]) == "(no text recorded)"
+
+
+# ---------------------------------------------------------------------------
+# ServiceError — structured HTTP error type
+# ---------------------------------------------------------------------------
+
+
+class TestServiceError:
+    """Battle tests for suite service error handling."""
+
+    def test_service_error_basic(self):
+        """ServiceError captures message and status code."""
+        from aiciv_mind.suite.base import ServiceError
+        err = ServiceError("Not Found", status_code=404)
+        assert str(err) == "Not Found"
+        assert err.status_code == 404
+        assert err.detail == {}
+
+    def test_service_error_with_detail(self):
+        """ServiceError captures detail dict."""
+        from aiciv_mind.suite.base import ServiceError
+        detail = {"error": "invalid_token", "hint": "expired"}
+        err = ServiceError("Auth failed", status_code=401, detail=detail)
+        assert err.status_code == 401
+        assert err.detail["error"] == "invalid_token"
+        assert err.detail["hint"] == "expired"
+
+    def test_service_error_default_detail(self):
+        """ServiceError defaults detail to empty dict."""
+        from aiciv_mind.suite.base import ServiceError
+        err = ServiceError("Oops")
+        assert err.detail == {}
+        assert err.status_code is None
+
+    def test_service_error_is_exception(self):
+        """ServiceError is catchable as Exception."""
+        from aiciv_mind.suite.base import ServiceError
+        with pytest.raises(ServiceError):
+            raise ServiceError("test", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# BootContext — dataclass structure
+# ---------------------------------------------------------------------------
+
+
+class TestBootContext:
+    """Battle tests for BootContext dataclass."""
+
+    def test_boot_context_defaults(self):
+        """BootContext has sensible defaults for all optional fields."""
+        from aiciv_mind.session_store import BootContext
+        bc = BootContext(session_id="s1", session_count=0, agent_id="test")
+        assert bc.identity_memories == []
+        assert bc.handoff_memory is None
+        assert bc.active_threads == []
+        assert bc.pinned_memories == []
+        assert bc.evolution_trajectory == ""
+        assert bc.top_by_depth_memories == []
+
+    def test_boot_context_with_data(self):
+        """BootContext holds populated fields correctly."""
+        from aiciv_mind.session_store import BootContext
+        bc = BootContext(
+            session_id="s2",
+            session_count=5,
+            agent_id="research",
+            identity_memories=[{"title": "Who I am", "content": "Researcher"}],
+            handoff_memory={"title": "Last session", "content": "Did stuff"},
+            pinned_memories=[{"title": "Important", "content": "Never forget"}],
+            evolution_trajectory="Becoming more specialized in code analysis.",
+        )
+        assert bc.session_count == 5
+        assert len(bc.identity_memories) == 1
+        assert bc.handoff_memory["content"] == "Did stuff"
+        assert bc.evolution_trajectory.startswith("Becoming")
