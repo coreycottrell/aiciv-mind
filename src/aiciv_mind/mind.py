@@ -384,10 +384,22 @@ class Mind:
 
             if not tool_use_blocks:
                 break
-            # For native tool_use, end_turn means stop. For synthetic (text-parsed)
-            # calls, end_turn is always set — ignore it and execute the tools.
-            if not synthetic_calls and response.stop_reason == "end_turn":
-                break
+
+            # Log tool detection path for diagnostics
+            logger.info(
+                "[%s] Tool blocks found: %d (%s), stop_reason=%s",
+                self.manifest.mind_id,
+                len(tool_use_blocks),
+                "synthetic" if synthetic_calls else "native",
+                getattr(response, "stop_reason", "?"),
+            )
+
+            # IMPORTANT: If tool_use blocks are present, ALWAYS execute them.
+            # Previously this had a check: if native blocks + stop_reason=="end_turn" → break.
+            # That was wrong — Ollama/LiteLLM returns stop_reason="end_turn" even when
+            # tool_use blocks are intentional (Ollama doesn't set stop_reason="tool_use").
+            # For Anthropic Claude, native tool_use blocks always come with
+            # stop_reason="tool_use", so this change is a no-op for Claude.
 
             tool_exec_start = time.monotonic()
             tool_results = await self._execute_tool_calls(tool_use_blocks)

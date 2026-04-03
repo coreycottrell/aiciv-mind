@@ -373,3 +373,158 @@ def test_cache_stats_mixed_hits_and_writes(minimal_manifest, memory_store):
     assert stats["cache_hits"] == 2
     assert stats["cache_writes"] == 1
     assert stats["hit_rate"] == round(2 / 3, 2)  # 0.67
+
+
+# ---------------------------------------------------------------------------
+# Tests: Ollama stop_reason fix — native tool_use blocks with end_turn
+# ---------------------------------------------------------------------------
+
+
+async def test_native_tool_use_with_end_turn_still_executes(minimal_manifest, memory_store):
+    """
+    CRITICAL FIX: Ollama/LiteLLM returns native tool_use blocks but sets
+    stop_reason='end_turn' (not 'tool_use'). Tools must still execute.
+
+    Previously, the check `if not synthetic_calls and stop_reason == 'end_turn': break`
+    caused all native tool calls from Ollama-backed models to be silently skipped.
+    """
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    tc = make_tool_use_block("call_ollama_1", "bash", {"command": "echo hi"})
+    # Ollama pattern: tool_use blocks present BUT stop_reason is "end_turn"
+    first = make_response(
+        text="I'll run the command now.",
+        tool_blocks=[tc],
+        stop_reason="end_turn",  # THE BUG: Ollama doesn't set "tool_use"
+    )
+    second = make_response(text="Done.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="hi\n"
+        ) as mock_exec:
+            result = await mind.run_task("Echo hi", inject_memories=False)
+
+    assert result == "Done."
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "echo hi"})
+
+
+async def test_native_tool_use_with_stop_reason_executes(minimal_manifest, memory_store):
+    """
+    Ollama may also return stop_reason='stop' (mapped differently by LiteLLM versions).
+    Tool_use blocks should execute regardless of any stop_reason value.
+    """
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    tc = make_tool_use_block("call_stop_1", "bash", {"command": "ls"})
+    first = make_response(tool_blocks=[tc], stop_reason="stop")
+    second = make_response(text="Listed.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="a.txt"
+        ) as mock_exec:
+            result = await mind.run_task("List", inject_memories=False)
+
+    assert result == "Listed."
+    assert mock_exec.call_count == 1
+
+
+async def test_native_text_plus_tool_use_end_turn_executes(minimal_manifest, memory_store):
+    """
+    Combined text + native tool_use with end_turn: text should be captured,
+    tool should execute, and final_text should be from the last iteration.
+    """
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    tc = make_tool_use_block("call_mix_1", "memory_search", {"query": "recent"})
+    first = make_response(
+        text="Let me search my memories.",
+        tool_blocks=[tc],
+        stop_reason="end_turn",
+    )
+    second = make_response(text="I found 3 relevant memories.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock,
+            return_value="memory 1: test learning",
+        ) as mock_exec:
+            result = await mind.run_task("Search memories", inject_memories=False)
+
+    assert result == "I found 3 relevant memories."
+    mock_exec.assert_called_once_with("memory_search", {"query": "recent"})
+
+
+async def test_multiple_native_tools_end_turn_all_execute(minimal_manifest, memory_store):
+    """Multiple native tool blocks with end_turn: ALL tools execute."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    tc1 = make_tool_use_block("c1", "bash", {"command": "echo a"})
+    tc2 = make_tool_use_block("c2", "bash", {"command": "echo b"})
+    first = make_response(tool_blocks=[tc1, tc2], stop_reason="end_turn")
+    second = make_response(text="Both done.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="out"
+        ) as mock_exec:
+            result = await mind.run_task("Run both", inject_memories=False)
+
+    assert result == "Both done."
+    assert mock_exec.call_count == 2
+
+
+async def test_no_tool_use_end_turn_breaks_correctly(minimal_manifest, memory_store):
+    """When there are NO tool_use blocks and stop_reason is end_turn, the loop breaks
+    correctly (this is the normal end-of-conversation case)."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_response(text="All done!", stop_reason="end_turn"),
+    ):
+        result = await mind.run_task("Just chat", inject_memories=False)
+
+    assert result == "All done!"
+
+
+async def test_synthetic_tool_calls_still_work(minimal_manifest, memory_store):
+    """Synthetic (text-parsed) tool calls continue to work after the fix."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    # Model emits tool call as text (no native tool_use blocks)
+    xml_text = (
+        'I\'ll check.\n'
+        '<invoke name="bash">\n'
+        '<parameter name="command">echo hello</parameter>\n'
+        '</invoke>'
+    )
+    first = make_response(text=xml_text, stop_reason="end_turn")
+    second = make_response(text="Got it: hello")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
+        ) as mock_exec:
+            result = await mind.run_task("Say hello", inject_memories=False)
+
+    assert result == "Got it: hello"
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "echo hello"})
