@@ -338,6 +338,10 @@ class ToolRegistry:
             mind_root_path = str(Path(__file__).parent.parent.parent.parent)
             register_handoff_tools(registry, memory_store, mind_root=mind_root_path)
 
+        # ACG communication tool — always registered (any mind can talk to ACG)
+        from aiciv_mind.tools.acg_tools import register_acg_tools
+        register_acg_tools(registry)
+
         # system_health is always registered
         from aiciv_mind.tools.health_tools import register_health_tools
         register_health_tools(

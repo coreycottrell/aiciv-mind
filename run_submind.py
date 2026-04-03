@@ -77,16 +77,31 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
             os.makedirs(db_dir, exist_ok=True)
     memory = MemoryStore(db_path)
 
+    # SuiteClient for Hub tools — sub-minds with auth config get Hub access
+    suite_client = None
+    try:
+        auth_cfg = getattr(manifest, "auth", None)
+        keypair_path = getattr(auth_cfg, "keypair_path", None) if auth_cfg else None
+        if keypair_path and Path(keypair_path).exists():
+            from aiciv_mind.suite.client import SuiteClient
+            suite_client = await SuiteClient.connect(keypair_path, eager_auth=True)
+            logger.info("SuiteClient connected — Hub tools enabled")
+    except Exception as e:
+        logger.info("SuiteClient unavailable: %s", e)
+
     # Build tool registry — register ALL tools, let manifest.enabled_tool_names()
     # control what the LLM actually sees.  Role-based registry filtering was
     # stripping tools that team leads need (bash, files, grep etc.) because
     # TEAM_LEAD_TOOLS only contains orchestration tools.  The manifest's enabled
     # list is the real whitelist (passed to build_openai_tools in Mind._run_task_body).
     scratchpad_dir = str(Path(__file__).parent / "scratchpads")
+    queue_path = str(Path(__file__).parent / "data" / "hub_queue.jsonl")
     tools = ToolRegistry.default(
         memory_store=memory,
         role="agent",  # Don't filter — manifest tool list controls LLM visibility
         agent_id=manifest.mind_id,
+        suite_client=suite_client,
+        queue_path=queue_path,
         scratchpad_dir=scratchpad_dir,
     )
 

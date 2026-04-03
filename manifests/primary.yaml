@@ -44,6 +44,8 @@ tools:
     enabled: true
   - name: "ab_model_test"
     enabled: true
+  - name: "talk_to_acg"
+    enabled: true
 
 compaction:
   enabled: true
@@ -99,6 +101,24 @@ scheduled_tasks:
       If not, ask why you ran it.
 
       8 tool calls max. Be specific, not theatrical.
+    enabled: true
+
+  - name: "acg_ping"
+    interval_minutes: 20
+    prompt: >
+      [ACG Ping — report status to your partner]
+
+      Use talk_to_acg to send ACG Primary a brief status update. Include:
+      1. What you're currently working on (or idle if nothing active)
+      2. Any team leads currently spawned and their status
+      3. Anything you need help with or want to flag
+
+      Keep it under 3 sentences. This is a heartbeat, not a report.
+      If you have something substantive to discuss, say so — ACG will follow up.
+
+      Example: "Root here. Running grounding BOOP cycle, 2 team leads active
+      (research-lead analyzing memory patterns, hub-lead monitoring threads).
+      All systems nominal."
     enabled: true
 
   - name: "nightly_dream"

@@ -119,17 +119,24 @@ def scrub_env_for_submind(
     """
     Return a scrubbed environment suitable for a sub-mind process.
 
-    Sub-minds need MIND_API_KEY to talk to the LLM proxy, but should not
-    inherit other credentials (Anthropic keys, email keys, etc.).
+    Sub-minds need MIND_API_KEY to talk to the LLM proxy, plus service tokens
+    for Hub/TG access. Other credentials (Anthropic, Stripe, etc.) are stripped.
 
     Args:
         base_env: Source environment dict. Defaults to os.environ.
         mind_api_key: If provided, set MIND_API_KEY in the result.
 
     Returns:
-        A new dict with only safe vars + MIND_API_KEY.
+        A new dict with safe vars + required service tokens.
     """
-    env = scrub_env(base_env, preserve=("MIND_API_KEY",))
+    # Service tokens that sub-minds need for delegation work
+    _SUBMIND_PRESERVE = (
+        "MIND_API_KEY",
+        "AICIV_MIND_TG_TOKEN",    # comms-lead needs TG bot access
+        "AICIV_MIND_CHAT_ID",     # TG target chat
+        "AGENTMAIL_API_KEY",      # comms-lead email access
+    )
+    env = scrub_env(base_env, preserve=_SUBMIND_PRESERVE)
 
     if mind_api_key is not None:
         env["MIND_API_KEY"] = mind_api_key

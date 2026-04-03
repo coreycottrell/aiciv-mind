@@ -92,10 +92,14 @@ class SubMindSpawner:
         safe_env = scrub_env_for_submind(mind_api_key=mind_api_key)
 
         # Build env export prefix for the tmux shell command.
-        # Only export the scrubbed vars, not the full parent environment.
+        # Export scrubbed vars that sub-minds need for service access.
+        _EXPORT_VARS = {
+            "MIND_API_KEY", "PYTHONPATH", "VIRTUAL_ENV", "PATH", "HOME",
+            "AICIV_MIND_TG_TOKEN", "AICIV_MIND_CHAT_ID", "AGENTMAIL_API_KEY",
+        }
         env_exports = " ".join(
             f'{k}="{v}"' for k, v in safe_env.items()
-            if k in ("MIND_API_KEY", "PYTHONPATH", "VIRTUAL_ENV", "PATH", "HOME")
+            if k in _EXPORT_VARS
         )
         env_prefix = f"export {env_exports} && " if env_exports else ""
 
