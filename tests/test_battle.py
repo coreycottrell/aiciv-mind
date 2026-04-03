@@ -8164,3 +8164,808 @@ memory:
         manifest = MindManifest.from_yaml(manifest_file)
         assert str(tmp_path) in manifest.auth.keypair_path
         assert str(tmp_path) in manifest.memory.db_path
+
+
+# ===========================================================================
+# Round 21 — ToolRegistry.default() factory, bash safety, security module,
+#             browser/netlify/voice/web tools, resource tools, handoff tools
+# ===========================================================================
+
+
+class TestToolRegistryDefault:
+    """Test the ToolRegistry.default() class factory — all registration combos."""
+
+    def test_bare_default_registers_core_tools(self):
+        """default() with no optional args registers bash, files, search, etc."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default()
+        names = reg.names()
+        # Always-registered tools
+        for tool in ["bash", "read_file", "write_file", "edit_file",
+                      "grep", "glob", "web_search", "web_fetch",
+                      "netlify_deploy", "netlify_status",
+                      "text_to_speech", "system_health",
+                      "resource_usage", "token_stats", "session_stats"]:
+            assert tool in names, f"Expected '{tool}' in bare default()"
+        # Browser tools
+        for bt in ["browser_navigate", "browser_click", "browser_type",
+                    "browser_snapshot", "browser_screenshot", "browser_evaluate",
+                    "browser_close"]:
+            assert bt in names, f"Expected '{bt}' in bare default()"
+
+    def test_bare_default_no_memory_tools(self):
+        """Without memory_store, memory tools should NOT be registered."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default()
+        names = reg.names()
+        assert "memory_search" not in names
+        assert "memory_write" not in names
+
+    def test_with_memory_store_registers_memory_tools(self, memory_store):
+        """Providing memory_store registers memory_search/write + continuity + graph + pattern + integrity + daemon."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(memory_store=memory_store, agent_id="test-agent")
+        names = reg.names()
+        assert "memory_search" in names
+        assert "memory_write" in names
+        # Graph tools
+        assert "memory_link" in names
+        assert "memory_graph" in names
+        # Daemon tools
+        assert "daemon_health" in names
+
+    def test_with_skills_dir_registers_skill_tools(self, tmp_path, memory_store):
+        """Providing skills_dir + memory_store registers skill tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(
+            memory_store=memory_store,
+            skills_dir=str(tmp_path),
+        )
+        names = reg.names()
+        assert "load_skill" in names
+        assert "list_skills" in names
+        assert "create_skill" in names
+
+    def test_with_scratchpad_dir_registers_scratchpad_tools(self, tmp_path):
+        """Providing scratchpad_dir registers scratchpad tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(scratchpad_dir=str(tmp_path))
+        names = reg.names()
+        assert any("scratchpad" in n for n in names)
+
+    def test_with_manifest_path_registers_sandbox_tools(self, tmp_path):
+        """Providing manifest_path registers sandbox tools."""
+        from aiciv_mind.tools import ToolRegistry
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text("mind_id: test\n")
+        reg = ToolRegistry.default(manifest_path=str(manifest_file))
+        names = reg.names()
+        assert any("sandbox" in n for n in names)
+
+    def test_build_openai_tools_format(self):
+        """build_openai_tools() wraps definitions in OpenAI function-calling format."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("test_tool", {
+            "name": "test_tool",
+            "description": "A test tool",
+            "input_schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+        }, lambda inp: "ok", read_only=True)
+        oai_tools = reg.build_openai_tools()
+        assert len(oai_tools) == 1
+        assert oai_tools[0]["type"] == "function"
+        assert oai_tools[0]["function"]["name"] == "test_tool"
+        assert oai_tools[0]["function"]["description"] == "A test tool"
+        assert "x" in oai_tools[0]["function"]["parameters"]["properties"]
+
+    def test_build_openai_tools_with_filter(self):
+        """build_openai_tools(enabled=[...]) returns only specified tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("a", {"name": "a", "description": "A"}, lambda inp: "a")
+        reg.register("b", {"name": "b", "description": "B"}, lambda inp: "b")
+        reg.register("c", {"name": "c", "description": "C"}, lambda inp: "c")
+        filtered = reg.build_openai_tools(enabled=["a", "c"])
+        assert len(filtered) == 2
+        names = [t["function"]["name"] for t in filtered]
+        assert names == ["a", "c"]
+
+    def test_build_anthropic_tools_all(self):
+        """build_anthropic_tools(None) returns all registered tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("x", {"name": "x"}, lambda inp: "x")
+        reg.register("y", {"name": "y"}, lambda inp: "y")
+        tools = reg.build_anthropic_tools()
+        assert len(tools) == 2
+
+    def test_build_anthropic_tools_filtered(self):
+        """build_anthropic_tools(enabled=[...]) filters and preserves order."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("x", {"name": "x"}, lambda inp: "x")
+        reg.register("y", {"name": "y"}, lambda inp: "y")
+        reg.register("z", {"name": "z"}, lambda inp: "z")
+        tools = reg.build_anthropic_tools(enabled=["z", "x"])
+        assert len(tools) == 2
+        assert tools[0]["name"] == "z"
+        assert tools[1]["name"] == "x"
+
+    def test_execute_unknown_tool(self):
+        """execute() returns error for unknown tool."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        result = asyncio.run(reg.execute("nonexistent", {}))
+        assert "ERROR" in result
+        assert "Unknown tool" in result
+
+    def test_execute_sync_handler(self):
+        """execute() handles synchronous handler functions."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("sync_test", {"name": "sync_test"}, lambda inp: f"got {inp.get('x')}")
+        result = asyncio.run(reg.execute("sync_test", {"x": "hello"}))
+        assert result == "got hello"
+
+    def test_execute_async_handler(self):
+        """execute() handles async handler functions."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+
+        async def async_handler(inp):
+            return f"async {inp.get('x')}"
+
+        reg.register("async_test", {"name": "async_test"}, async_handler)
+        result = asyncio.run(reg.execute("async_test", {"x": "world"}))
+        assert result == "async world"
+
+    def test_execute_handler_exception(self):
+        """execute() catches handler exceptions and returns error string."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("broken", {"name": "broken"}, lambda inp: 1 / 0)
+        result = asyncio.run(reg.execute("broken", {}))
+        assert "ERROR" in result
+        assert "ZeroDivisionError" in result
+
+    def test_execute_with_hooks_block(self):
+        """execute() respects pre-hook blocking."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+        reg = ToolRegistry()
+        hooks = HookRunner(blocked_tools=["blocked_tool"])
+        reg.set_hooks(hooks)
+        reg.register("blocked_tool", {"name": "blocked_tool"}, lambda inp: "should not run")
+        result = asyncio.run(reg.execute("blocked_tool", {}))
+        assert "BLOCKED" in result
+
+    def test_custom_timeout_per_tool(self):
+        """Tools with custom timeout use that timeout."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("fast", {"name": "fast"}, lambda inp: "ok", timeout=5.0)
+        assert reg._timeouts["fast"] == 5.0
+
+    def test_is_read_only(self):
+        """is_read_only() reflects registration flags."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("reader", {"name": "reader"}, lambda inp: "r", read_only=True)
+        reg.register("writer", {"name": "writer"}, lambda inp: "w", read_only=False)
+        assert reg.is_read_only("reader") is True
+        assert reg.is_read_only("writer") is False
+        assert reg.is_read_only("unknown") is False
+
+
+class TestBashToolSafety:
+    """Test bash tool blocked patterns, empty command, and handler behavior."""
+
+    def test_blocked_patterns_list(self):
+        """BLOCKED_PATTERNS contains the expected dangerous patterns."""
+        from aiciv_mind.tools.bash import BLOCKED_PATTERNS
+        assert "rm -rf /" in BLOCKED_PATTERNS
+        assert "rm -rf ~" in BLOCKED_PATTERNS
+        assert "git push --force" in BLOCKED_PATTERNS
+        assert "> /dev/" in BLOCKED_PATTERNS
+        assert ":(){ :|:& };:" in BLOCKED_PATTERNS
+
+    def test_empty_command_returns_error(self):
+        """bash_handler returns error for empty command."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": ""}))
+        assert "ERROR" in result
+        assert "No command" in result
+
+    def test_blocked_rm_rf_root(self):
+        """bash_handler blocks rm -rf /."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "rm -rf / --no-preserve-root"}))
+        assert "BLOCKED" in result
+
+    def test_blocked_fork_bomb(self):
+        """bash_handler blocks fork bombs."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": ":(){ :|:& };:"}))
+        assert "BLOCKED" in result
+
+    def test_blocked_force_push(self):
+        """bash_handler blocks git push --force."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "git push --force origin main"}))
+        assert "BLOCKED" in result
+
+    def test_safe_command_executes(self):
+        """bash_handler executes safe commands and returns output."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "echo hello_world_test"}))
+        assert "hello_world_test" in result
+
+    def test_nonzero_exit_code_reported(self):
+        """bash_handler reports non-zero exit codes."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "false"}))
+        assert "EXIT CODE" in result
+
+    def test_no_output_returns_marker(self):
+        """bash_handler returns '(no output)' for commands with no stdout."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "true"}))
+        assert result == "(no output)"
+
+    def test_working_dir_parameter(self):
+        """bash_handler respects working_dir parameter."""
+        import asyncio
+        from aiciv_mind.tools.bash import bash_handler
+        result = asyncio.run(bash_handler({"command": "pwd", "working_dir": "/tmp"}))
+        assert "/tmp" in result
+
+    def test_register_bash(self):
+        """register_bash() registers a 'bash' tool."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.bash import register_bash
+        reg = ToolRegistry()
+        register_bash(reg)
+        assert "bash" in reg.names()
+        assert reg.is_read_only("bash") is False
+
+
+class TestSecurityModule:
+    """Test aiciv_mind.security — credential scrubbing."""
+
+    def test_scrub_env_removes_api_keys(self):
+        """scrub_env() strips variables matching *_KEY patterns."""
+        from aiciv_mind.security import scrub_env
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ANTHROPIC_API_KEY": "secret",
+            "OPENAI_API_KEY": "secret",
+            "MY_CUSTOM_KEY": "secret",
+            "SAFE_VAR": "visible",
+        }
+        result = scrub_env(base_env=env)
+        assert "PATH" in result
+        assert "HOME" in result
+        assert "SAFE_VAR" in result
+        assert "ANTHROPIC_API_KEY" not in result
+        assert "OPENAI_API_KEY" not in result
+        assert "MY_CUSTOM_KEY" not in result
+
+    def test_scrub_env_removes_token_patterns(self):
+        """scrub_env() strips variables matching *_TOKEN patterns."""
+        from aiciv_mind.security import scrub_env
+        env = {"NETLIFY_AUTH_TOKEN": "secret", "HOME": "/home"}
+        result = scrub_env(base_env=env)
+        assert "NETLIFY_AUTH_TOKEN" not in result
+        assert "HOME" in result
+
+    def test_scrub_env_removes_password_patterns(self):
+        """scrub_env() strips variables matching *_PASSWORD patterns."""
+        from aiciv_mind.security import scrub_env
+        env = {"PGPASSWORD": "secret", "DATABASE_URL": "postgres://...", "HOME": "/home"}
+        result = scrub_env(base_env=env)
+        assert "PGPASSWORD" not in result
+        assert "DATABASE_URL" not in result
+
+    def test_scrub_env_preserves_always_preserve(self):
+        """Variables in ALWAYS_PRESERVE are never stripped."""
+        from aiciv_mind.security import scrub_env, ALWAYS_PRESERVE
+        # Even if they hypothetically matched, they should be preserved
+        env = {name: "value" for name in ALWAYS_PRESERVE}
+        result = scrub_env(base_env=env)
+        for name in ALWAYS_PRESERVE:
+            assert name in result
+
+    def test_scrub_env_preserve_parameter(self):
+        """preserve parameter whitelists additional variables."""
+        from aiciv_mind.security import scrub_env
+        env = {"MY_SECRET_KEY": "secret", "HOME": "/home"}
+        result = scrub_env(base_env=env, preserve=["MY_SECRET_KEY"])
+        assert "MY_SECRET_KEY" in result
+
+    def test_scrub_env_extra_strip_parameter(self):
+        """extra_strip forces removal of named variables."""
+        from aiciv_mind.security import scrub_env
+        env = {"INNOCENT_VAR": "safe", "HOME": "/home"}
+        result = scrub_env(base_env=env, extra_strip=["INNOCENT_VAR"])
+        assert "INNOCENT_VAR" not in result
+
+    def test_scrub_env_for_submind(self):
+        """scrub_env_for_submind() strips creds but sets MIND_API_KEY."""
+        from aiciv_mind.security import scrub_env_for_submind
+        env = {"ANTHROPIC_API_KEY": "secret", "HOME": "/home", "PATH": "/usr/bin"}
+        result = scrub_env_for_submind(base_env=env, mind_api_key="sub-key-123")
+        assert "ANTHROPIC_API_KEY" not in result
+        assert result["MIND_API_KEY"] == "sub-key-123"
+        assert "HOME" in result
+
+    def test_scrub_env_for_submind_no_key(self):
+        """scrub_env_for_submind() without mind_api_key doesn't set it."""
+        from aiciv_mind.security import scrub_env_for_submind
+        env = {"HOME": "/home"}
+        result = scrub_env_for_submind(base_env=env)
+        assert "MIND_API_KEY" not in result
+
+    def test_matches_credential_pattern(self):
+        """_matches_credential_pattern() matches expected patterns."""
+        from aiciv_mind.security import _matches_credential_pattern
+        assert _matches_credential_pattern("SOME_API_KEY") is True
+        assert _matches_credential_pattern("STRIPE_SECRET_KEY") is True
+        assert _matches_credential_pattern("ANTHROPIC_API_KEY") is True
+        assert _matches_credential_pattern("GOOGLE_APPLICATION_CREDENTIALS") is True  # matches ^GOOGLE_.*
+        assert _matches_credential_pattern("PATH") is False
+        assert _matches_credential_pattern("SAFE_VARIABLE") is False
+
+    def test_compiled_patterns_exist(self):
+        """Credential patterns are pre-compiled at module level."""
+        from aiciv_mind.security import _COMPILED_PATTERNS, CREDENTIAL_PATTERNS
+        assert len(_COMPILED_PATTERNS) == len(CREDENTIAL_PATTERNS)
+        assert len(_COMPILED_PATTERNS) > 10  # reasonable number of patterns
+
+
+class TestBrowserToolsRegistration:
+    """Test browser tools registration and definitions — no Playwright dependency needed."""
+
+    def test_register_all_browser_tools(self):
+        """register_browser_tools() registers all 7 browser tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.browser_tools import register_browser_tools
+        reg = ToolRegistry()
+        register_browser_tools(reg)
+        expected = ["browser_navigate", "browser_click", "browser_type",
+                    "browser_snapshot", "browser_screenshot", "browser_evaluate",
+                    "browser_close"]
+        for name in expected:
+            assert name in reg.names(), f"Expected '{name}' to be registered"
+
+    def test_browser_navigate_has_url_property(self):
+        """browser_navigate definition requires 'url' parameter."""
+        from aiciv_mind.tools.browser_tools import NAVIGATE_DEFINITION
+        assert "url" in NAVIGATE_DEFINITION["input_schema"]["properties"]
+        assert "url" in NAVIGATE_DEFINITION["input_schema"]["required"]
+
+    def test_browser_click_has_selector_property(self):
+        """browser_click definition requires 'selector' parameter."""
+        from aiciv_mind.tools.browser_tools import CLICK_DEFINITION
+        assert "selector" in CLICK_DEFINITION["input_schema"]["properties"]
+        assert "selector" in CLICK_DEFINITION["input_schema"]["required"]
+
+    def test_browser_type_requires_selector_and_text(self):
+        """browser_type definition requires both 'selector' and 'text'."""
+        from aiciv_mind.tools.browser_tools import TYPE_DEFINITION
+        required = TYPE_DEFINITION["input_schema"]["required"]
+        assert "selector" in required
+        assert "text" in required
+
+    def test_browser_evaluate_requires_expression(self):
+        """browser_evaluate definition requires 'expression'."""
+        from aiciv_mind.tools.browser_tools import EVALUATE_DEFINITION
+        assert "expression" in EVALUATE_DEFINITION["input_schema"]["required"]
+
+    def test_format_a11y_node(self):
+        """_format_a11y_node() recursively formats accessibility tree."""
+        from aiciv_mind.tools.browser_tools import _format_a11y_node
+        node = {
+            "role": "heading",
+            "name": "Welcome",
+            "children": [
+                {"role": "link", "name": "Click here", "children": []},
+            ],
+        }
+        lines = []
+        _format_a11y_node(node, lines, indent=0)
+        assert len(lines) == 2
+        assert 'heading "Welcome"' in lines[0]
+        assert 'link "Click here"' in lines[1]
+        assert lines[1].startswith("  ")  # indented
+
+    def test_browser_custom_timeouts(self):
+        """Browser tools should have custom timeouts registered."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.browser_tools import register_browser_tools
+        reg = ToolRegistry()
+        register_browser_tools(reg)
+        assert reg._timeouts.get("browser_navigate") == 60.0
+        assert reg._timeouts.get("browser_click") == 30.0
+        assert reg._timeouts.get("browser_evaluate") == 15.0
+
+
+class TestNetlifyToolsR21:
+    """Test Netlify tool registration and definitions."""
+
+    def test_register_netlify_tools(self):
+        """register_netlify_tools() registers deploy and status."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.netlify_tools import register_netlify_tools
+        reg = ToolRegistry()
+        register_netlify_tools(reg)
+        assert "netlify_deploy" in reg.names()
+        assert "netlify_status" in reg.names()
+        assert reg.is_read_only("netlify_deploy") is False
+        assert reg.is_read_only("netlify_status") is True
+
+    def test_deploy_requires_deploy_dir(self):
+        """netlify_deploy definition requires deploy_dir."""
+        from aiciv_mind.tools.netlify_tools import _DEPLOY_DEFINITION
+        assert "deploy_dir" in _DEPLOY_DEFINITION["input_schema"]["required"]
+
+    def test_deploy_empty_dir_returns_error(self):
+        """_deploy_handler returns error for empty deploy_dir."""
+        import asyncio
+        from aiciv_mind.tools.netlify_tools import _deploy_handler
+        result = asyncio.run(_deploy_handler({"deploy_dir": ""}))
+        assert "ERROR" in result
+
+    def test_deploy_nonexistent_dir_returns_error(self):
+        """_deploy_handler returns error for nonexistent directory."""
+        import asyncio
+        from aiciv_mind.tools.netlify_tools import _deploy_handler
+        result = asyncio.run(_deploy_handler({"deploy_dir": "/tmp/nonexistent_netlify_dir_xyz"}))
+        assert "ERROR" in result
+        assert "not found" in result.lower() or "Directory" in result
+
+    def test_get_netlify_token_from_env(self, monkeypatch):
+        """_get_netlify_token reads from NETLIFY_AUTH_TOKEN env var."""
+        from aiciv_mind.tools.netlify_tools import _get_netlify_token
+        monkeypatch.setenv("NETLIFY_AUTH_TOKEN", "test-token-123")
+        assert _get_netlify_token() == "test-token-123"
+
+    def test_get_netlify_token_missing(self, monkeypatch):
+        """_get_netlify_token returns None when no token available."""
+        from aiciv_mind.tools.netlify_tools import _get_netlify_token
+        monkeypatch.delenv("NETLIFY_AUTH_TOKEN", raising=False)
+        # Also need to handle the file fallback — might return None or a value
+        # We just verify it doesn't crash
+        result = _get_netlify_token()
+        # Result could be None or a string from CLI config
+        assert result is None or isinstance(result, str)
+
+    def test_site_id_constant(self):
+        """The Netlify site ID constant is the expected value."""
+        from aiciv_mind.tools.netlify_tools import AICIV_INC_SITE_ID
+        assert AICIV_INC_SITE_ID == "843d1615-7086-461d-a6cf-511c1d54b6e0"
+
+
+class TestVoiceToolsR21:
+    """Test voice tool registration and definitions."""
+
+    def test_register_voice_tools(self):
+        """register_voice_tools() registers text_to_speech."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.voice_tools import register_voice_tools
+        reg = ToolRegistry()
+        register_voice_tools(reg)
+        assert "text_to_speech" in reg.names()
+        assert reg.is_read_only("text_to_speech") is False
+
+    def test_tts_requires_text(self):
+        """text_to_speech definition requires 'text'."""
+        from aiciv_mind.tools.voice_tools import _TTS_DEFINITION
+        assert "text" in _TTS_DEFINITION["input_schema"]["required"]
+
+    def test_tts_empty_text_returns_error(self):
+        """_tts_handler returns error for empty text."""
+        import asyncio
+        from aiciv_mind.tools.voice_tools import _tts_handler
+        result = asyncio.run(_tts_handler({"text": ""}))
+        assert "ERROR" in result
+        assert "No text" in result
+
+    def test_tts_text_too_long_returns_error(self):
+        """_tts_handler returns error for text exceeding 5000 chars."""
+        import asyncio
+        from aiciv_mind.tools.voice_tools import _tts_handler
+        result = asyncio.run(_tts_handler({"text": "x" * 5001}))
+        assert "ERROR" in result
+        assert "too long" in result.lower()
+
+    def test_tts_missing_api_key_returns_error(self, monkeypatch):
+        """_tts_handler returns error when ELEVENLABS_API_KEY is missing."""
+        import asyncio
+        from aiciv_mind.tools.voice_tools import _tts_handler
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+        result = asyncio.run(_tts_handler({"text": "Hello world"}))
+        assert "ERROR" in result
+        assert "ELEVENLABS_API_KEY" in result
+
+    def test_constants(self):
+        """Voice tool constants are reasonable."""
+        from aiciv_mind.tools.voice_tools import DEFAULT_MODEL, MAX_TEXT_LENGTH, TIMEOUT_SECONDS
+        assert MAX_TEXT_LENGTH == 5000
+        assert TIMEOUT_SECONDS == 30
+        assert "eleven" in DEFAULT_MODEL.lower()
+
+
+class TestWebFetchR21:
+    """Test web_fetch tool registration and validation logic."""
+
+    def test_register_web_fetch(self):
+        """register_web_fetch() registers the tool as read-only."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.web_fetch_tools import register_web_fetch
+        reg = ToolRegistry()
+        register_web_fetch(reg)
+        assert "web_fetch" in reg.names()
+        assert reg.is_read_only("web_fetch") is True
+
+    def test_empty_url_returns_error(self):
+        """_web_fetch_handler returns error for empty URL."""
+        import asyncio
+        from aiciv_mind.tools.web_fetch_tools import _web_fetch_handler
+        result = asyncio.run(_web_fetch_handler({"url": ""}))
+        assert "ERROR" in result
+        assert "No URL" in result
+
+    def test_invalid_protocol_returns_error(self):
+        """_web_fetch_handler rejects URLs without http(s)://."""
+        import asyncio
+        from aiciv_mind.tools.web_fetch_tools import _web_fetch_handler
+        result = asyncio.run(_web_fetch_handler({"url": "ftp://example.com"}))
+        assert "ERROR" in result
+        assert "http" in result.lower()
+
+    def test_constants(self):
+        """Web fetch constants are reasonable."""
+        from aiciv_mind.tools.web_fetch_tools import TIMEOUT_SECONDS, MAX_CONTENT_LENGTH
+        assert TIMEOUT_SECONDS == 30
+        assert MAX_CONTENT_LENGTH == 100_000
+
+
+class TestWebSearchR21:
+    """Test web_search tool registration and validation."""
+
+    def test_register_web_search(self):
+        """register_web_search() registers the tool as read-only."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.web_search_tools import register_web_search
+        reg = ToolRegistry()
+        register_web_search(reg)
+        assert "web_search" in reg.names()
+        assert reg.is_read_only("web_search") is True
+
+    def test_missing_api_key_returns_message(self, monkeypatch):
+        """_web_search_handler returns helpful message when OLLAMA_API_KEY missing."""
+        import asyncio
+        from aiciv_mind.tools.web_search_tools import _web_search_handler
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+        result = asyncio.run(_web_search_handler({"query": "test"}))
+        assert "unavailable" in result.lower() or "OLLAMA_API_KEY" in result
+
+    def test_definition_requires_query(self):
+        """web_search definition requires 'query'."""
+        from aiciv_mind.tools.web_search_tools import _WEB_SEARCH_DEFINITION
+        assert "query" in _WEB_SEARCH_DEFINITION["input_schema"]["required"]
+
+
+class TestResourceToolsR21:
+    """Test resource_usage, token_stats, session_stats handlers."""
+
+    def test_register_resource_tools(self, tmp_path):
+        """register_resource_tools() registers all 3 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.resource_tools import register_resource_tools
+        reg = ToolRegistry()
+        register_resource_tools(reg, mind_root=str(tmp_path))
+        assert "resource_usage" in reg.names()
+        assert "token_stats" in reg.names()
+        assert "session_stats" in reg.names()
+        assert reg.is_read_only("resource_usage") is True
+        assert reg.is_read_only("token_stats") is True
+        assert reg.is_read_only("session_stats") is True
+
+    def test_resource_usage_runs(self, tmp_path):
+        """resource_usage handler runs without error."""
+        from aiciv_mind.tools.resource_tools import _make_resource_usage_handler
+        handler = _make_resource_usage_handler(str(tmp_path))
+        result = handler({"verbose": False})
+        assert "Resource Usage" in result
+
+    def test_resource_usage_verbose(self, tmp_path):
+        """resource_usage handler includes per-process breakdown in verbose mode."""
+        from aiciv_mind.tools.resource_tools import _make_resource_usage_handler
+        handler = _make_resource_usage_handler(str(tmp_path))
+        result = handler({"verbose": True})
+        assert "Resource Usage" in result
+
+    def test_token_stats_no_log_file(self, tmp_path):
+        """token_stats returns message when log file doesn't exist."""
+        from aiciv_mind.tools.resource_tools import _make_token_stats_handler
+        handler = _make_token_stats_handler(str(tmp_path / "nonexistent.jsonl"))
+        result = handler({})
+        assert "No token usage data" in result
+
+    def test_token_stats_parses_records(self, tmp_path):
+        """token_stats parses JSONL records and returns summary."""
+        import json
+        from datetime import datetime
+        from aiciv_mind.tools.resource_tools import _make_token_stats_handler
+        log_file = tmp_path / "token_usage.jsonl"
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        records = [
+            {"timestamp": now, "model": "test-model", "input_tokens": 100,
+             "output_tokens": 50, "thinking_tokens": 10, "estimated_cost_usd": 0.005,
+             "latency_ms": 200},
+            {"timestamp": now, "model": "test-model", "input_tokens": 200,
+             "output_tokens": 100, "thinking_tokens": 20, "estimated_cost_usd": 0.01,
+             "latency_ms": 300},
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in records))
+        handler = _make_token_stats_handler(str(log_file))
+        result = handler({"period": "all", "by_model": True})
+        assert "Token Stats" in result
+        assert "300" in result  # total input tokens
+        assert "test-model" in result
+
+    def test_session_stats_no_dir(self, tmp_path):
+        """session_stats returns message when session dir doesn't exist."""
+        from aiciv_mind.tools.resource_tools import _make_session_stats_handler
+        handler = _make_session_stats_handler(
+            str(tmp_path / "nonexistent_sessions"),
+            str(tmp_path / "token.jsonl"),
+        )
+        result = handler({})
+        assert "No session logs" in result
+
+    def test_session_stats_with_data(self, tmp_path):
+        """session_stats parses session JSONL files."""
+        import json
+        from aiciv_mind.tools.resource_tools import _make_session_stats_handler
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        session_file = sessions_dir / "test-session.jsonl"
+        records = [
+            {"type": "user", "tokens": {"input": 10, "output": 5}},
+            {"type": "assistant", "tokens": {"input": 20, "output": 15}},
+            {"type": "tool_call", "tools_used": ["bash", "read_file"]},
+        ]
+        session_file.write_text("\n".join(json.dumps(r) for r in records))
+        handler = _make_session_stats_handler(str(sessions_dir), str(tmp_path / "token.jsonl"))
+        result = handler({})
+        assert "Session Stats" in result
+        assert "1" in result  # at least 1 session
+
+    def test_session_stats_specific_session(self, tmp_path):
+        """session_stats for a specific session returns detail."""
+        import json
+        from aiciv_mind.tools.resource_tools import _make_session_stats_handler
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        session_file = sessions_dir / "my-session.jsonl"
+        records = [
+            {"type": "user", "tokens": {"input": 10, "output": 5}},
+            {"type": "tool_call", "tools_used": ["bash", "bash", "read_file"], "duration_ms": 500},
+        ]
+        session_file.write_text("\n".join(json.dumps(r) for r in records))
+        handler = _make_session_stats_handler(str(sessions_dir), str(tmp_path / "token.jsonl"))
+        result = handler({"session_id": "my-session"})
+        assert "my-session" in result
+        assert "bash" in result
+
+
+class TestHandoffToolsR21:
+    """Test handoff_context tool."""
+
+    def test_register_handoff_tools(self, tmp_path, memory_store):
+        """register_handoff_tools() registers the handoff_context tool."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.handoff_tools import register_handoff_tools
+        reg = ToolRegistry()
+        register_handoff_tools(reg, memory_store=memory_store, mind_root=str(tmp_path))
+        assert "handoff_context" in reg.names()
+        assert reg.is_read_only("handoff_context") is True
+
+    def test_handoff_context_with_mind_root(self, tmp_path):
+        """handoff_context generates git section when mind_root is a git repo."""
+        from aiciv_mind.tools.handoff_tools import _make_handoff_context_handler
+        handler = _make_handoff_context_handler(mind_root=str(tmp_path))
+        result = handler({"since_commits": 5})
+        assert "Handoff Context" in result
+        # Should have git sections even if not a repo (they'll show error gracefully)
+        assert "Commits" in result or "Changes" in result
+
+    def test_handoff_context_no_mind_root(self):
+        """handoff_context works without mind_root (no git sections)."""
+        from aiciv_mind.tools.handoff_tools import _make_handoff_context_handler
+        handler = _make_handoff_context_handler()
+        result = handler({})
+        assert "Handoff Context" in result
+
+    def test_handoff_context_with_registry(self):
+        """handoff_context includes tool list when registry is provided."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.handoff_tools import _make_handoff_context_handler
+        reg = ToolRegistry()
+        reg.register("test_tool", {"name": "test_tool"}, lambda inp: "ok")
+        handler = _make_handoff_context_handler(registry=reg)
+        result = handler({})
+        assert "test_tool" in result
+        assert "Available Tools" in result
+
+    def test_handoff_context_with_memory_store(self, memory_store):
+        """handoff_context includes memory stats when memory_store provided."""
+        from aiciv_mind.tools.handoff_tools import _make_handoff_context_handler
+        handler = _make_handoff_context_handler(memory_store=memory_store)
+        result = handler({})
+        assert "Memory Stats" in result or "Evolution Log" in result
+
+    def test_git_recent_commits_helper(self, tmp_path):
+        """_git_recent_commits returns log or error gracefully."""
+        from aiciv_mind.tools.handoff_tools import _git_recent_commits
+        result = _git_recent_commits(str(tmp_path), n=5)
+        # tmp_path is not a git repo, so it should return a graceful error
+        assert isinstance(result, str)
+
+    def test_git_changed_files_helper(self, tmp_path):
+        """_git_changed_files returns status or error gracefully."""
+        from aiciv_mind.tools.handoff_tools import _git_changed_files
+        result = _git_changed_files(str(tmp_path))
+        assert isinstance(result, str)
+
+
+class TestLongRunningToolTimeouts:
+    """Test that _LONG_RUNNING_TOOLS get the extended timeout."""
+
+    def test_long_running_tools_set(self):
+        """_LONG_RUNNING_TOOLS contains the expected tools."""
+        from aiciv_mind.tools import _LONG_RUNNING_TOOLS
+        assert "bash" in _LONG_RUNNING_TOOLS
+        assert "web_search" in _LONG_RUNNING_TOOLS
+        assert "web_fetch" in _LONG_RUNNING_TOOLS
+        assert "netlify_deploy" in _LONG_RUNNING_TOOLS
+        assert "spawn_submind" in _LONG_RUNNING_TOOLS
+
+    def test_default_timeout_constant(self):
+        """DEFAULT_TOOL_TIMEOUT is 15 seconds."""
+        from aiciv_mind.tools import DEFAULT_TOOL_TIMEOUT
+        assert DEFAULT_TOOL_TIMEOUT == 15.0
+
+    def test_long_timeout_constant(self):
+        """LONG_TOOL_TIMEOUT is 120 seconds."""
+        from aiciv_mind.tools import LONG_TOOL_TIMEOUT
+        assert LONG_TOOL_TIMEOUT == 120.0
+
+    def test_async_timeout_triggers(self):
+        """Async tool that exceeds timeout returns timeout error."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+
+        async def slow_handler(inp):
+            await asyncio.sleep(10)
+            return "done"
+
+        reg = ToolRegistry()
+        reg.register("slow_tool", {"name": "slow_tool"}, slow_handler, timeout=0.1)
+        result = asyncio.run(reg.execute("slow_tool", {}))
+        assert "timed out" in result.lower() or "TIMEOUT" in result
