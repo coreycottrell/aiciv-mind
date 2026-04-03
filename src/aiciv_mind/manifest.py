@@ -38,6 +38,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 4096
     call_timeout_s: float = 120.0  # Max seconds per model API call (0 = no timeout)
+    extra_body: dict[str, Any] = {}  # Extra params passed to LiteLLM (e.g. reasoning_split)
 
     @property
     def is_inherit(self) -> bool:

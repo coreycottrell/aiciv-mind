@@ -794,6 +794,8 @@ class Mind:
             system=system_prompt,
             messages=self._messages,
         )
+        if self.manifest.model.extra_body:
+            kwargs["extra_body"] = self.manifest.model.extra_body
         if tools_list:
             kwargs["tools"] = tools_list
 

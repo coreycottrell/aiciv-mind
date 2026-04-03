@@ -12,8 +12,10 @@ system_prompt_path: "self/soul.md"
 
 model:
   preferred: "minimax-m27"
-  temperature: 0.7
+  temperature: 1.0
   max_tokens: 16384
+  extra_body:
+    reasoning_split: true
 
 tools:
   - name: "bash"
