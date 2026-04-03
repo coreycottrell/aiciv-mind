@@ -1,19 +1,32 @@
 schema_version: "1.0"
 mind_id: "context-engineer"
 display_name: "Context Engineering Sub-Mind"
-role: "context-optimizer"
+role: "agent"
+
+# Context Engineer — Root's metacognition-as-a-service.
+#
+# Primary can delegate context optimization here instead of doing it inline.
+# Receives a context snapshot, returns structured JSON recommendations:
+# evict, pin, unpin, load_query, strategy.
+#
+# Designed to be fast (low temp, small max_tokens, limited tools).
+# Never needs conversation — pure input → output.
 
 system_prompt_path: "self/context-engineer.md"
 
 model:
-  preferred: "kimi-k2"
-  temperature: 0.2
-  max_tokens: 1024
+  preferred: "minimax-m27"
+  temperature: 0.2  # Low — precision over creativity for context analysis
+  max_tokens: 2048
 
 tools:
   - name: "memory_search"
     enabled: true
   - name: "read_file"
+    enabled: true
+  - name: "introspect_context"
+    enabled: true
+  - name: "get_context_snapshot"
     enabled: true
 
 auth:
@@ -24,7 +37,7 @@ memory:
   backend: "sqlite_fts5"
   db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
   markdown_mirror: false
-  auto_search_before_task: false
+  auto_search_before_task: false  # Context engineer doesn't need auto-search
   max_context_memories: 3
 
 sub_minds: []
