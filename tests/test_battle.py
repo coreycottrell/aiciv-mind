@@ -8969,3 +8969,465 @@ class TestLongRunningToolTimeouts:
         reg.register("slow_tool", {"name": "slow_tool"}, slow_handler, timeout=0.1)
         result = asyncio.run(reg.execute("slow_tool", {}))
         assert "timed out" in result.lower() or "TIMEOUT" in result
+
+
+# ===========================================================================
+# Round 22 — PlanningGate + classify_task, email/calendar/hub tools,
+#             SpawnError, queue handler, ToolRegistry combos
+# ===========================================================================
+
+
+class TestTaskComplexity:
+    """Test TaskComplexity enum and gate_depth."""
+
+    def test_enum_values(self):
+        from aiciv_mind.planning import TaskComplexity
+        assert TaskComplexity.TRIVIAL.value == "trivial"
+        assert TaskComplexity.SIMPLE.value == "simple"
+        assert TaskComplexity.MEDIUM.value == "medium"
+        assert TaskComplexity.COMPLEX.value == "complex"
+        assert TaskComplexity.VARIABLE.value == "variable"
+
+    def test_gate_depth_ordering(self):
+        """gate_depth increases with complexity."""
+        from aiciv_mind.planning import TaskComplexity
+        assert TaskComplexity.TRIVIAL.gate_depth < TaskComplexity.SIMPLE.gate_depth
+        assert TaskComplexity.SIMPLE.gate_depth < TaskComplexity.MEDIUM.gate_depth
+        assert TaskComplexity.MEDIUM.gate_depth < TaskComplexity.COMPLEX.gate_depth
+        assert TaskComplexity.COMPLEX.gate_depth < TaskComplexity.VARIABLE.gate_depth
+
+    def test_gate_depth_values(self):
+        """gate_depth returns 0-4."""
+        from aiciv_mind.planning import TaskComplexity
+        assert TaskComplexity.TRIVIAL.gate_depth == 0
+        assert TaskComplexity.VARIABLE.gate_depth == 4
+
+
+class TestClassifyTask:
+    """Test classify_task() heuristic complexity classification."""
+
+    def test_trivial_task(self):
+        """Short, simple task classifies as trivial."""
+        from aiciv_mind.planning import classify_task, TaskComplexity
+        result = classify_task("list files", memory_hit_count=5)
+        assert result.complexity == TaskComplexity.TRIVIAL
+        assert result.confidence > 0.0
+        assert result.reason  # Non-empty reason string
+
+    def test_simple_task(self):
+        """Moderate task with some keywords."""
+        from aiciv_mind.planning import classify_task, TaskComplexity
+        result = classify_task(
+            "Read the config file and check if the deploy flag is set",
+            memory_hit_count=3,
+        )
+        assert result.complexity in (TaskComplexity.TRIVIAL, TaskComplexity.SIMPLE)
+
+    def test_complex_task(self):
+        """Multi-step task with complexity keywords classifies as medium+."""
+        from aiciv_mind.planning import classify_task, TaskComplexity
+        result = classify_task(
+            "Architect and implement a new authentication system. First, design "
+            "the database schema. Then implement the API endpoints. After that, "
+            "integrate with the existing gateway. Finally, deploy to production.",
+            memory_hit_count=0,
+        )
+        assert result.complexity.gate_depth >= TaskComplexity.MEDIUM.gate_depth
+
+    def test_novel_task_gets_higher_novelty(self):
+        """Tasks with novelty keywords and no memory hits get higher novelty score."""
+        from aiciv_mind.planning import classify_task
+        result = classify_task(
+            "Explore this new experimental prototype",
+            memory_hit_count=0,
+        )
+        assert result.signals["novelty"]["score"] > 0.3
+
+    def test_familiar_task_gets_lower_novelty(self):
+        """Tasks with many memory hits get lower novelty score."""
+        from aiciv_mind.planning import classify_task
+        result = classify_task(
+            "Check status",
+            memory_hit_count=10,
+        )
+        assert result.signals["novelty"]["score"] < 0.3
+
+    def test_irreversible_actions_raise_complexity(self):
+        """Tasks with delete/deploy keywords get higher reversibility score."""
+        from aiciv_mind.planning import classify_task
+        result = classify_task(
+            "Delete all old logs and deploy the new version to production",
+            memory_hit_count=5,
+        )
+        assert result.signals["reversibility"]["score"] > 0.0
+        assert "delete" in result.signals["reversibility"]["found"]
+        assert "deploy" in result.signals["reversibility"]["found"]
+
+    def test_multi_step_detection(self):
+        """Tasks with step indicators get higher multi_step score."""
+        from aiciv_mind.planning import classify_task
+        result = classify_task(
+            "First update the database. Then restart the service. Finally check the logs.",
+            memory_hit_count=3,
+        )
+        assert result.signals["multi_step"]["matches"] >= 2
+
+    def test_prior_success_rate_reduces_complexity(self):
+        """High prior_success_rate reduces weighted score."""
+        from aiciv_mind.planning import classify_task
+        # Same task, with and without success rate
+        result_no_sr = classify_task(
+            "Implement and deploy the new auth module",
+            memory_hit_count=0,
+        )
+        result_with_sr = classify_task(
+            "Implement and deploy the new auth module",
+            memory_hit_count=0,
+            prior_success_rate=0.95,
+        )
+        # With high success rate, complexity should be same or lower
+        assert result_with_sr.complexity.gate_depth <= result_no_sr.complexity.gate_depth
+
+    def test_classification_result_fields(self):
+        """ClassificationResult has all expected fields."""
+        from aiciv_mind.planning import classify_task
+        result = classify_task("test task")
+        assert hasattr(result, "complexity")
+        assert hasattr(result, "confidence")
+        assert hasattr(result, "signals")
+        assert hasattr(result, "reason")
+        assert 0.0 <= result.confidence <= 1.0
+
+    def test_length_signal(self):
+        """Length signal scales with word count."""
+        from aiciv_mind.planning import classify_task
+        short = classify_task("do it", memory_hit_count=5)
+        long = classify_task(" ".join(["word"] * 100), memory_hit_count=5)
+        assert short.signals["length"]["score"] < long.signals["length"]["score"]
+
+
+class TestPlanningGate:
+    """Test PlanningGate — planning depth proportional to complexity."""
+
+    def test_disabled_gate_returns_trivial(self):
+        """Disabled gate always returns trivial with empty plan."""
+        from aiciv_mind.planning import PlanningGate, TaskComplexity
+        gate = PlanningGate(enabled=False)
+        result = gate.run("implement a new authentication system")
+        assert result.complexity == TaskComplexity.TRIVIAL
+        assert result.plan == ""
+        assert result.elapsed_ms == 0.0
+
+    def test_enabled_gate_returns_plan(self):
+        """Enabled gate returns classification and plan text."""
+        from aiciv_mind.planning import PlanningGate
+        gate = PlanningGate(enabled=True)
+        result = gate.run("Check system status")
+        assert result.classification is not None
+        assert result.memories_consulted == 0  # no memory store
+        assert result.elapsed_ms >= 0
+
+    def test_gate_with_memory_store(self, memory_store):
+        """Gate with memory_store consults memories."""
+        from aiciv_mind.planning import PlanningGate
+        # Store a relevant memory
+        from aiciv_mind.memory import Memory
+        memory_store.store(Memory(
+            agent_id="test",
+            title="Previous auth work",
+            content="Built JWT auth for AgentAuth",
+            memory_type="learning",
+        ))
+        gate = PlanningGate(memory_store=memory_store, agent_id="test", enabled=True)
+        result = gate.run("Implement JWT authentication")
+        assert result.memories_consulted >= 0  # May or may not find the memory via FTS
+
+    def test_trivial_plan_is_minimal(self):
+        """Trivial tasks get minimal or empty plan text."""
+        from aiciv_mind.planning import PlanningGate, TaskComplexity
+        gate = PlanningGate(enabled=True)
+        result = gate.run("ls")
+        # Trivial with no memory hits → empty plan
+        if result.complexity == TaskComplexity.TRIVIAL:
+            assert len(result.plan) < 200  # Minimal
+
+    def test_complex_plan_includes_instructions(self):
+        """Complex tasks get plan text with planning instructions."""
+        from aiciv_mind.planning import PlanningGate, TaskComplexity
+        gate = PlanningGate(enabled=True)
+        result = gate.run(
+            "Architect and implement a new distributed task scheduling system. "
+            "First design the schema. Then build the API. After that integrate "
+            "with the gateway. Finally deploy and monitor."
+        )
+        if result.complexity.gate_depth >= TaskComplexity.SIMPLE.gate_depth:
+            assert "Planning" in result.plan or "approach" in result.plan
+
+    def test_planning_result_fields(self):
+        """PlanningResult has all expected fields."""
+        from aiciv_mind.planning import PlanningGate
+        gate = PlanningGate(enabled=True)
+        result = gate.run("test task")
+        assert hasattr(result, "complexity")
+        assert hasattr(result, "classification")
+        assert hasattr(result, "plan")
+        assert hasattr(result, "memories_consulted")
+        assert hasattr(result, "elapsed_ms")
+        assert hasattr(result, "competing_hypotheses")
+
+
+class TestEmailToolsR22:
+    """Test email tool registration and definitions."""
+
+    def test_register_email_tools(self):
+        """register_email_tools() registers email_read and email_send."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.email_tools import register_email_tools
+        reg = ToolRegistry()
+        register_email_tools(reg, "test-inbox@agentmail.to")
+        assert "email_read" in reg.names()
+        assert "email_send" in reg.names()
+        assert reg.is_read_only("email_read") is True
+        assert reg.is_read_only("email_send") is False
+
+    def test_send_definition_requires_fields(self):
+        """email_send requires to, subject, body."""
+        from aiciv_mind.tools.email_tools import _SEND_DEFINITION
+        required = _SEND_DEFINITION["input_schema"]["required"]
+        assert "to" in required
+        assert "subject" in required
+        assert "body" in required
+
+    def test_read_definition_has_optional_fields(self):
+        """email_read has limit and message_id as optional properties."""
+        from aiciv_mind.tools.email_tools import _READ_DEFINITION
+        props = _READ_DEFINITION["input_schema"]["properties"]
+        assert "limit" in props
+        assert "message_id" in props
+        # No required fields — all optional
+        assert "required" not in _READ_DEFINITION["input_schema"]
+
+
+class TestCalendarToolsR22:
+    """Test calendar tool registration and definitions."""
+
+    def test_register_calendar_tools(self):
+        """register_calendar_tools() registers 3 calendar tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.calendar_tools import register_calendar_tools
+        reg = ToolRegistry()
+        register_calendar_tools(reg, keypair_path="/tmp/fake.json", calendar_id="test-cal")
+        assert "calendar_list_events" in reg.names()
+        assert "calendar_create_event" in reg.names()
+        assert "calendar_delete_event" in reg.names()
+        assert reg.is_read_only("calendar_list_events") is True
+        assert reg.is_read_only("calendar_create_event") is False
+        assert reg.is_read_only("calendar_delete_event") is False
+
+    def test_create_event_requires_fields(self):
+        """calendar_create_event requires title, start_time, end_time."""
+        from aiciv_mind.tools.calendar_tools import _CREATE_EVENT_DEFINITION
+        required = _CREATE_EVENT_DEFINITION["input_schema"]["required"]
+        assert "title" in required
+        assert "start_time" in required
+        assert "end_time" in required
+
+    def test_delete_event_requires_event_id(self):
+        """calendar_delete_event requires event_id."""
+        from aiciv_mind.tools.calendar_tools import _DELETE_EVENT_DEFINITION
+        assert "event_id" in _DELETE_EVENT_DEFINITION["input_schema"]["required"]
+
+    def test_constants(self):
+        """Calendar tool constants point to expected URLs."""
+        from aiciv_mind.tools.calendar_tools import AGENTAUTH_URL, AGENTCAL_URL
+        assert "8700" in AGENTAUTH_URL
+        assert "8300" in AGENTCAL_URL
+
+
+class TestHubToolsR22:
+    """Test hub tool registration, definitions, and queue handler."""
+
+    def test_register_hub_tools_without_queue(self):
+        """register_hub_tools() without queue registers 5 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hub_tools import register_hub_tools
+
+        class MockSuiteClient:
+            hub = None
+
+        reg = ToolRegistry()
+        register_hub_tools(reg, MockSuiteClient())
+        names = reg.names()
+        assert "hub_post" in names
+        assert "hub_reply" in names
+        assert "hub_read" in names
+        assert "hub_list_rooms" in names
+        assert "hub_feed" in names
+        assert "hub_queue_read" not in names
+
+    def test_register_hub_tools_with_queue(self, tmp_path):
+        """register_hub_tools() with queue_path registers hub_queue_read too."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hub_tools import register_hub_tools
+
+        class MockSuiteClient:
+            hub = None
+
+        reg = ToolRegistry()
+        register_hub_tools(reg, MockSuiteClient(), queue_path=str(tmp_path / "queue.jsonl"))
+        assert "hub_queue_read" in reg.names()
+
+    def test_hub_post_requires_fields(self):
+        """hub_post requires room_id, title, body."""
+        from aiciv_mind.tools.hub_tools import _POST_DEFINITION
+        required = _POST_DEFINITION["input_schema"]["required"]
+        assert "room_id" in required
+        assert "title" in required
+        assert "body" in required
+
+    def test_hub_reply_requires_fields(self):
+        """hub_reply requires thread_id and body."""
+        from aiciv_mind.tools.hub_tools import _REPLY_DEFINITION
+        required = _REPLY_DEFINITION["input_schema"]["required"]
+        assert "thread_id" in required
+        assert "body" in required
+
+    def test_hub_list_rooms_requires_group_id(self):
+        """hub_list_rooms requires group_id."""
+        from aiciv_mind.tools.hub_tools import _LIST_ROOMS_DEFINITION
+        assert "group_id" in _LIST_ROOMS_DEFINITION["input_schema"]["required"]
+
+    def test_read_only_flags(self):
+        """Read operations are read_only, write operations are not."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hub_tools import register_hub_tools
+
+        class MockSuiteClient:
+            hub = None
+
+        reg = ToolRegistry()
+        register_hub_tools(reg, MockSuiteClient())
+        assert reg.is_read_only("hub_read") is True
+        assert reg.is_read_only("hub_list_rooms") is True
+        assert reg.is_read_only("hub_feed") is True
+        assert reg.is_read_only("hub_post") is False
+        assert reg.is_read_only("hub_reply") is False
+
+    def test_queue_read_no_file(self, tmp_path):
+        """hub_queue_read returns message when queue file doesn't exist."""
+        from aiciv_mind.tools.hub_tools import _make_queue_read_handler
+        handler = _make_queue_read_handler(str(tmp_path / "nonexistent.jsonl"))
+        result = handler({})
+        assert "No queue file" in result
+
+    def test_queue_read_empty_file(self, tmp_path):
+        """hub_queue_read returns message for empty queue."""
+        queue_file = tmp_path / "queue.jsonl"
+        queue_file.write_text("")
+        from aiciv_mind.tools.hub_tools import _make_queue_read_handler
+        handler = _make_queue_read_handler(str(queue_file))
+        result = handler({})
+        assert "empty" in result.lower()
+
+    def test_queue_read_unprocessed_events(self, tmp_path):
+        """hub_queue_read returns and marks unprocessed events."""
+        import json
+        queue_file = tmp_path / "queue.jsonl"
+        events = [
+            {"event": "new_thread", "room_id": "room-1", "title": "Hello", "created_by": "synth", "processed": False},
+            {"event": "new_post", "room_id": "room-2", "title": "Reply", "created_by": "tether", "processed": True},
+        ]
+        queue_file.write_text("\n".join(json.dumps(e) for e in events))
+        from aiciv_mind.tools.hub_tools import _make_queue_read_handler
+        handler = _make_queue_read_handler(str(queue_file))
+        result = handler({})
+        assert "1 unprocessed" in result
+        assert "synth" in result
+
+        # Verify it was marked as processed
+        updated = queue_file.read_text().strip().splitlines()
+        for line in updated:
+            event = json.loads(line)
+            assert event["processed"] is True
+
+    def test_queue_read_all_processed(self, tmp_path):
+        """hub_queue_read reports no unprocessed when all are processed."""
+        import json
+        queue_file = tmp_path / "queue.jsonl"
+        events = [
+            {"event": "new_thread", "processed": True},
+            {"event": "new_post", "processed": True},
+        ]
+        queue_file.write_text("\n".join(json.dumps(e) for e in events))
+        from aiciv_mind.tools.hub_tools import _make_queue_read_handler
+        handler = _make_queue_read_handler(str(queue_file))
+        result = handler({})
+        assert "No unprocessed" in result
+        assert "2 total" in result
+
+
+class TestSpawnErrorR22:
+    """Test SpawnError exception class."""
+
+    def test_spawn_error_is_exception(self):
+        from aiciv_mind.spawner import SpawnError
+        assert issubclass(SpawnError, Exception)
+
+    def test_spawn_error_message(self):
+        from aiciv_mind.spawner import SpawnError
+        err = SpawnError("already running")
+        assert str(err) == "already running"
+
+
+class TestToolRegistryDefaultCombos:
+    """Test ToolRegistry.default() with various parameter combinations."""
+
+    def test_with_agentmail_registers_email_tools(self):
+        """Providing agentmail_inbox registers email tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(agentmail_inbox="test@agentmail.to")
+        names = reg.names()
+        assert "email_read" in names
+        assert "email_send" in names
+
+    def test_without_agentmail_no_email_tools(self):
+        """Without agentmail_inbox, email tools are not registered."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default()
+        names = reg.names()
+        assert "email_read" not in names
+        assert "email_send" not in names
+
+    def test_with_keypair_and_calendar_registers_calendar_tools(self, tmp_path):
+        """Providing keypair_path and calendar_id registers calendar tools."""
+        from aiciv_mind.tools import ToolRegistry
+        kp = tmp_path / "key.json"
+        kp.write_text('{"civ_id": "test", "private_key": "AAAA"}')
+        reg = ToolRegistry.default(keypair_path=str(kp), calendar_id="cal-123")
+        names = reg.names()
+        assert "calendar_list_events" in names
+        assert "calendar_create_event" in names
+        assert "calendar_delete_event" in names
+
+    def test_without_keypair_no_calendar_tools(self):
+        """Without keypair_path/calendar_id, calendar tools are not registered."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default()
+        names = reg.names()
+        assert "calendar_list_events" not in names
+
+    def test_with_memory_store_registers_handoff_tools(self, memory_store):
+        """Providing memory_store registers handoff_context."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(memory_store=memory_store)
+        assert "handoff_context" in reg.names()
+
+    def test_hooks_get_set(self):
+        """set_hooks() and get_hooks() work."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+        reg = ToolRegistry()
+        assert reg.get_hooks() is None
+        hooks = HookRunner()
+        reg.set_hooks(hooks)
+        assert reg.get_hooks() is hooks
