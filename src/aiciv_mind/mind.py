@@ -60,6 +60,7 @@ class Mind:
         self._tools = tools or ToolRegistry.default(memory_store=memory)
         self._model_router = model_router
         self._current_task: str = ""  # Track for model router outcome recording
+        self._memory_selector = None  # P2-8: AI-powered memory relevance selection
 
         # Attach hook governance if configured
         if manifest.hooks.enabled:
@@ -220,56 +221,8 @@ class Mind:
 
         # SEMI-STABLE: per-turn search results appended last
         if inject_memories and self.manifest.memory.auto_search_before_task:
-            # Phase 1: Direct search on task text
-            max_memories = self.manifest.memory.max_context_memories
-            memories = self.memory.search(
-                query=task,
-                agent_id=self.manifest.mind_id,
-                limit=max_memories,
-            )
-            seen_ids = {m["id"] for m in memories}
-
-            # Phase 2: If we have budget remaining, broaden search with extracted keywords
-            if len(memories) < max_memories:
-                _STOP_WORDS = {
-                    "the", "a", "an", "is", "are", "was", "were", "be", "been",
-                    "being", "have", "has", "had", "do", "does", "did", "will",
-                    "would", "could", "should", "may", "might", "can", "shall",
-                    "to", "of", "in", "for", "on", "with", "at", "by", "from",
-                    "and", "or", "not", "no", "but", "if", "then", "so", "as",
-                    "this", "that", "it", "its", "my", "your", "our", "their",
-                    "what", "which", "who", "whom", "how", "when", "where", "why",
-                    "all", "each", "every", "any", "some", "i", "you", "we", "they",
-                }
-                words = [w for w in task.lower().split() if w not in _STOP_WORDS and len(w) > 2]
-                # Take up to 5 significant words as a broadened query
-                if words:
-                    broad_query = " ".join(words[:5])
-                    if broad_query != task.lower().strip():
-                        extra = self.memory.search(
-                            query=broad_query,
-                            agent_id=self.manifest.mind_id,
-                            limit=max_memories - len(memories),
-                        )
-                        for m in extra:
-                            if m["id"] not in seen_ids:
-                                memories.append(m)
-                                seen_ids.add(m["id"])
-
-            if memories:
-                # Touch accessed memories (update depth signals)
-                for m in memories:
-                    self.memory.touch(m["id"])
-                if self._context_manager:
-                    memory_context = self._context_manager.format_search_results(memories)
-                else:
-                    memory_context = (
-                        "\n\n## Relevant memories from prior sessions:\n"
-                        "*These memories are HINTS, not facts. Verify before asserting.*\n"
-                    )
-                    for m in memories:
-                        created = m.get("created_at", "unknown")
-                        memory_context += f"\n### {m['title']}  *(written {created})*\n{m['content']}\n"
+            memory_context = await self._inject_memories(task)
+            if memory_context:
                 system_prompt = system_prompt + memory_context
 
         # Record this turn in the session journal
@@ -699,6 +652,80 @@ class Mind:
         )
 
         return result
+
+    # ------------------------------------------------------------------
+    # Memory injection (extracted for readability — P2-8 integration)
+    # ------------------------------------------------------------------
+
+    _STOP_WORDS: set[str] = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "can", "shall",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "and", "or", "not", "no", "but", "if", "then", "so", "as",
+        "this", "that", "it", "its", "my", "your", "our", "their",
+        "what", "which", "who", "whom", "how", "when", "where", "why",
+        "all", "each", "every", "any", "some", "i", "you", "we", "they",
+    }
+
+    async def _inject_memories(self, task: str) -> str:
+        """
+        Search memories relevant to the task, optionally rerank with AI selector,
+        touch accessed memories, and return formatted context string (or "").
+        """
+        max_memories = self.manifest.memory.max_context_memories
+
+        # Phase 1: Direct FTS5 search on task text
+        memories = self.memory.search(
+            query=task,
+            agent_id=self.manifest.mind_id,
+            limit=max_memories,
+        )
+        seen_ids = {m["id"] for m in memories}
+
+        # Phase 2: Broaden search with extracted keywords if budget remains
+        if len(memories) < max_memories:
+            words = [w for w in task.lower().split() if w not in self._STOP_WORDS and len(w) > 2]
+            if words:
+                broad_query = " ".join(words[:5])
+                if broad_query != task.lower().strip():
+                    extra = self.memory.search(
+                        query=broad_query,
+                        agent_id=self.manifest.mind_id,
+                        limit=max_memories - len(memories),
+                    )
+                    for m in extra:
+                        if m["id"] not in seen_ids:
+                            memories.append(m)
+                            seen_ids.add(m["id"])
+
+        # Phase 3 (P2-8): AI-powered reranking if selector available
+        if memories and self._memory_selector and len(memories) > max_memories:
+            try:
+                memories = await self._memory_selector.select(
+                    task, memories, top_k=max_memories,
+                )
+            except Exception as e:
+                logger.debug("MemorySelector failed, using FTS5 order: %s", e)
+
+        if not memories:
+            return ""
+
+        # Touch accessed memories (update depth signals)
+        for m in memories:
+            self.memory.touch(m["id"])
+
+        if self._context_manager:
+            return self._context_manager.format_search_results(memories)
+
+        context = (
+            "\n\n## Relevant memories from prior sessions:\n"
+            "*These memories are HINTS, not facts. Verify before asserting.*\n"
+        )
+        for m in memories:
+            created = m.get("created_at", "unknown")
+            context += f"\n### {m['title']}  *(written {created})*\n{m['content']}\n"
+        return context
 
     async def _call_model(self, system_prompt: str, tools_list: list[dict]) -> Any:
         """Single API call with current message history."""

@@ -204,6 +204,15 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
     except Exception as e:
         logging.getLogger("aiciv_mind.main").info("ModelRouter not available: %s", e)
 
+    # Memory selector (P2-8: AI-powered memory relevance reranking)
+    memory_selector = None
+    try:
+        from aiciv_mind.memory_selector import MemorySelector
+        memory_selector = MemorySelector()
+        logging.getLogger("aiciv_mind.main").info("MemorySelector initialized (model: %s)", memory_selector._model)
+    except Exception as e:
+        logging.getLogger("aiciv_mind.main").info("MemorySelector not available: %s", e)
+
     # Create mind
     mind = Mind(
         manifest=manifest,
@@ -215,6 +224,7 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
         boot_context_str=boot_str,
         model_router=model_router,
     )
+    mind._memory_selector = memory_selector
     _mind_ref[0] = mind  # now the message counter lambda works
 
     try:
