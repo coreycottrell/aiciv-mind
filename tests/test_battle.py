@@ -1077,6 +1077,66 @@ class TestTextToolCallParser:
         assert blocks[0].input["limit"] == 10
         store.close()
 
+    # --- Standard XML with <arguments> tag (3rd parser variant) ---
+
+    def test_xml_arguments_tag(self):
+        """Standard XML with <arguments>{JSON}</arguments> child element."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '<invoke name="memory_search">\n'
+            '<arguments>\n'
+            '{"limit": 5, "query": "identity"}\n'
+            '</arguments>\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        assert blocks[0].input["query"] == "identity"
+        assert blocks[0].input["limit"] == 5
+        store.close()
+
+    def test_xml_arguments_tag_multiple_tools(self):
+        """Multiple tools in minimax wrapper with <arguments> tags."""
+        mind, store = _make_mind_for_parser(["read_file", "memory_search"])
+        text = (
+            '<minimax:tool_call>\n'
+            '<invoke name="read_file">\n'
+            '<arguments>\n'
+            '{"filepath": "/tmp/test.yaml"}\n'
+            '</invoke>\n'
+            '<invoke name="memory_search">\n'
+            '<arguments>\n'
+            '{"limit": 5, "query": "identity"}\n'
+            '</invoke>\n'
+            '</minimax:tool_call>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 2
+        names = {b.name for b in blocks}
+        assert "read_file" in names
+        assert "memory_search" in names
+        # Check args parsed correctly
+        ms = [b for b in blocks if b.name == "memory_search"][0]
+        assert ms.input["query"] == "identity"
+        rf = [b for b in blocks if b.name == "read_file"][0]
+        assert rf.input["filepath"] == "/tmp/test.yaml"
+        store.close()
+
+    def test_xml_arguments_tag_no_closing(self):
+        """<arguments> tag without </arguments> closing — still extracts JSON."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '<invoke name="memory_search">\n'
+            '<arguments>\n'
+            '{"query": "test"}\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input["query"] == "test"
+        store.close()
+
     # --- Edge cases ---
 
     def test_empty_text_returns_empty(self):

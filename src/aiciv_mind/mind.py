@@ -1413,6 +1413,8 @@ class Mind:
                 )
 
         # Fallback: Standard XML — <invoke name="X"><parameter name="k">v</parameter></invoke>
+        # Also handles: <invoke name="X"><arguments>{JSON}</arguments></invoke>
+        # and: <invoke name="X">\n<arguments>\n{JSON}\n</invoke>
         # Runs AFTER hybrid parser to avoid matching hybrid format with empty args.
         if not blocks:
             invoke_re = re.compile(
@@ -1423,17 +1425,44 @@ class Mind:
                 name = _normalize_tool_name(match.group(1))
                 if not name:
                     continue
+                body = match.group(2)
                 args = {}
-                param_re = re.compile(
-                    r'<parameter\s+name="([^"]+)">(.*?)</parameter>',
+
+                # Try 1: <arguments>{JSON}</arguments> or <arguments>\n{JSON}
+                args_tag_re = re.compile(
+                    r'<arguments>\s*(\{.*?\})\s*(?:</arguments>|$)',
                     re.DOTALL,
                 )
-                for pm in param_re.finditer(match.group(2)):
-                    val = pm.group(2).strip()
+                args_tag_match = args_tag_re.search(body)
+                if args_tag_match:
                     try:
-                        args[pm.group(1)] = json.loads(val)
+                        args = json.loads(args_tag_match.group(1))
                     except (json.JSONDecodeError, ValueError):
-                        args[pm.group(1)] = val
+                        args = {}
+
+                # Try 2: bare JSON object in body (no <arguments> tag)
+                if not args:
+                    bare_json_re = re.compile(r'^\s*(\{.*?\})\s*$', re.DOTALL)
+                    bare_match = bare_json_re.match(body)
+                    if bare_match:
+                        try:
+                            args = json.loads(bare_match.group(1))
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+
+                # Try 3: <parameter name="k">v</parameter> tags
+                if not args:
+                    param_re = re.compile(
+                        r'<parameter\s+name="([^"]+)">(.*?)</parameter>',
+                        re.DOTALL,
+                    )
+                    for pm in param_re.finditer(body):
+                        val = pm.group(2).strip()
+                        try:
+                            args[pm.group(1)] = json.loads(val)
+                        except (json.JSONDecodeError, ValueError):
+                            args[pm.group(1)] = val
+
                 block = type("SyntheticToolUse", (), {
                     "name": name,
                     "input": args,
