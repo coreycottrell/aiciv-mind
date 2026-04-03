@@ -28,30 +28,50 @@ class Role(enum.Enum):
 
     @classmethod
     def from_str(cls, value: str) -> "Role":
-        """Parse role from manifest string (handles hyphens and underscores)."""
+        """Parse role from manifest string (handles hyphens, underscores, aliases)."""
         normalized = value.strip().lower().replace("-", "_")
         for member in cls:
             if member.value == normalized:
                 return member
+        # Check aliases — free-form role names that map to hierarchy levels
+        alias = _ROLE_ALIASES.get(normalized)
+        if alias is not None:
+            return alias
         raise ValueError(
             f"Unknown role '{value}'. Must be one of: "
-            f"{', '.join(m.value for m in cls)}"
+            f"{', '.join(m.value for m in cls)} "
+            f"(or alias: {', '.join(_ROLE_ALIASES)})"
         )
+
+
+# Aliases for manifest role strings that map to hierarchy levels.
+# "conductor-of-conductors" is Root's philosophical role name — structurally PRIMARY.
+_ROLE_ALIASES: dict[str, Role] = {
+    "conductor_of_conductors": Role.PRIMARY,
+    "conductor": Role.PRIMARY,
+    "lead": Role.TEAM_LEAD,
+    "worker": Role.AGENT,
+}
 
 
 # ---------------------------------------------------------------------------
 # Tool whitelists — the structural constraints
 # ---------------------------------------------------------------------------
 
-# Primary: 7 tools.  Can ONLY orchestrate + inter-mind coordination.
+# Primary: coordination + scratchpad + memory for routing decisions.
+# These MUST match names in the ToolRegistry.  See tools/ for definitions.
 PRIMARY_TOOLS: frozenset[str] = frozenset({
-    "spawn_team_lead",
-    "coordination_read",
-    "coordination_write",
-    "send_message",
-    "shutdown_team_lead",
-    "publish_surface",
-    "read_surface",
+    "spawn_team_lead",       # spawn_tools.py — create team lead sub-mind
+    "shutdown_team_lead",    # spawn_tools.py — graceful shutdown
+    "send_to_submind",       # submind_tools.py — IPC message to active sub-mind
+    "send_message",          # message_tools.py — inter-mind messaging
+    "coordination_read",     # coordination_tools.py — read coordination scratchpad
+    "coordination_write",    # coordination_tools.py — write coordination scratchpad
+    "scratchpad_read",       # scratchpad_tools.py — Root's private journal
+    "scratchpad_write",      # scratchpad_tools.py — Root's private journal
+    "scratchpad_append",     # scratchpad_tools.py — append to journal
+    "memory_search",         # memory_tools.py — search for routing decisions
+    "ab_model_test",         # ab_test_tools.py — A/B model comparison (parallel sub-minds)
 })
 
 # Team Lead: coordination + read-only memory + team scratchpad.

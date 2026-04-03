@@ -55,6 +55,10 @@ _SPAWN_TL_DEFINITION: dict = {
                 "type": "string",
                 "description": "The objective for this team lead session",
             },
+            "model": {
+                "type": "string",
+                "description": "Override the manifest's model (e.g. 'gemma4-orchestrator' for A/B testing)",
+            },
         },
         "required": ["mind_id", "manifest_path", "vertical"],
     },
@@ -69,6 +73,7 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
         manifest_path = tool_input.get("manifest_path", "").strip()
         vertical = tool_input.get("vertical", "").strip()
         objective = tool_input.get("objective", "").strip()
+        model_override = tool_input.get("model", "").strip() or None
 
         if not mind_id:
             return "ERROR: mind_id is required"
@@ -95,11 +100,13 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
             teams_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            handle = spawner.spawn(mind_id, manifest_path)
+            handle = spawner.spawn(mind_id, manifest_path, model_override=model_override)
             await asyncio.sleep(1)  # Wait for ZMQ connection
 
             context_parts = [f"Spawned team lead '{mind_id}' for vertical '{vertical}'"]
             context_parts.append(f"Pane: {handle.pane_id}")
+            if model_override:
+                context_parts.append(f"Model override: {model_override}")
 
             team_scratchpad = ""
             coord_scratchpad = ""

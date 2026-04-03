@@ -59,12 +59,18 @@ class SubMindSpawner:
         self,
         mind_id: str,
         manifest_path: str | Path,
+        model_override: str | None = None,
     ) -> MindHandle:
         """
         Spawn sub-mind in a new tmux window.
 
         The command run in the window:
-            python3 run_submind.py --manifest <manifest_path> --id <mind_id>
+            python3 run_submind.py --manifest <manifest_path> --id <mind_id> [--model <model>]
+
+        Args:
+            mind_id: unique identifier for this sub-mind
+            manifest_path: path to the sub-mind's manifest YAML
+            model_override: if set, overrides manifest.model.preferred (for A/B testing)
 
         Returns MindHandle with pane_id populated.
         Raises SpawnError if window with mind_id already exists.
@@ -93,12 +99,14 @@ class SubMindSpawner:
         )
         env_prefix = f"export {env_exports} && " if env_exports else ""
 
+        model_arg = f" --model {model_override}" if model_override else ""
         cmd = (
             f"cd {self._mind_root} && "
             f"{env_prefix}"
             f"{python_bin} {run_script} "
             f"--manifest {manifest_path} "
             f"--id {mind_id}"
+            f"{model_arg}"
         )
 
         window = session.new_window(window_name=mind_id, window_shell=cmd)

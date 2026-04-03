@@ -45,8 +45,8 @@ def _persist_result(task_id: str, mind_id: str, result: str, logger: logging.Log
         logger.warning("Failed to persist result for %s: %s", task_id, exc)
 
 
-async def run_submind(manifest_path: str, mind_id: str) -> None:
-    from aiciv_mind.manifest import MindManifest
+async def run_submind(manifest_path: str, mind_id: str, model_override: str | None = None) -> None:
+    from aiciv_mind.manifest import MindManifest, ModelConfig
     from aiciv_mind.memory import MemoryStore
     from aiciv_mind.tools import ToolRegistry
     from aiciv_mind.mind import Mind
@@ -62,6 +62,12 @@ async def run_submind(manifest_path: str, mind_id: str) -> None:
     if mind_id and mind_id != manifest.mind_id:
         logger.info("Overriding mind_id: %s -> %s", manifest.mind_id, mind_id)
         manifest = manifest.model_copy(update={"mind_id": mind_id})
+
+    # Override model if provided via CLI (used by A/B testing)
+    if model_override:
+        logger.info("Model override: %s -> %s", manifest.model.preferred, model_override)
+        new_model = manifest.model.model_copy(update={"preferred": model_override})
+        manifest = manifest.model_copy(update={"model": new_model})
 
     # Initialize memory (shared db)
     db_path = manifest.memory.db_path
@@ -163,11 +169,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="aiciv-mind sub-mind process")
     parser.add_argument("--manifest", required=True, help="Path to mind manifest YAML")
     parser.add_argument("--id", required=True, dest="mind_id", help="Mind ID override")
+    parser.add_argument("--model", default=None, help="Override manifest model.preferred")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     setup_logging(args.mind_id, args.log_level)
-    asyncio.run(run_submind(args.manifest, args.mind_id))
+    asyncio.run(run_submind(args.manifest, args.mind_id, model_override=args.model))
 
 
 if __name__ == "__main__":

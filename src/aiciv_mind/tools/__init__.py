@@ -308,6 +308,10 @@ class ToolRegistry:
             from aiciv_mind.tools.message_tools import register_message_tools
             register_message_tools(registry, bus=primary_bus, sender_id=agent_id)
 
+            # A/B model testing (PRIMARY spawns two sub-minds on different models)
+            from aiciv_mind.tools.ab_test_tools import register_ab_test_tools
+            register_ab_test_tools(registry, spawner=spawner, bus=primary_bus, mind_id=agent_id)
+
         if skills_dir is not None and memory_store is not None:
             from aiciv_mind.tools.skill_tools import register_skill_tools
             register_skill_tools(registry, memory_store, skills_dir)
@@ -351,5 +355,19 @@ class ToolRegistry:
         if keypair_path is not None and calendar_id is not None:
             from aiciv_mind.tools.calendar_tools import register_calendar_tools
             register_calendar_tools(registry, keypair_path, calendar_id)
+
+        # Apply role-based tool filtering (Design Principle A3: hard-coded roles)
+        # PRIMARY gets ~12 coordination tools. TEAM_LEAD gets ~7. AGENT gets all.
+        if role != "agent":
+            from aiciv_mind.roles import Role
+            try:
+                parsed_role = Role.from_str(role)
+                registry = registry.filter_by_role(parsed_role)
+                logger.info(
+                    "Role filter applied: %s → %d tools (from full registry)",
+                    role, len(registry._tools),
+                )
+            except ValueError:
+                logger.warning("Unknown role '%s' — returning full registry (no filter)", role)
 
         return registry

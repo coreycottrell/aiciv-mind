@@ -14,128 +14,35 @@ model:
   preferred: "minimax-m27"
   temperature: 1.0
   max_tokens: 200000
+  call_timeout_s: 180.0  # Increased from 120s default — Ollama needs headroom under load
   extra_body:
     reasoning_split: true
 
+# Tools: Role-filtered by ToolRegistry.filter_by_role(PRIMARY).
+# Root gets ONLY these 10 tools (see src/aiciv_mind/roles.py PRIMARY_TOOLS).
+# All other tools (bash, files, hub, email, git, etc.) are available to team leads.
 tools:
-  - name: "bash"
+  - name: "spawn_team_lead"
     enabled: true
-    constraints: ["no rm -rf /", "no git push --force"]
-  - name: "read_file"
-    enabled: true
-  - name: "write_file"
-    enabled: true
-  - name: "edit_file"
-    enabled: true
-  - name: "grep"
-    enabled: true
-  - name: "glob"
-    enabled: true
-  - name: "memory_search"
-    enabled: true
-  - name: "memory_write"
-    enabled: true
-  - name: "hub_post"
-    enabled: true
-  - name: "hub_reply"
-    enabled: true
-  - name: "hub_read"
-    enabled: true
-  - name: "pin_memory"
-    enabled: true
-  - name: "unpin_memory"
-    enabled: true
-  - name: "introspect_context"
-    enabled: true
-  - name: "spawn_submind"
+  - name: "shutdown_team_lead"
     enabled: true
   - name: "send_to_submind"
     enabled: true
-  - name: "hub_list_rooms"
+  - name: "send_message"
     enabled: true
-  - name: "hub_queue_read"
+  - name: "coordination_read"
     enabled: true
-  - name: "hub_feed"
-    enabled: true
-  - name: "load_skill"
-    enabled: true
-  - name: "list_skills"
-    enabled: true
-  - name: "create_skill"
-    enabled: true
-  - name: "get_context_snapshot"
-    enabled: true
-  - name: "git_status"
-    enabled: true
-  - name: "git_diff"
-    enabled: true
-  - name: "git_add"
-    enabled: true
-  - name: "git_commit"
-    enabled: true
-  - name: "git_push"
-    enabled: true
-  - name: "git_log"
-    enabled: true
-  - name: "web_fetch"
-    enabled: true
-  - name: "netlify_deploy"
-    enabled: true
-  - name: "netlify_status"
-    enabled: true
-  - name: "text_to_speech"
-    enabled: true
-  - name: "web_search"
+  - name: "coordination_write"
     enabled: true
   - name: "scratchpad_read"
     enabled: true
   - name: "scratchpad_write"
     enabled: true
-  - name: "email_read"
-    enabled: true
-  - name: "email_send"
-    enabled: true
-  - name: "system_health"
-    enabled: true
-  - name: "evolution_log_write"
-    enabled: true
-  - name: "evolution_log_read"
-    enabled: true
-  - name: "evolution_trajectory"
-    enabled: true
-  - name: "evolution_update_outcome"
-    enabled: true
-  - name: "memory_link"
-    enabled: true
-  - name: "memory_graph"
-    enabled: true
-  - name: "memory_conflicts"
-    enabled: true
-  - name: "memory_superseded"
-    enabled: true
-  - name: "calendar_list_events"
-    enabled: true
-  - name: "calendar_create_event"
-    enabled: true
-  - name: "calendar_delete_event"
-    enabled: true
   - name: "scratchpad_append"
     enabled: true
-  - name: "shared_scratchpad_read"
+  - name: "memory_search"
     enabled: true
-  - name: "loop1_pattern_scan"
-    enabled: true
-  - name: "memory_selfcheck"
-    enabled: true
-  - name: "daemon_health"
-    enabled: true
-  - name: "handoff_context"
-    enabled: true
-  - name: "resource_usage"
-    enabled: true
-  - name: "token_stats"
-    enabled: true
-  - name: "session_stats"
+  - name: "ab_model_test"
     enabled: true
 
 compaction:

@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openai import AsyncOpenAI
 
@@ -64,7 +64,13 @@ class _NormalizedResponse:
 
         self.content: list = []
         if msg.content:
-            self.content.append(_TextBlock(msg.content))
+            # Strip Gemma 4 ghost thought channels if present
+            # (26B/31B may emit <|channel>thought...<channel|> even with thinking OFF)
+            clean_text = re.sub(
+                r'<\|channel>thought\n.*?<channel\|>',
+                '', msg.content, flags=re.DOTALL,
+            ).strip() if '<|channel>' in msg.content else msg.content
+            self.content.append(_TextBlock(clean_text))
 
         self._raw_tool_calls = msg.tool_calls or []
         for tc in self._raw_tool_calls:
@@ -206,6 +212,11 @@ class Mind:
         # Compaction state (preserve-recent-N pattern)
         self._compacted_summary: str = ""
 
+        # Tool-call observer callback: called after each tool execution batch.
+        # Signature: async def callback(tool_names: list[str], iteration: int) -> None
+        # Set by callers (e.g. TG daemon) to stream Root's thinking to the user.
+        self.on_tool_calls: Callable | None = None
+
         # Cache stats for self-improvement loop
         self._session_cache_hits: int = 0
         self._session_cached_tokens: int = 0
@@ -231,6 +242,7 @@ class Mind:
         task_id: str | None = None,
         inject_memories: bool = True,
         fresh_context: bool = False,
+        max_iterations_override: int | None = None,
     ) -> str:
         """
         Execute a single task through the tool-use loop.
@@ -238,9 +250,14 @@ class Mind:
 
         If fresh_context=True, conversation history is cleared before this task
         runs (useful for scheduled BOOPs that don't need prior context).
+
+        If max_iterations_override is set, it caps the tool-use loop regardless
+        of planning gate complexity. Use for conversational contexts (TG) where
+        even "complex" messages should stay responsive.
         """
         self._session_id = self._session_id or str(uuid.uuid4())[:8]
         self._running = True
+        self._max_iterations_override = max_iterations_override
 
         if fresh_context:
             self._messages = []
@@ -335,6 +352,9 @@ class Mind:
 
         final_text = ""
         max_iterations = 30
+        # Allow callers to override max iterations if needed
+        if getattr(self, '_max_iterations_override', None) is not None:
+            max_iterations = min(max_iterations, self._max_iterations_override)
         iteration = 0
         task_start_time = time.monotonic()
 
@@ -493,6 +513,13 @@ class Mind:
                 tools_used=iter_tool_names,
                 duration_ms=tool_exec_ms,
             )
+
+            # Notify observer (e.g. TG daemon streams tool calls to Telegram)
+            if self.on_tool_calls is not None:
+                try:
+                    await self.on_tool_calls(iter_tool_names, iteration)
+                except Exception as cb_err:
+                    logger.warning("[%s] on_tool_calls callback error: %s", self.manifest.mind_id, cb_err)
 
             # Collect Loop 1 telemetry from this batch of tool calls
             for b, r in zip(tool_use_blocks, tool_results):

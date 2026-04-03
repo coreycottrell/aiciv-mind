@@ -85,8 +85,35 @@ LONG_POLL_TIMEOUT = 30       # seconds (TG long-poll)
 HEARTBEAT_INTERVAL = 60      # poll cycles between heartbeats
 BACKOFF_BASE = 2.0           # exponential backoff base (seconds)
 BACKOFF_MAX = 60.0           # max backoff (seconds)
-TASK_TIMEOUT = 300.0         # max seconds for a single mind.run_task() call
 MAX_TG_MSG_LEN = 4096        # Telegram message limit
+
+# Emoji mapping for tool-call streaming to TG
+_TOOL_EMOJI = {
+    "read_file": "\U0001f4d6",      # 📖
+    "write_file": "\u270f\ufe0f",    # ✏️
+    "edit_file": "\u270f\ufe0f",     # ✏️
+    "bash": "\U0001f527",            # 🔧
+    "grep": "\U0001f50d",            # 🔍
+    "glob": "\U0001f50d",            # 🔍
+    "memory_search": "\U0001f9e0",   # 🧠
+    "memory_write": "\U0001f9e0",    # 🧠
+    "hub_post": "\U0001f4e1",        # 📡
+    "hub_reply": "\U0001f4e1",       # 📡
+    "hub_read": "\U0001f4e1",        # 📡
+    "hub_feed": "\U0001f4e1",        # 📡
+    "scratchpad_read": "\U0001f4cb", # 📋
+    "scratchpad_write": "\U0001f4cb",# 📋
+    "email_read": "\U0001f4e7",      # 📧
+    "email_send": "\U0001f4e7",      # 📧
+    "web_search": "\U0001f310",      # 🌐
+    "web_fetch": "\U0001f310",       # 🌐
+    "spawn_submind": "\U0001f52e",   # 🔮
+    "send_to_submind": "\U0001f52e", # 🔮
+    "git_status": "\U0001f4be",      # 💾
+    "git_diff": "\U0001f4be",        # 💾
+    "git_commit": "\U0001f4be",      # 💾
+}
+_DEFAULT_TOOL_EMOJI = "\u2699\ufe0f" # ⚙️
 
 
 # ---------------------------------------------------------------------------
@@ -450,13 +477,11 @@ async def run(skip_boot: bool = False):
                         log.info("ACG→Root: %s", acg_msg[:100])
                         processing = True
                         try:
-                            result = await asyncio.wait_for(
-                                mind.run_task(acg_msg), timeout=TASK_TIMEOUT,
-                            )
+                            result = await mind.run_task(acg_msg)
                             inject_to_acg(result or "(no response)")
-                        except asyncio.TimeoutError:
-                            log.error("ACG→Root task timed out after %.0fs", TASK_TIMEOUT)
-                            inject_to_acg("(task timed out)")
+                        except Exception as exc:
+                            log.error("ACG→Root task failed: %s — %s", type(exc).__name__, exc)
+                            inject_to_acg(f"(task failed: {type(exc).__name__})")
                         finally:
                             processing = False
                 except Exception as e:
@@ -519,18 +544,41 @@ async def run(skip_boot: bool = False):
                     continue
 
                 # ── Send "thinking..." placeholder, then run through Mind
-                thinking = await tg_send(client, ALLOWED_CHAT, "...", msg_id)
+                # The placeholder gets live-updated with tool call progress
+                # so Corey sees Root's thinking process in real-time.
+                thinking = await tg_send(client, ALLOWED_CHAT, "\U0001f4ad thinking...", msg_id)
                 thinking_id = thinking.get("result", {}).get("message_id")
                 processing = True
+                tool_log_lines: list[str] = []  # accumulates tool call descriptions
+
+                async def _stream_tools(tool_names: list[str], iteration: int):
+                    """Callback: update TG thinking message with each tool batch."""
+                    if not thinking_id:
+                        return
+                    for name in tool_names:
+                        emoji = _TOOL_EMOJI.get(name, _DEFAULT_TOOL_EMOJI)
+                        tool_log_lines.append(f"{emoji} {name}")
+                    # Show most recent 15 lines to stay under TG message limits
+                    display = tool_log_lines[-15:]
+                    status = "\n".join(display)
+                    if len(tool_log_lines) > 15:
+                        status = f"... ({len(tool_log_lines) - 15} earlier)\n{status}"
+                    status += "\n\U0001f4ad thinking..."
+                    try:
+                        await tg_edit(client, ALLOWED_CHAT, thinking_id, status)
+                    except Exception as e:
+                        log.debug("stream edit failed: %s", e)
+
+                mind.on_tool_calls = _stream_tools
 
                 try:
                     try:
-                        result = await asyncio.wait_for(
-                            mind.run_task(text), timeout=TASK_TIMEOUT,
-                        )
-                    except asyncio.TimeoutError:
-                        log.error("Task timed out after %.0fs: %s", TASK_TIMEOUT, text[:80])
-                        result = "(timed out — try a simpler question or /clear to reset)"
+                        result = await mind.run_task(text)
+                    except Exception as exc:
+                        log.error("Task failed: %s — %s", type(exc).__name__, exc)
+                        result = None
+                    finally:
+                        mind.on_tool_calls = None
 
                     if not result:
                         result = "(no response)"
@@ -539,7 +587,7 @@ async def run(skip_boot: bool = False):
                     if len(chunks) == 1 and thinking_id:
                         await tg_edit(client, ALLOWED_CHAT, thinking_id, chunks[0])
                     else:
-                        # Delete the "..." placeholder and send chunks
+                        # Delete the thinking placeholder and send chunks
                         if thinking_id:
                             try:
                                 await client.post(
@@ -559,6 +607,7 @@ async def run(skip_boot: bool = False):
 
                 except Exception as e:
                     log.error("Mind error: %s", e, exc_info=True)
+                    mind.on_tool_calls = None
                     error_text = f"Error: {type(e).__name__}: {str(e)[:400]}"
                     if thinking_id:
                         await tg_edit(client, ALLOWED_CHAT, thinking_id, error_text)

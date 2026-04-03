@@ -265,24 +265,13 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
     def get_msg_count():
         return len(_mind_ref[0]._messages) if _mind_ref[0] else 0
 
-    # Sub-mind IPC infrastructure
+    # Sub-mind IPC infrastructure — REMOVED (2026-04-03, ACG mind-lead)
+    # Only tg_simple.py (Root) should own the IPC ROUTER socket.
+    # Having two PrimaryBus instances binding to the same ipc:// path caused
+    # sub-mind RESULT messages to be delivered to this daemon instead of Root,
+    # breaking send_to_submind for 3+ sessions.
     primary_bus = None
     spawner = None
-    try:
-        from aiciv_mind.ipc.primary_bus import PrimaryBus
-        from aiciv_mind.spawner import SubMindSpawner
-
-        mind_root = Path(__file__).parent.parent
-        primary_bus = PrimaryBus()
-        primary_bus.bind()
-        primary_bus.start_recv()
-        spawner = SubMindSpawner(
-            session_name="aiciv-subminds",
-            mind_root=mind_root,
-        )
-        LOG.info("PrimaryBus bound + SubMindSpawner ready (session: aiciv-subminds)")
-    except Exception as e:
-        LOG.warning("Sub-mind IPC unavailable: %s — spawn_submind/send_to_submind disabled", e)
 
     # AgentMail inbox from manifest (enables email_read + email_send)
     agentmail_inbox = manifest.agentmail.inbox if manifest.agentmail.inbox else None
@@ -302,8 +291,8 @@ async def run_daemon(active_thread_id: str, extra_targets: list[WatchTarget]):
         skills_dir=skills_dir if Path(skills_dir).exists() else None,
         scratchpad_dir=scratchpad_dir,
         manifest_path=manifest_path,
-        spawner=spawner,
-        primary_bus=primary_bus,
+        spawner=None,
+        primary_bus=None,
         agentmail_inbox=agentmail_inbox,
         keypair_path=keypair_path,
         calendar_id=calendar_id,
@@ -571,9 +560,7 @@ async def _poll_thread(
                 f"Prefix your response with [Root]."
             )
             try:
-                response = await asyncio.wait_for(
-                    mind.run_task(prompt), timeout=TASK_TIMEOUT,
-                )
+                response = await mind.run_task(prompt)
                 if response:
                     tagged = f"[Root] {response}" if not response.startswith("[Root]") else response
                     success = await post_reply(target.id, tagged, hub_token)
@@ -655,9 +642,7 @@ async def _poll_room(
                 f"Be concise and direct. Prefix with [Root]."
             )
             try:
-                response = await asyncio.wait_for(
-                    mind.run_task(prompt), timeout=TASK_TIMEOUT,
-                )
+                response = await mind.run_task(prompt)
                 if response:
                     tagged = f"[Root] {response}" if not response.startswith("[Root]") else response
                     success = await post_reply(tid, tagged, hub_token)
