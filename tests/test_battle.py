@@ -457,3 +457,225 @@ def test_no_hardcoded_model_names_in_mind_loop():
         assert model not in code_only, (
             f"Hardcoded model reference '{model}' found in executable mind loop code"
         )
+
+
+# ---------------------------------------------------------------------------
+# #13: Token budget tracking accuracy
+# ---------------------------------------------------------------------------
+
+
+async def test_token_tracking_accumulates_across_turns():
+    """Token counters accumulate correctly across multiple API calls."""
+    from aiciv_mind.manifest import MindManifest, ModelConfig, AuthConfig, MemoryConfig
+    from aiciv_mind.mind import Mind
+
+    store = MemoryStore(":memory:")
+    manifest = MindManifest(
+        mind_id="token-test",
+        display_name="Token Test",
+        role="worker",
+        system_prompt="Test.",
+        model=ModelConfig(preferred="test-model", max_tokens=4096),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=store)
+
+    def make_resp(text, input_tokens, output_tokens):
+        resp = MagicMock()
+        resp.content = [MagicMock(type="text", text=text)]
+        resp.stop_reason = "end_turn"
+        usage = MagicMock()
+        usage.input_tokens = input_tokens
+        usage.output_tokens = output_tokens
+        usage.cache_read_input_tokens = 0
+        usage.cache_creation_input_tokens = 0
+        resp.usage = usage
+        return resp
+
+    # Two separate tasks → two API calls
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_resp("First.", 100, 50),
+    ):
+        await mind.run_task("Task 1", inject_memories=False)
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_resp("Second.", 200, 75),
+    ):
+        await mind.run_task("Task 2", inject_memories=False)
+
+    stats = mind.token_usage_stats
+    assert stats["api_calls"] == 2
+    assert stats["total_output_tokens"] == 125  # 50 + 75
+    assert stats["estimated_cost_usd"] >= 0  # non-negative
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# #17: Multi-civ readiness — isolation check
+# ---------------------------------------------------------------------------
+
+
+def test_two_minds_share_nothing():
+    """Two Mind instances with different manifests share no state."""
+    from aiciv_mind.manifest import MindManifest, ModelConfig, AuthConfig, MemoryConfig
+    from aiciv_mind.mind import Mind
+
+    store1 = MemoryStore(":memory:")
+    store2 = MemoryStore(":memory:")
+
+    m1 = MindManifest(
+        mind_id="civ-alpha",
+        display_name="Alpha",
+        role="worker",
+        system_prompt="I am Alpha.",
+        model=ModelConfig(preferred="test"),
+        auth=AuthConfig(civ_id="alpha", keypair_path="/tmp/a.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    m2 = MindManifest(
+        mind_id="civ-beta",
+        display_name="Beta",
+        role="worker",
+        system_prompt="I am Beta.",
+        model=ModelConfig(preferred="test"),
+        auth=AuthConfig(civ_id="beta", keypair_path="/tmp/b.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+
+    mind1 = Mind(manifest=m1, memory=store1)
+    mind2 = Mind(manifest=m2, memory=store2)
+
+    # Modify one's state — the other should be unaffected
+    mind1._messages.append({"role": "user", "content": "Alpha message"})
+
+    assert len(mind2._messages) == 0, "Mind2 should have no messages"
+    assert mind1.manifest.mind_id != mind2.manifest.mind_id
+    assert mind1.manifest.auth.civ_id != mind2.manifest.auth.civ_id
+
+    # Memory stores are isolated (different :memory: DBs)
+    mem = Memory(agent_id="alpha", title="Alpha only", content="Private", memory_type="learning")
+    store1.store(mem)
+
+    results = store2.search("Alpha only", agent_id="alpha")
+    assert len(results) == 0, "Store2 should not see Store1's memories"
+
+    store1.close()
+    store2.close()
+
+
+# ---------------------------------------------------------------------------
+# #18: Backup/restore — can we snapshot and restore state?
+# ---------------------------------------------------------------------------
+
+
+def test_memory_db_survives_close_and_reopen(tmp_path):
+    """Memories persist across close/reopen cycles (backup/restore proof)."""
+    db_path = str(tmp_path / "persist.db")
+
+    # Write memories
+    store1 = MemoryStore(db_path)
+    for i in range(10):
+        store1.store(Memory(
+            agent_id="root",
+            title=f"Memory {i}",
+            content=f"Important fact number {i}",
+            memory_type="learning",
+        ))
+    store1.close()
+
+    # Reopen and verify
+    store2 = MemoryStore(db_path)
+    count = store2._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    assert count == 10
+
+    # Search still works (FTS5 index intact)
+    results = store2.search("Important fact", agent_id="root", limit=20)
+    assert len(results) >= 5  # FTS should find most of them
+    store2.close()
+
+
+def test_memory_db_can_be_copied_for_backup(tmp_path):
+    """SQLite DB can be copied as a backup and opened independently."""
+    import shutil
+
+    db_path = str(tmp_path / "original.db")
+    backup_path = str(tmp_path / "backup.db")
+
+    # Create original with data
+    store = MemoryStore(db_path)
+    store.store(Memory(
+        agent_id="root", title="Critical state", content="Must survive backup",
+        memory_type="learning",
+    ))
+    store.close()
+
+    # Copy as backup (WAL checkpoint happens on close)
+    shutil.copy2(db_path, backup_path)
+
+    # Open backup — should have the data
+    backup = MemoryStore(backup_path)
+    results = backup.search("Critical state", agent_id="root")
+    assert len(results) >= 1
+    assert "Must survive backup" in results[0]["content"]
+    backup.close()
+
+
+# ---------------------------------------------------------------------------
+# #15: Rate limit graceful degradation
+# ---------------------------------------------------------------------------
+
+
+async def test_api_error_doesnt_corrupt_message_history():
+    """If the model API returns an error, message history stays valid."""
+    from aiciv_mind.manifest import MindManifest, ModelConfig, AuthConfig, MemoryConfig
+    from aiciv_mind.mind import Mind
+
+    store = MemoryStore(":memory:")
+    manifest = MindManifest(
+        mind_id="error-test",
+        display_name="Error Test",
+        role="worker",
+        system_prompt="Test.",
+        model=ModelConfig(preferred="test", call_timeout_s=0),  # no timeout
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=store)
+
+    # First call succeeds
+    def make_resp(text):
+        resp = MagicMock()
+        resp.content = [MagicMock(type="text", text=text)]
+        resp.stop_reason = "end_turn"
+        resp.usage = MagicMock(input_tokens=100, output_tokens=50,
+                               cache_read_input_tokens=0, cache_creation_input_tokens=0)
+        return resp
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_resp("OK"),
+    ):
+        await mind.run_task("First task", inject_memories=False)
+
+    msgs_after_first = len(mind._messages)  # user + assistant = 2
+
+    # Second call throws API error
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=Exception("429 Rate Limited"),
+    ):
+        with pytest.raises(Exception, match="429"):
+            await mind.run_task("Second task", inject_memories=False)
+
+    # Message history should NOT have a dangling user message
+    # (the error handler pops orphaned user messages)
+    assert len(mind._messages) == msgs_after_first, (
+        f"Expected {msgs_after_first} messages after error, got {len(mind._messages)}"
+    )
+    # Last message should be assistant, not user
+    assert mind._messages[-1]["role"] == "assistant"
+
+    store.close()

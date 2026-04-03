@@ -232,16 +232,24 @@ class MemoryStore:
         self._migrate_schema()
 
     def _migrate_schema(self) -> None:
-        """Add v0.1.1 columns to an existing memories table if missing."""
+        """Add v0.1.1 columns to an existing memories table if missing.
+        Handles concurrent access: ignores 'duplicate column' errors from
+        parallel threads racing to add the same column."""
         existing = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(memories)")
         }
         for col_name, col_def in _V011_COLUMNS:
             if col_name not in existing:
-                self._conn.execute(
-                    f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
-                )
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}"
+                    )
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" in str(e).lower():
+                        pass  # Another thread already added it — safe to ignore
+                    else:
+                        raise
         self._conn.commit()
 
     # ------------------------------------------------------------------
