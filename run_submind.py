@@ -77,11 +77,18 @@ async def run_submind(manifest_path: str, mind_id: str, model_override: str | No
             os.makedirs(db_dir, exist_ok=True)
     memory = MemoryStore(db_path)
 
-    # Build tool registry with role from manifest.
-    # Team leads get spawn_agent; agents get full tools; primary gets spawn_team_lead.
-    # The role also drives filter_by_role() in Mind.__init__ (defense-in-depth).
-    role_str = manifest.role.replace("-", "_") if manifest.role else "agent"
-    tools = ToolRegistry.default(memory_store=memory, role=role_str, agent_id=manifest.mind_id)
+    # Build tool registry — register ALL tools, let manifest.enabled_tool_names()
+    # control what the LLM actually sees.  Role-based registry filtering was
+    # stripping tools that team leads need (bash, files, grep etc.) because
+    # TEAM_LEAD_TOOLS only contains orchestration tools.  The manifest's enabled
+    # list is the real whitelist (passed to build_openai_tools in Mind._run_task_body).
+    scratchpad_dir = str(Path(__file__).parent / "scratchpads")
+    tools = ToolRegistry.default(
+        memory_store=memory,
+        role="agent",  # Don't filter — manifest tool list controls LLM visibility
+        agent_id=manifest.mind_id,
+        scratchpad_dir=scratchpad_dir,
+    )
 
     # Connect IPC bus
     bus = SubMindBus(mind_id=manifest.mind_id)

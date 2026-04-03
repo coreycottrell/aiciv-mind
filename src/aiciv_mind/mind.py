@@ -189,19 +189,31 @@ class Mind:
 
         # Apply role-based tool filtering (Design Principle 5: structural constraint).
         # This ensures the LLM never sees tools outside its role's whitelist.
-        # Only filter when the role is a recognized hierarchy level (primary/team_lead/agent).
-        try:
-            role = manifest.parsed_role()
-            self._tools = self._tools.filter_by_role(role)
+        #
+        # NOTE: For sub-minds running via run_submind.py, role filtering is already
+        # handled by ToolRegistry.default() and the manifest's enabled_tool_names()
+        # whitelist (passed to build_openai_tools).  Double-filtering here would strip
+        # tools that team leads actually need (bash, files, etc.) because TEAM_LEAD_TOOLS
+        # only lists orchestration tools.  The bus parameter signals we're a sub-mind.
+        if bus is None:
+            # Primary mind — apply role filtering
+            try:
+                role = manifest.parsed_role()
+                self._tools = self._tools.filter_by_role(role)
+                logger.info(
+                    "[%s] Role-based filtering applied: role=%s, %d tools available",
+                    manifest.mind_id, role.value, len(self._tools.names()),
+                )
+            except (ValueError, AttributeError, KeyError):
+                logger.debug(
+                    "[%s] Role '%s' is not a hierarchy level — skipping tool filtering",
+                    manifest.mind_id, getattr(manifest, 'role', 'unknown'),
+                )
+        else:
+            # Sub-mind — manifest.enabled_tool_names() controls LLM visibility
             logger.info(
-                "[%s] Role-based filtering applied: role=%s, %d tools available",
-                manifest.mind_id, role.value, len(self._tools.names()),
-            )
-        except (ValueError, AttributeError, KeyError):
-            # Free-form role string (e.g. "worker") or mock manifest — skip filtering
-            logger.debug(
-                "[%s] Role '%s' is not a hierarchy level — skipping tool filtering",
-                manifest.mind_id, getattr(manifest, 'role', 'unknown'),
+                "[%s] Sub-mind mode — %d tools in registry, manifest controls visibility",
+                manifest.mind_id, len(self._tools.names()),
             )
 
         # Session learner (Principle 7: Self-Improving Loop)

@@ -119,29 +119,33 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
             if objective:
                 context_parts.append(f"Objective: {objective}")
 
-            # Context injection: send initial briefing to the team lead via bus.
-            # This is the first message the team lead receives — its operational context.
-            if bus is not None:
-                injection_parts = [
-                    f"[CONTEXT INJECTION] You are team lead for vertical '{vertical}'.",
+            # Send the objective as a TASK to the team lead.
+            # The sub-mind's on_task handler in run_submind.py will receive this
+            # and execute it via mind.run_task().  Results come back as RESULT
+            # messages on the PrimaryBus.
+            if bus is not None and objective:
+                task_parts = [
+                    f"You are team lead for vertical '{vertical}'.",
                 ]
                 if team_scratchpad:
-                    injection_parts.append(f"Team scratchpad: {team_scratchpad}")
+                    task_parts.append(f"Team scratchpad: {team_scratchpad}")
                 if coord_scratchpad:
-                    injection_parts.append(f"Coordination scratchpad: {coord_scratchpad}")
-                if objective:
-                    injection_parts.append(f"Objective: {objective}")
+                    task_parts.append(f"Coordination scratchpad: {coord_scratchpad}")
+                task_parts.append(f"\nObjective: {objective}")
 
+                task_id = f"tl-{uuid.uuid4().hex[:8]}"
                 try:
-                    injection_msg = MindMessage.log(
+                    task_msg = MindMessage.task(
                         sender=primary_mind_id,
                         recipient=mind_id,
-                        level="INFO",
-                        message="\n".join(injection_parts),
+                        task_id=task_id,
+                        objective="\n".join(task_parts),
                     )
-                    await bus.send(injection_msg)
-                except Exception:
-                    pass  # Non-fatal: team lead can still work without injection
+                    await asyncio.sleep(1)  # Extra wait for sub-mind to finish init
+                    await bus.send(task_msg)
+                    context_parts.append(f"Task sent: {task_id}")
+                except Exception as exc:
+                    context_parts.append(f"Warning: failed to send task: {exc}")
 
             return "\n".join(context_parts)
 

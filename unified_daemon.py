@@ -582,6 +582,35 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
     # Event queue — all input sources push here, main loop pulls
     event_queue: asyncio.Queue[MindEvent] = asyncio.Queue()
 
+    # Register persistent RESULT handler on PrimaryBus.
+    # When a team lead finishes work, the result arrives here and gets
+    # injected into Root's event queue as a CONSCIOUS event.
+    if primary_bus:
+        from aiciv_mind.ipc.messages import MsgType
+
+        async def on_submind_result(msg):
+            task_id = msg.payload.get("task_id", "?")
+            result_text = msg.payload.get("result", "")
+            success = msg.payload.get("success", True)
+            error = msg.payload.get("error", "")
+            sender = msg.sender
+
+            if success:
+                summary = result_text[:500] if result_text else "(empty result)"
+                body = f"[RESULT from {sender}] task={task_id}\n{summary}"
+            else:
+                body = f"[ERROR from {sender}] task={task_id}: {error}"
+
+            log.info("Sub-mind result: %s task=%s success=%s", sender, task_id, success)
+            await event_queue.put(MindEvent(
+                source="ipc",
+                priority=1,
+                payload={"mind_id": sender, "task_id": task_id, "result": result_text, "success": success},
+                route=Route.CONSCIOUS,
+            ))
+
+        primary_bus.on(MsgType.RESULT, on_submind_result)
+
     # Boot orientation
     if not skip_boot:
         try:
