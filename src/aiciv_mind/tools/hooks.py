@@ -26,9 +26,11 @@ Usage:
 
 from __future__ import annotations
 
+import json as _json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ class HookRunner:
         blocked_tools: list[str] | None = None,
         log_all: bool = True,
         escalate_tools: list[str] | None = None,
+        audit_log_path: str | Path | None = None,
     ) -> None:
         self._blocked_tools: set[str] = set(blocked_tools or [])
         self._base_blocked_tools: set[str] = set(self._blocked_tools)  # snapshot of base config
@@ -113,6 +116,25 @@ class HookRunner:
         self._call_log: list[ToolCallRecord] = []
         self._deny_count: int = 0
         self._total_calls: int = 0
+        # Persistent JSONL audit log — training data for dream cycle
+        self._audit_log_path: Path | None = None
+        if audit_log_path:
+            self._audit_log_path = Path(audit_log_path)
+            self._audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Persistent JSONL audit log
+    # ------------------------------------------------------------------
+
+    def _audit_write(self, record: dict) -> None:
+        """Append a JSON record to the persistent audit log (best-effort)."""
+        if self._audit_log_path is None:
+            return
+        try:
+            with open(self._audit_log_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(record, default=str) + "\n")
+        except Exception:
+            pass  # audit is telemetry — never crashes the loop
 
     # ------------------------------------------------------------------
     # Permission escalation — sub-minds request parent approval
@@ -368,6 +390,14 @@ class HookRunner:
                 logger.error("[hooks] Pre-hook '%s' error: %s", hook["name"], e)
                 # Hook errors are non-fatal — allow the tool call to proceed
 
+        # Audit: log allowed pre-tool call
+        self._audit_write({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "pre_tool_use",
+            "tool": tool_name,
+            "input": str(tool_input)[:500],
+        })
+
         return HookResult(allowed=True)
 
     def post_tool_use(
@@ -376,6 +406,7 @@ class HookRunner:
         tool_input: dict,
         output: str,
         is_error: bool,
+        duration_ms: int = 0,
     ) -> HookResult:
         """
         Post-execution hook. Logs the call and runs custom post-hooks.
@@ -390,6 +421,16 @@ class HookRunner:
                 output_preview=output[:200],
                 is_error=is_error,
             ))
+
+        # Persistent audit
+        self._audit_write({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "post_tool_use",
+            "tool": tool_name,
+            "duration_ms": duration_ms,
+            "result_len": len(output),
+            "is_error": is_error,
+        })
 
         # Custom post-hooks
         for hook in getattr(self, "_custom_post_hooks", []):

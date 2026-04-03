@@ -64,9 +64,11 @@ class Mind:
         # Attach hook governance if configured
         if manifest.hooks.enabled:
             from aiciv_mind.tools.hooks import HookRunner
+            _mind_root = Path(__file__).parent.parent.parent
             hooks = HookRunner(
                 blocked_tools=manifest.hooks.blocked_tools,
                 log_all=manifest.hooks.log_all,
+                audit_log_path=str(_mind_root / "data" / "tool_audit.jsonl"),
             )
             self._tools.set_hooks(hooks)
         self._client = anthropic.AsyncAnthropic(
