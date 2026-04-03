@@ -3307,3 +3307,253 @@ class TestBootContext:
         assert len(bc.identity_memories) == 1
         assert bc.handoff_memory["content"] == "Did stuff"
         assert bc.evolution_trajectory.startswith("Becoming")
+
+
+# ---------------------------------------------------------------------------
+# ToolRegistry — core registration, execution, timeout, hooks
+# ---------------------------------------------------------------------------
+
+
+class TestToolRegistry:
+    """Battle tests for ToolRegistry core functionality."""
+
+    def test_register_and_names(self):
+        """register() adds a tool; names() lists it."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("echo", {"name": "echo", "description": "Echo"}, lambda inp: inp.get("text", ""))
+        assert "echo" in reg.names()
+
+    def test_build_anthropic_tools_all(self):
+        """build_anthropic_tools() with no filter returns all tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("a", {"name": "a"}, lambda x: "a")
+        reg.register("b", {"name": "b"}, lambda x: "b")
+        tools = reg.build_anthropic_tools()
+        assert len(tools) == 2
+
+    def test_build_anthropic_tools_filtered(self):
+        """build_anthropic_tools(enabled=...) returns only listed tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("a", {"name": "a"}, lambda x: "a")
+        reg.register("b", {"name": "b"}, lambda x: "b")
+        reg.register("c", {"name": "c"}, lambda x: "c")
+        tools = reg.build_anthropic_tools(enabled=["b", "c"])
+        names = [t["name"] for t in tools]
+        assert names == ["b", "c"]
+
+    def test_build_anthropic_tools_skips_unknown(self):
+        """build_anthropic_tools skips unknown names in enabled list."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("a", {"name": "a"}, lambda x: "a")
+        tools = reg.build_anthropic_tools(enabled=["a", "z"])
+        assert len(tools) == 1
+
+    def test_build_openai_tools(self):
+        """build_openai_tools() wraps in function format."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("echo", {
+            "name": "echo",
+            "description": "Echo tool",
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }, lambda x: "ok")
+        tools = reg.build_openai_tools()
+        assert len(tools) == 1
+        assert tools[0]["type"] == "function"
+        assert tools[0]["function"]["name"] == "echo"
+        assert "parameters" in tools[0]["function"]
+
+    def test_execute_sync_handler(self):
+        """execute() works with a synchronous handler."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("greet", {"name": "greet"}, lambda inp: f"Hello, {inp.get('name', 'world')}")
+        result = asyncio.run(reg.execute("greet", {"name": "ACG"}))
+        assert result == "Hello, ACG"
+
+    def test_execute_async_handler(self):
+        """execute() works with an async handler."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+
+        async def async_greet(inp):
+            return f"Async Hello, {inp.get('name', 'world')}"
+
+        reg.register("agreet", {"name": "agreet"}, async_greet)
+        result = asyncio.run(reg.execute("agreet", {"name": "ACG"}))
+        assert result == "Async Hello, ACG"
+
+    def test_execute_unknown_tool(self):
+        """execute() returns error for unknown tool."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        result = asyncio.run(reg.execute("nonexistent", {}))
+        assert "ERROR" in result
+        assert "Unknown tool" in result
+
+    def test_execute_handler_exception(self):
+        """execute() catches handler exceptions and returns error string."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("crash", {"name": "crash"}, lambda x: 1 / 0)
+        result = asyncio.run(reg.execute("crash", {}))
+        assert "ERROR" in result
+        assert "ZeroDivisionError" in result
+
+    def test_execute_timeout(self):
+        """execute() enforces timeout on async handler."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+
+        async def slow_tool(inp):
+            await asyncio.sleep(10)
+            return "done"
+
+        reg.register("slow", {"name": "slow"}, slow_tool, timeout=0.1)
+        result = asyncio.run(reg.execute("slow", {}))
+        assert "timed out" in result
+
+    def test_is_read_only(self):
+        """is_read_only() returns True for read-only tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("reader", {"name": "reader"}, lambda x: "r", read_only=True)
+        reg.register("writer", {"name": "writer"}, lambda x: "w", read_only=False)
+        assert reg.is_read_only("reader")
+        assert not reg.is_read_only("writer")
+        assert not reg.is_read_only("unknown")
+
+    def test_hooks_block_pre_tool(self):
+        """HookRunner can block tool execution via pre-hook."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+
+        reg = ToolRegistry()
+        reg.register("blocked_tool", {"name": "blocked_tool"}, lambda x: "should not run")
+        hooks = HookRunner(blocked_tools=["blocked_tool"])
+        reg.set_hooks(hooks)
+
+        result = asyncio.run(reg.execute("blocked_tool", {}))
+        assert "BLOCKED" in result
+
+    def test_hooks_allow_non_blocked_tool(self):
+        """HookRunner allows non-blocked tools to execute normally."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+
+        reg = ToolRegistry()
+        reg.register("ok_tool", {"name": "ok_tool"}, lambda x: "allowed")
+        hooks = HookRunner(blocked_tools=["other_tool"])
+        reg.set_hooks(hooks)
+
+        result = asyncio.run(reg.execute("ok_tool", {}))
+        assert result == "allowed"
+
+    def test_default_registry_has_tools(self):
+        """ToolRegistry.default() creates a registry with core tools."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry.default(memory_store=MemoryStore(":memory:"))
+        names = reg.names()
+        # Should have at least bash, read_file, write_file, search
+        assert "bash" in names
+        assert len(names) >= 10
+
+    def test_custom_timeout_override(self):
+        """Custom timeout overrides default."""
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+
+        async def fast_tool(inp):
+            return "fast"
+
+        reg.register("fast", {"name": "fast"}, fast_tool, timeout=5.0)
+        # Verify it's stored (internal check)
+        assert reg._timeouts["fast"] == 5.0
+
+
+# ---------------------------------------------------------------------------
+# Security — deeper edge cases for env scrubbing
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityDeeper:
+    """Deeper battle tests for credential scrubbing."""
+
+    def test_scrub_removes_anthropic_key(self):
+        """ANTHROPIC_API_KEY is scrubbed."""
+        env = {"ANTHROPIC_API_KEY": "sk-xxx", "PATH": "/usr/bin", "HOME": "/home/me"}
+        result = scrub_env(env)
+        assert "ANTHROPIC_API_KEY" not in result
+        assert "PATH" in result
+
+    def test_scrub_removes_openai_key(self):
+        """OPENAI_API_KEY is scrubbed."""
+        env = {"OPENAI_API_KEY": "sk-xxx", "HOME": "/home/me"}
+        result = scrub_env(env)
+        assert "OPENAI_API_KEY" not in result
+
+    def test_scrub_removes_aws_vars(self):
+        """AWS_* variables are scrubbed."""
+        env = {"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "secret", "HOME": "/home/me"}
+        result = scrub_env(env)
+        assert "AWS_ACCESS_KEY_ID" not in result
+        assert "AWS_SECRET_ACCESS_KEY" not in result
+
+    def test_scrub_preserves_path_and_home(self):
+        """PATH and HOME are always preserved."""
+        env = {"PATH": "/usr/bin", "HOME": "/home/test", "ANTHROPIC_API_KEY": "key"}
+        result = scrub_env(env)
+        assert result["PATH"] == "/usr/bin"
+        assert result["HOME"] == "/home/test"
+
+    def test_scrub_preserves_custom(self):
+        """Custom preserve list keeps additional vars."""
+        env = {"MY_SECRET_TOKEN": "tok", "SAFE_VAR": "ok"}
+        result = scrub_env(env, preserve=("MY_SECRET_TOKEN",))
+        assert "MY_SECRET_TOKEN" in result
+
+    def test_scrub_extra_strip(self):
+        """extra_strip removes specific vars even if they wouldn't match patterns."""
+        env = {"CUSTOM_THING": "val", "HOME": "/home/me"}
+        result = scrub_env(env, extra_strip=("CUSTOM_THING",))
+        assert "CUSTOM_THING" not in result
+
+    def test_scrub_env_for_submind_adds_key(self):
+        """scrub_env_for_submind adds MIND_API_KEY."""
+        from aiciv_mind.security import scrub_env_for_submind
+        env = {"PATH": "/usr/bin", "HOME": "/home/me", "ANTHROPIC_API_KEY": "key"}
+        result = scrub_env_for_submind(env, mind_api_key="mind-key-123")
+        assert result["MIND_API_KEY"] == "mind-key-123"
+        assert "ANTHROPIC_API_KEY" not in result
+
+    def test_scrub_env_for_submind_without_key(self):
+        """scrub_env_for_submind without key doesn't set MIND_API_KEY."""
+        from aiciv_mind.security import scrub_env_for_submind
+        env = {"PATH": "/usr/bin", "HOME": "/home/me"}
+        result = scrub_env_for_submind(env)
+        assert "MIND_API_KEY" not in result
+
+    def test_credential_pattern_case_insensitive(self):
+        """Pattern matching is case-insensitive."""
+        assert _matches_credential_pattern("anthropic_api_key")
+        assert _matches_credential_pattern("ANTHROPIC_API_KEY")
+
+    def test_credential_pattern_stripe(self):
+        """STRIPE_* variables match."""
+        assert _matches_credential_pattern("STRIPE_SECRET_KEY")
+        assert _matches_credential_pattern("STRIPE_PUBLISHABLE_KEY")
+
+    def test_credential_pattern_database(self):
+        """DATABASE_URL and PGPASSWORD match."""
+        assert _matches_credential_pattern("DATABASE_URL")
+        assert _matches_credential_pattern("PGPASSWORD")
+
+    def test_non_credential_passes_through(self):
+        """Non-credential vars are not matched."""
+        assert not _matches_credential_pattern("EDITOR")
+        assert not _matches_credential_pattern("TERM")
+        assert not _matches_credential_pattern("COLUMNS")
