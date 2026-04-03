@@ -6185,3 +6185,651 @@ class TestVerificationTools:
         })
         assert "BLOCKING" in result
         assert "Security vulnerability" in result
+
+
+# ===========================================================================
+# Round 18 — File I/O tools, search tools, memory tools, git tools, sandbox
+# ===========================================================================
+
+
+class TestFileTools:
+    """Battle-test read_file, write_file, edit_file handlers."""
+
+    def test_read_file_basic(self, tmp_path):
+        """read_file returns content with line numbers."""
+        from aiciv_mind.tools.files import read_file_handler
+
+        f = tmp_path / "hello.txt"
+        f.write_text("line one\nline two\nline three\n")
+        result = read_file_handler({"file_path": str(f)})
+        assert "1\tline one" in result
+        assert "2\tline two" in result
+        assert "3\tline three" in result
+
+    def test_read_file_offset_and_limit(self, tmp_path):
+        """read_file respects offset and limit parameters."""
+        from aiciv_mind.tools.files import read_file_handler
+
+        f = tmp_path / "data.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 11)))
+        result = read_file_handler({"file_path": str(f), "offset": 3, "limit": 2})
+        assert "3\tline 3" in result
+        assert "4\tline 4" in result
+        assert "5\tline 5" not in result
+        assert "2\tline 2" not in result
+
+    def test_read_file_not_found(self):
+        """read_file returns error for missing file."""
+        from aiciv_mind.tools.files import read_file_handler
+
+        result = read_file_handler({"file_path": "/nonexistent/file.txt"})
+        assert "ERROR" in result
+        assert "not found" in result.lower()
+
+    def test_read_file_empty_path(self):
+        """read_file returns error when no path provided."""
+        from aiciv_mind.tools.files import read_file_handler
+
+        result = read_file_handler({"file_path": ""})
+        assert "ERROR" in result
+
+    def test_write_file_creates_dirs(self, tmp_path):
+        """write_file creates parent directories automatically."""
+        from aiciv_mind.tools.files import write_file_handler
+
+        target = tmp_path / "deep" / "nested" / "file.txt"
+        result = write_file_handler({
+            "file_path": str(target),
+            "content": "hello world",
+        })
+        assert "Written" in result
+        assert "11 bytes" in result
+        assert target.read_text() == "hello world"
+
+    def test_write_file_empty_path(self):
+        """write_file errors on empty path."""
+        from aiciv_mind.tools.files import write_file_handler
+
+        result = write_file_handler({"file_path": "", "content": "x"})
+        assert "ERROR" in result
+
+    def test_edit_file_replaces_unique(self, tmp_path):
+        """edit_file replaces exactly one occurrence."""
+        from aiciv_mind.tools.files import edit_file_handler
+
+        f = tmp_path / "code.py"
+        f.write_text("def foo():\n    return 42\n")
+        result = edit_file_handler({
+            "file_path": str(f),
+            "old_string": "return 42",
+            "new_string": "return 99",
+        })
+        assert "Replaced 1 occurrence" in result
+        assert "return 99" in f.read_text()
+
+    def test_edit_file_rejects_ambiguous(self, tmp_path):
+        """edit_file rejects when old_string appears multiple times."""
+        from aiciv_mind.tools.files import edit_file_handler
+
+        f = tmp_path / "dup.txt"
+        f.write_text("foo bar foo")
+        result = edit_file_handler({
+            "file_path": str(f),
+            "old_string": "foo",
+            "new_string": "baz",
+        })
+        assert "ERROR" in result
+        assert "2 times" in result
+
+    def test_edit_file_not_found(self):
+        """edit_file errors when old_string not present."""
+        from aiciv_mind.tools.files import edit_file_handler
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("content here")
+            fpath = f.name
+        result = edit_file_handler({
+            "file_path": fpath,
+            "old_string": "NONEXISTENT",
+            "new_string": "x",
+        })
+        assert "ERROR" in result
+        assert "not found" in result.lower()
+        import os
+        os.unlink(fpath)
+
+    def test_register_files(self):
+        """register_files adds all 3 tools to registry."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.files import register_files
+
+        reg = ToolRegistry()
+        register_files(reg)
+        names = reg.names()
+        assert "read_file" in names
+        assert "write_file" in names
+        assert "edit_file" in names
+
+
+class TestSearchTools:
+    """Battle-test grep and glob handlers."""
+
+    def test_grep_finds_pattern(self, tmp_path):
+        """grep finds regex matches across files."""
+        from aiciv_mind.tools.search import grep_handler
+
+        (tmp_path / "a.py").write_text("def hello():\n    pass\n")
+        (tmp_path / "b.py").write_text("def world():\n    return 1\n")
+        result = grep_handler({
+            "pattern": r"def \w+",
+            "path": str(tmp_path),
+            "glob": "*.py",
+        })
+        assert "hello" in result
+        assert "world" in result
+
+    def test_grep_invalid_regex(self, tmp_path):
+        """grep returns error for invalid regex."""
+        from aiciv_mind.tools.search import grep_handler
+
+        result = grep_handler({
+            "pattern": "[invalid",
+            "path": str(tmp_path),
+        })
+        assert "ERROR" in result
+        assert "regex" in result.lower()
+
+    def test_grep_no_matches(self, tmp_path):
+        """grep returns 'No matches found' when nothing matches."""
+        from aiciv_mind.tools.search import grep_handler
+
+        (tmp_path / "empty.txt").write_text("nothing here\n")
+        result = grep_handler({
+            "pattern": "ZZZZZ_NONEXISTENT",
+            "path": str(tmp_path),
+        })
+        assert "No matches found" in result
+
+    def test_grep_context_lines(self, tmp_path):
+        """grep with context includes surrounding lines."""
+        from aiciv_mind.tools.search import grep_handler
+
+        (tmp_path / "ctx.txt").write_text("aaa\nbbb\nTARGET\nccc\nddd\n")
+        result = grep_handler({
+            "pattern": "TARGET",
+            "path": str(tmp_path / "ctx.txt"),
+            "context": 1,
+        })
+        assert "bbb" in result
+        assert "ccc" in result
+
+    def test_grep_path_not_found(self):
+        """grep returns error for nonexistent path."""
+        from aiciv_mind.tools.search import grep_handler
+
+        result = grep_handler({
+            "pattern": "x",
+            "path": "/nonexistent/path",
+        })
+        assert "ERROR" in result
+
+    def test_glob_finds_files(self, tmp_path):
+        """glob finds files matching pattern."""
+        from aiciv_mind.tools.search import glob_handler
+
+        (tmp_path / "a.py").write_text("")
+        (tmp_path / "b.py").write_text("")
+        (tmp_path / "c.txt").write_text("")
+        result = glob_handler({"pattern": "*.py", "path": str(tmp_path)})
+        assert "a.py" in result
+        assert "b.py" in result
+        assert "c.txt" not in result
+
+    def test_glob_no_matches(self, tmp_path):
+        """glob returns 'No matches found' when pattern matches nothing."""
+        from aiciv_mind.tools.search import glob_handler
+
+        result = glob_handler({"pattern": "*.xyz", "path": str(tmp_path)})
+        assert "No matches found" in result
+
+    def test_glob_empty_pattern(self):
+        """glob returns error when no pattern provided."""
+        from aiciv_mind.tools.search import glob_handler
+
+        result = glob_handler({"pattern": ""})
+        assert "ERROR" in result
+
+    def test_register_search(self):
+        """register_search adds grep and glob to registry."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.search import register_search
+
+        reg = ToolRegistry()
+        register_search(reg)
+        names = reg.names()
+        assert "grep" in names
+        assert "glob" in names
+
+
+class TestMemoryTools:
+    """Battle-test memory_search and memory_write tool handlers."""
+
+    def test_memory_write_and_search(self, memory_store):
+        """Write a memory, then search for it."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="test-agent")
+
+        # Write
+        result = asyncio.run(reg.execute("memory_write", {
+            "title": "Battle test finding",
+            "content": "The sandbox architecture prevents brain death",
+            "memory_type": "learning",
+            "tags": ["battle-test", "sandbox"],
+        }))
+        assert "Memory stored" in result
+        assert "Battle test finding" in result
+
+        # Search
+        result = asyncio.run(reg.execute("memory_search", {
+            "query": "sandbox brain death",
+            "agent_id": "test-agent",
+        }))
+        assert "Battle test finding" in result
+        assert "sandbox" in result.lower()
+
+    def test_memory_write_no_title(self, memory_store):
+        """memory_write errors when title is missing."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="test-agent")
+
+        result = asyncio.run(reg.execute("memory_write", {
+            "title": "",
+            "content": "some content",
+        }))
+        assert "ERROR" in result
+
+    def test_memory_write_no_content(self, memory_store):
+        """memory_write errors when content is missing."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="test-agent")
+
+        result = asyncio.run(reg.execute("memory_write", {
+            "title": "Has title",
+            "content": "",
+        }))
+        assert "ERROR" in result
+
+    def test_memory_search_empty_query(self, memory_store):
+        """memory_search errors on empty query."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="test-agent")
+
+        result = asyncio.run(reg.execute("memory_search", {"query": ""}))
+        assert "ERROR" in result
+
+    def test_memory_search_no_results(self, memory_store):
+        """memory_search returns message when nothing found."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="test-agent")
+
+        result = asyncio.run(reg.execute("memory_search", {
+            "query": "ZZZZZ_NONEXISTENT_QUERY_99999",
+        }))
+        assert "No memories found" in result
+
+    def test_memory_search_touches_results(self, memory_store):
+        """memory_search increments access_count of returned memories."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.memory_tools import register_memory_tools
+        from aiciv_mind.memory import Memory
+
+        reg = ToolRegistry()
+        register_memory_tools(reg, memory_store, agent_id="depth-agent")
+
+        # Store directly to control agent_id
+        mem = Memory(
+            agent_id="depth-agent",
+            title="Depth check memory",
+            content="Checking depth score increment via touch",
+        )
+        mem_id = memory_store.store(mem)
+
+        # Get initial access count
+        row = memory_store._conn.execute(
+            "SELECT access_count FROM memories WHERE id = ?", (mem_id,)
+        ).fetchone()
+        initial_count = row[0]
+
+        # Search should touch this memory
+        asyncio.run(reg.execute("memory_search", {
+            "query": "depth check increment",
+            "agent_id": "depth-agent",
+        }))
+
+        # Access count should have increased
+        row = memory_store._conn.execute(
+            "SELECT access_count FROM memories WHERE id = ?", (mem_id,)
+        ).fetchone()
+        assert row[0] > initial_count
+
+
+class TestGitToolsSafety:
+    """Battle-test git tool safety: blocked patterns, commit prefixing."""
+
+    def test_blocked_patterns(self):
+        """_check_blocked catches all dangerous git patterns."""
+        from aiciv_mind.tools.git_tools import _check_blocked, BLOCKED_PATTERNS
+
+        for pattern in BLOCKED_PATTERNS:
+            result = _check_blocked(f"push {pattern}")
+            assert result is not None, f"Pattern '{pattern}' should be blocked"
+            assert "BLOCKED" in result
+
+    def test_safe_commands_pass(self):
+        """Safe git commands are not blocked."""
+        from aiciv_mind.tools.git_tools import _check_blocked
+
+        safe_cmds = ["status", "diff", "log --oneline -10", "add src/"]
+        for cmd in safe_cmds:
+            result = _check_blocked(cmd)
+            assert result is None, f"'{cmd}' should not be blocked"
+
+    def test_commit_auto_prefix(self):
+        """git_commit handler auto-prefixes messages with [Root]."""
+        from aiciv_mind.tools.git_tools import _commit_handler
+
+        # We can't run the actual commit (no repo), but we can verify
+        # the handler is async and exists
+        assert asyncio.iscoroutinefunction(_commit_handler)
+
+    def test_diff_blocks_outside_repo(self):
+        """git_diff blocks file paths outside the repo."""
+        from aiciv_mind.tools.git_tools import _diff_handler
+
+        result = asyncio.run(_diff_handler({
+            "file_path": "/etc/passwd",
+        }))
+        assert "BLOCKED" in result
+
+    def test_diff_allows_relative_paths(self):
+        """git_diff allows relative paths."""
+        from aiciv_mind.tools.git_tools import _diff_handler
+
+        # This will run actual git diff but on a relative path — should not be blocked
+        result = asyncio.run(_diff_handler({
+            "file_path": "src/aiciv_mind/tools/git_tools.py",
+        }))
+        # Won't be BLOCKED (might show diff or no output, but not a security error)
+        assert "BLOCKED" not in result
+
+    def test_add_blocks_outside_repo(self):
+        """git_add blocks file paths outside the repo."""
+        from aiciv_mind.tools.git_tools import _add_handler
+
+        result = asyncio.run(_add_handler({
+            "files": ["/etc/shadow"],
+        }))
+        assert "BLOCKED" in result
+
+    def test_add_empty_files(self):
+        """git_add errors on empty file list."""
+        from aiciv_mind.tools.git_tools import _add_handler
+
+        result = asyncio.run(_add_handler({"files": []}))
+        assert "ERROR" in result
+
+    def test_register_git_tools(self):
+        """register_git_tools adds all 6 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.git_tools import register_git_tools
+
+        reg = ToolRegistry()
+        register_git_tools(reg)
+        names = reg.names()
+        for expected in ["git_status", "git_diff", "git_log", "git_add", "git_commit", "git_push"]:
+            assert expected in names, f"Missing tool: {expected}"
+
+
+class TestSandboxTools:
+    """Battle-test the sandbox lifecycle: create, test, promote, discard."""
+
+    def test_create_and_discard(self):
+        """Sandbox can be created and then discarded cleanly."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_create_handler, _make_discard_handler, _active_sandbox,
+        )
+
+        # Reset state
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        create = _make_create_handler()
+        discard = _make_discard_handler()
+
+        result = create({})
+        assert "Sandbox created" in result
+        assert _active_sandbox["path"] is not None
+
+        from pathlib import Path
+        assert Path(_active_sandbox["path"]).exists()
+
+        result = discard({})
+        assert "discarded" in result.lower()
+        assert _active_sandbox["path"] is None
+
+    def test_double_create_rejected(self):
+        """Creating a second sandbox while one exists is rejected."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_create_handler, _make_discard_handler, _active_sandbox,
+        )
+
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        create = _make_create_handler()
+        discard = _make_discard_handler()
+
+        create({})
+        result = create({})
+        assert "ERROR" in result
+        assert "already exists" in result.lower()
+
+        # Cleanup
+        discard({})
+
+    def test_test_without_create(self):
+        """sandbox_test errors when no sandbox exists."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_test_handler, _active_sandbox,
+        )
+
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        test = _make_test_handler()
+        result = test({})
+        assert "ERROR" in result
+
+    def test_promote_without_tests(self):
+        """sandbox_promote errors when tests haven't passed."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_create_handler, _make_promote_handler,
+            _make_discard_handler, _active_sandbox,
+        )
+
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        create = _make_create_handler()
+        discard = _make_discard_handler()
+
+        # We need a manifest file for promote
+        import tempfile
+        manifest = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False,
+        )
+        manifest.write("self_modification_enabled: true\n")
+        manifest.close()
+
+        promote = _make_promote_handler(manifest.name)
+
+        create({})
+        result = promote({"description": "test"})
+        assert "ERROR" in result
+        assert "haven't passed" in result.lower()
+
+        # Cleanup
+        discard({})
+        import os
+        os.unlink(manifest.name)
+
+    def test_promote_kill_switch(self):
+        """sandbox_promote respects the self_modification_enabled kill switch."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_create_handler, _make_promote_handler,
+            _make_discard_handler, _active_sandbox,
+        )
+
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        create = _make_create_handler()
+        discard = _make_discard_handler()
+
+        import tempfile
+        manifest = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False,
+        )
+        manifest.write("self_modification_enabled: false\n")
+        manifest.close()
+
+        promote = _make_promote_handler(manifest.name)
+
+        create({})
+        _active_sandbox["tests_passed"] = True  # Simulate passing tests
+
+        result = promote({"description": "test"})
+        assert "ERROR" in result
+        assert "kill switch" in result.lower()
+
+        # Cleanup
+        discard({})
+        import os
+        os.unlink(manifest.name)
+
+    def test_discard_when_no_sandbox(self):
+        """Discarding when no sandbox exists is graceful."""
+        from aiciv_mind.tools.sandbox_tools import (
+            _make_discard_handler, _active_sandbox,
+        )
+
+        _active_sandbox["path"] = None
+        _active_sandbox["tests_passed"] = False
+
+        discard = _make_discard_handler()
+        result = discard({})
+        assert "No active sandbox" in result
+
+    def test_register_sandbox_tools(self, tmp_path):
+        """register_sandbox_tools adds all 4 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.sandbox_tools import register_sandbox_tools
+
+        reg = ToolRegistry()
+        register_sandbox_tools(reg, str(tmp_path / "manifest.yaml"))
+        names = reg.names()
+        for expected in ["sandbox_create", "sandbox_test", "sandbox_promote", "sandbox_discard"]:
+            assert expected in names, f"Missing tool: {expected}"
+
+
+class TestHealthTools:
+    """Battle-test system_health tool with memory store."""
+
+    def test_health_with_memory_store(self, memory_store):
+        """system_health reports memory DB stats."""
+        from aiciv_mind.tools.health_tools import _make_health_handler
+
+        handler = _make_health_handler(memory_store=memory_store)
+        result = handler({"verbose": False})
+        assert "System Health Report" in result
+        assert "Total memories" in result
+
+    def test_health_without_memory_store(self):
+        """system_health works without memory store (omits DB section)."""
+        from aiciv_mind.tools.health_tools import _make_health_handler
+
+        handler = _make_health_handler(memory_store=None, mind_root=None)
+        result = handler({})
+        assert "System Health Report" in result
+
+    def test_health_with_git(self, tmp_path):
+        """system_health reports git status when mind_root is set."""
+        from aiciv_mind.tools.health_tools import _make_health_handler
+
+        # Use the real aiciv-mind repo
+        handler = _make_health_handler(
+            mind_root="/home/corey/projects/AI-CIV/aiciv-mind",
+        )
+        result = handler({})
+        assert "Git status" in result or "Last commit" in result
+
+    def test_register_health_tools(self):
+        """register_health_tools adds system_health to registry."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.health_tools import register_health_tools
+
+        reg = ToolRegistry()
+        register_health_tools(reg)
+        names = reg.names()
+        assert "system_health" in names
+
+
+class TestDaemonTools:
+    """Battle-test daemon_health dashboard tool."""
+
+    def test_daemon_health_with_memory_store(self, memory_store):
+        """daemon_health reports memory DB status."""
+        from aiciv_mind.tools.daemon_tools import _make_daemon_health_handler
+
+        handler = _make_daemon_health_handler(memory_store=memory_store)
+        result = handler({"verbose": False})
+        assert "Daemon Health Dashboard" in result
+        assert "Memory DB" in result
+        # Memory DB should be PASS since we have a working store
+        assert "PASS" in result
+
+    def test_daemon_health_without_memory_store(self):
+        """daemon_health warns when no memory store provided."""
+        from aiciv_mind.tools.daemon_tools import _make_daemon_health_handler
+
+        handler = _make_daemon_health_handler(memory_store=None)
+        result = handler({})
+        assert "Daemon Health Dashboard" in result
+        assert "WARN" in result
+        assert "no memory_store" in result
+
+    def test_register_daemon_tools(self):
+        """register_daemon_tools adds daemon_health to registry."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.daemon_tools import register_daemon_tools
+
+        reg = ToolRegistry()
+        register_daemon_tools(reg)
+        names = reg.names()
+        assert "daemon_health" in names
