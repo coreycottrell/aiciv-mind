@@ -62,6 +62,10 @@ class Mind:
         self._current_task: str = ""  # Track for model router outcome recording
         self._memory_selector = None  # P2-8: AI-powered memory relevance selection
 
+        # P3-5: Pattern detector — observes tool calls for self-improvement
+        from aiciv_mind.pattern_detector import PatternDetector
+        self._pattern_detector = PatternDetector(agent_id=manifest.mind_id)
+
         # Attach hook governance if configured
         if manifest.hooks.enabled:
             from aiciv_mind.tools.hooks import HookRunner
@@ -618,6 +622,22 @@ class Mind:
                 )
         except Exception:
             pass  # Lifecycle hooks must NEVER crash the task return
+
+        # P3-5: Log detected patterns at task end
+        try:
+            patterns = self._pattern_detector.detected_patterns()
+            if patterns:
+                _mind_root = Path(__file__).parent.parent.parent
+                self._pattern_detector.to_jsonl(
+                    _mind_root / "data" / "patterns.jsonl",
+                )
+                logger.info(
+                    "[P3-5] %d pattern(s) detected: %s",
+                    len(patterns),
+                    "; ".join(p.description for p in patterns[:3]),
+                )
+        except Exception:
+            pass  # Pattern detection is observability — never crashes
 
         return final_text
 
@@ -1289,19 +1309,29 @@ class Mind:
         tool_input = block.input if hasattr(block, "input") else {}
         logger.info("[%s] Tool: %s(%s)", self.manifest.mind_id, block.name, str(tool_input)[:100])
         timeout = self.manifest.tools_config.exec_timeout_s
+        t0 = time.monotonic()
         coro = self._tools.execute(block.name, tool_input)
         if timeout > 0:
             try:
                 result = await asyncio.wait_for(coro, timeout=timeout)
             except asyncio.TimeoutError:
+                dur_ms = int((time.monotonic() - t0) * 1000)
                 logger.error(
                     "[%s] Tool %s TIMED OUT after %.0fs",
                     self.manifest.mind_id, block.name, timeout,
                 )
+                self._pattern_detector.observe(
+                    block.name, is_error=True, duration_ms=dur_ms,
+                )
                 return f"ERROR: Tool {block.name} timed out after {timeout}s"
         else:
             result = await coro
+        dur_ms = int((time.monotonic() - t0) * 1000)
         result = str(result)
+        is_error = "ERROR:" in result
+        self._pattern_detector.observe(
+            block.name, is_error=is_error, duration_ms=dur_ms,
+        )
         if len(result) > self._MAX_TOOL_RESULT_CHARS:
             truncated_len = len(result)
             result = (
