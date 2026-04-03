@@ -1345,6 +1345,7 @@ class Mind:
         # and extract whatever parameters follow before the next invoke or end.
         if not blocks:
             # Find all <invoke name="tool_name"> occurrences
+            # Standard: <invoke name="X"><parameter name="k">v</parameter></invoke>
             invoke_re = re.compile(
                 r'<invoke\s+name="([^"]+)">\s*(.*?)(?:</invoke>|(?=<invoke\s)|$)',
                 re.DOTALL,
@@ -1374,6 +1375,61 @@ class Mind:
                 blocks.append(block)
                 logger.info(
                     "[%s] Parsed XML tool call: %s(%s)",
+                    self.manifest.mind_id, name, str(args)[:100],
+                )
+
+        # Fallback: M2.7 hybrid format — JSON args inside XML invoke tags
+        # <invoke name="tool_name", "arguments": {"key": "value"}>
+        # or <invoke name="tool_name", "arguments": {"key": "value"}></invoke>
+        if not blocks:
+            hybrid_name_re = re.compile(
+                r'<invoke\s+name="([^"]+)"\s*,\s*"arguments"\s*:\s*',
+            )
+            for match in hybrid_name_re.finditer(text):
+                name = _normalize_tool_name(match.group(1))
+                if not name:
+                    continue
+                # Extract JSON object using brace counting (handles nested {})
+                start = match.end()
+                if start >= len(text) or text[start] != '{':
+                    continue
+                depth = 0
+                in_str = False
+                esc = False
+                end = start
+                for ci in range(start, len(text)):
+                    c = text[ci]
+                    if esc:
+                        esc = False
+                    elif c == '\\' and in_str:
+                        esc = True
+                    elif c == '"' and not esc:
+                        in_str = not in_str
+                    elif not in_str:
+                        if c == '{':
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = ci + 1
+                                break
+                if depth != 0:
+                    continue
+                try:
+                    args = json.loads(text[start:end])
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                block = type("SyntheticToolUse", (), {
+                    "name": name,
+                    "input": args,
+                    "id": f"synthetic_{uuid.uuid4().hex[:12]}",
+                    "type": "tool_use",
+                })()
+                blocks.append(block)
+                logger.info(
+                    "[%s] Parsed hybrid XML tool call: %s(%s)",
                     self.manifest.mind_id, name, str(args)[:100],
                 )
 
