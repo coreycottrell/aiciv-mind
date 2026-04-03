@@ -77,24 +77,41 @@ class ContextManager:
     # Boot context formatting
     # ------------------------------------------------------------------
 
-    def format_boot_context(self, boot: BootContext) -> str:
+    def format_boot_context(
+        self, boot: BootContext, context_mode: str = "full"
+    ) -> str:
         """
         Return a formatted string to prepend to the system prompt at startup.
 
-        Sections:
+        context_mode:
+            "full"    — All sections: identity, handoff, pinned, evolution, core knowledge, scratchpad.
+            "minimal" — Session header only. For ephemeral read-only agents.
+
+        Sections (full mode):
         1. Session header (session_id, count)
         2. Identity memories (who I am)
         3. Last handoff (what I was doing)
         4. Pinned memories (always-on context)
+        5. Evolution trajectory
+        6. Core knowledge
+        7. Daily scratchpad
         """
         parts: list[str] = []
 
-        # Session header
+        # Session header — always included, even in minimal mode
         parts.append(
             f"## Session Context\n"
             f"Session ID: {boot.session_id} | "
             f"Prior sessions completed: {boot.session_count}"
         )
+
+        if context_mode == "minimal":
+            # Minimal mode: session header only — no identity, no memories
+            if len(parts) == 1:
+                return ""
+            return "\n\n".join(parts) + "\n\n---\n\n"
+
+        # ── Full mode: load everything ────────────────────────────────
 
         # Identity
         if boot.identity_memories:

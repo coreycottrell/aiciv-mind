@@ -178,7 +178,7 @@ async def run_primary(manifest_path: str, task: str | None = None, converse: lis
         model_max_tokens=manifest.model.max_tokens,
         scratchpad_dir=scratchpad_dir,
     )
-    boot_str = ctx_mgr.format_boot_context(boot)
+    boot_str = ctx_mgr.format_boot_context(boot, context_mode=manifest.context.mode)
     if boot_str:
         logging.getLogger("aiciv_mind.main").info(
             "Loaded boot context: session %s (prior sessions: %d)",

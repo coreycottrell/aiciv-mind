@@ -206,3 +206,23 @@ def test_resolved_system_prompt_default(tmp_path: Path) -> None:
     manifest = MindManifest.from_yaml(manifest_path)
 
     assert manifest.resolved_system_prompt() == "You are an AI agent."
+
+
+# ---------------------------------------------------------------------------
+# Test: context mode (P2-11)
+# ---------------------------------------------------------------------------
+
+
+def test_context_mode_defaults_to_full(tmp_path: Path) -> None:
+    """Default context mode is 'full'."""
+    manifest_path = write_yaml(tmp_path, MINIMAL_VALID)
+    manifest = MindManifest.from_yaml(manifest_path)
+    assert manifest.context.mode == "full"
+
+
+def test_context_mode_minimal(tmp_path: Path) -> None:
+    """Manifest can specify minimal context mode."""
+    data = {**MINIMAL_VALID, "context": {"mode": "minimal"}}
+    manifest_path = write_yaml(tmp_path, data)
+    manifest = MindManifest.from_yaml(manifest_path)
+    assert manifest.context.mode == "minimal"

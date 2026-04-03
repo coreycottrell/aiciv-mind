@@ -100,6 +100,19 @@ class AgentMailConfig(BaseModel):
     api_key_env: str = "AGENTMAIL_API_KEY"
 
 
+class ContextMode(BaseModel):
+    """
+    Context loading mode — controls how much identity context a mind receives.
+
+    full:    Load everything — identity memories, handoff, pinned, evolution trajectory,
+             top-by-depth memories.  For Primary and long-running team leads.
+    minimal: Load task + tools + manifest only.  Skip identity, handoff, pinned, evolution.
+             For ephemeral read-only agents that do a single focused job.
+    """
+
+    mode: str = "full"  # "full" or "minimal"
+
+
 class SubMindRef(BaseModel):
     """Reference to a sub-mind that this mind can spawn."""
 
@@ -133,6 +146,7 @@ class MindManifest(BaseModel):
     compaction: CompactionConfig = CompactionConfig()
     tools_config: ToolsConfig = ToolsConfig()
     hooks: HooksConfig = HooksConfig()
+    context: ContextMode = ContextMode()
     sub_minds: list[SubMindRef] = []
 
     @classmethod

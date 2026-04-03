@@ -153,6 +153,57 @@ def test_format_boot_context_respects_max_memories(ctx: ContextManager):
 
 
 # ---------------------------------------------------------------------------
+# Tests: minimal context mode (P2-11)
+# ---------------------------------------------------------------------------
+
+
+def test_minimal_mode_skips_identity(ctx: ContextManager, minimal_boot: BootContext):
+    """Minimal context mode skips identity memories."""
+    full_result = ctx.format_boot_context(minimal_boot, context_mode="full")
+    minimal_result = ctx.format_boot_context(minimal_boot, context_mode="minimal")
+
+    assert "My Identity" in full_result
+    assert "My Identity" not in minimal_result
+
+
+def test_minimal_mode_skips_handoff(ctx: ContextManager, minimal_boot: BootContext):
+    """Minimal context mode skips handoff."""
+    full_result = ctx.format_boot_context(minimal_boot, context_mode="full")
+    minimal_result = ctx.format_boot_context(minimal_boot, context_mode="minimal")
+
+    assert "Previous Session" in full_result
+    assert "Previous Session" not in minimal_result
+
+
+def test_minimal_mode_skips_pinned(ctx: ContextManager, minimal_boot: BootContext):
+    """Minimal context mode skips pinned memories."""
+    full_result = ctx.format_boot_context(minimal_boot, context_mode="full")
+    minimal_result = ctx.format_boot_context(minimal_boot, context_mode="minimal")
+
+    assert "Pinned Context" in full_result
+    assert "Pinned Context" not in minimal_result
+
+
+def test_minimal_mode_returns_empty(ctx: ContextManager, minimal_boot: BootContext):
+    """Minimal context mode returns empty — no identity context needed."""
+    minimal_result = ctx.format_boot_context(minimal_boot, context_mode="minimal")
+    assert minimal_result == ""
+
+
+def test_minimal_mode_empty_boot_also_empty(ctx: ContextManager, empty_boot: BootContext):
+    """Empty boot in minimal mode returns empty string."""
+    result = ctx.format_boot_context(empty_boot, context_mode="minimal")
+    assert result == ""
+
+
+def test_full_mode_is_default(ctx: ContextManager, minimal_boot: BootContext):
+    """Default context_mode is full (backward compatible)."""
+    default_result = ctx.format_boot_context(minimal_boot)
+    full_result = ctx.format_boot_context(minimal_boot, context_mode="full")
+    assert default_result == full_result
+
+
+# ---------------------------------------------------------------------------
 # Tests: format_search_results — staleness caveat
 # ---------------------------------------------------------------------------
 
