@@ -1355,11 +1355,13 @@ class Mind:
         # M2.7 hybrid format — JSON args inside XML invoke tags (check FIRST)
         # <invoke name="tool_name", "arguments": {"key": "value"}>
         # Also handles: <invoke name="tool_name", "arguments"> {"key": "value"}
+        # Also handles: <invoke name "tool_name", "arguments": {...}>  (no = sign)
         # (M2.7 sometimes closes the tag with > before the JSON body)
+        # (M2.7 sometimes omits the = between name and quoted tool name)
         # Must run before standard XML parser which would match these but lose args.
         if not blocks:
             hybrid_name_re = re.compile(
-                r'<invoke\s+name="([^"]+)"\s*,\s*"arguments"\s*[:>]\s*',
+                r'<invoke\s+name\s*=?\s*"([^"]+)"\s*,\s*"arguments"\s*[:>]\s*',
             )
             for match in hybrid_name_re.finditer(text):
                 name = _normalize_tool_name(match.group(1))
@@ -1418,7 +1420,7 @@ class Mind:
         # Runs AFTER hybrid parser to avoid matching hybrid format with empty args.
         if not blocks:
             invoke_re = re.compile(
-                r'<invoke\s+name="([^"]+)">\s*(.*?)(?:</invoke>|(?=<invoke\s)|$)',
+                r'<invoke\s+name\s*=?\s*"([^"]+)">\s*(.*?)(?:</invoke>|(?=<invoke\s)|$)',
                 re.DOTALL,
             )
             for match in invoke_re.finditer(text):

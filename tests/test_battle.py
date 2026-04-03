@@ -1077,6 +1077,50 @@ class TestTextToolCallParser:
         assert blocks[0].input["limit"] == 10
         store.close()
 
+    # --- Missing equals sign: <invoke name "tool"> (4th parser variant) ---
+
+    def test_hybrid_xml_no_equals_sign(self):
+        """M2.7 sometimes drops the = between name and quoted tool name."""
+        mind, store = _make_mind_for_parser(["coordination_write"])
+        text = (
+            '<invoke name "coordination_write", "arguments": '
+            '{"entry": "test entry"}>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "coordination_write"
+        assert blocks[0].input["entry"] == "test entry"
+        store.close()
+
+    def test_xml_no_equals_sign_with_arguments_tag(self):
+        """Standard XML with name "X" (no =) and <arguments> body."""
+        mind, store = _make_mind_for_parser(["memory_write"])
+        text = (
+            '<invoke name "memory_write">\n'
+            '<arguments>\n'
+            '{"content": "hello world"}\n'
+            '</arguments>\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_write"
+        assert blocks[0].input["content"] == "hello world"
+        store.close()
+
+    def test_hybrid_no_equals_angle_bracket(self):
+        """Hybrid XML with no = and > separator."""
+        mind, store = _make_mind_for_parser(["coordination_read"])
+        text = (
+            '<invoke name "coordination_read", "arguments"> {}'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "coordination_read"
+        assert blocks[0].input == {}
+        store.close()
+
     # --- Standard XML with <arguments> tag (3rd parser variant) ---
 
     def test_xml_arguments_tag(self):
