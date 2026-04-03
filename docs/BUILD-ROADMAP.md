@@ -1,10 +1,43 @@
 # aiciv-mind BUILD ROADMAP
 ## Comprehensive Gap Analysis + Prioritized Build Plan
 
-**Date**: 2026-04-01
+**Date**: 2026-04-01 (updated 2026-04-03 after overnight flywheel)
 **Author**: Team 2 Build Analysis
 **Sources**: CC-ANALYSIS-CORE, CC-ANALYSIS-TEAMS, CC-PUBLIC-ANALYSIS, M27-RESEARCH, ROOT-GAPS, REALITY-AUDIT, EVOLUTION-PLAN, NEXT-STEPS, CONTEXT-ARCHITECTURE, DESIGN-PRINCIPLES, Aether Skills Analysis
-**Codebase**: `/home/corey/projects/AI-CIV/aiciv-mind/` — 14 source files, 12 tool modules, 4 skills, 3 manifests, 3 tools scripts
+**Codebase**: `/home/corey/projects/AI-CIV/aiciv-mind/` — 18 source files, 12 tool modules, 4 skills, 10 manifests, 4 tools scripts
+
+## BUILD STATUS (2026-04-03 Overnight Flywheel Audit)
+**21 of 25 items BUILT. 2078 tests passing.** The original roadmap significantly understated how much was already implemented.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| P0-0 | CONFIG ONLY | Pin M2.7 + reasoning_split — config change, not code |
+| P0-1 | ✅ BUILT | introspect_context — already calls get_pinned at invocation time |
+| P0-2 | ✅ BUILT | PRAGMA optimize — already in memory.py close() |
+| P0-3 | ✅ BUILT | Session topics — 16-word extraction in mind.py |
+| P0-4 | ✅ BUILT | Thinking tokens preserved — response.content includes blocks |
+| P0-5 | ✅ BUILT | Orphaned session cleanup in session_store.py boot() + memory dedup |
+| P0-6 | TESTING | Temperature 0.7 vs 1.0 — testing task, not code |
+| P1-1 | ❌ UNBUILT | Hub daemon — persistent watcher needed |
+| P1-2 | ✅ BUILT | Multi-turn — REPL + --converse flag |
+| P1-3 | ✅ BUILT | Context compaction — full implementation with circuit breaker |
+| P1-4 | ✅ BUILT | Web tools — web_search_tools.py + web_fetch_tools.py |
+| P1-5 | ✅ BUILT | Email — email_tools.py (202 lines) |
+| P1-6 | ✅ BUILT | Test-echo manifest created + spawner tests |
+| P1-7 | ✅ BUILT | Depth-weighted search ranking |
+| P1-8 | ✅ BUILT | Skill auto-discovery — skill_discovery.py |
+| P2-1 | ✅ BUILT | Memory graph — memory_links table + graph_tools.py (4 tools) |
+| P2-2 | ❌ UNBUILT | Dream mode production deployment |
+| P2-3 | ✅ BUILT | Hooks — HookRunner + JSONL audit persistence |
+| P2-4 | ✅ BUILT | Persistent agent registry — spawner writes to DB |
+| P2-5 | ✅ BUILT | Model router — integrated with mind loop |
+| P2-6 | ✅ BUILT | Identity file protection — safe_update.sh + .gitignore |
+| P2-7 | ✅ BUILT | Infrastructure guard — 8 checks, 17 tests |
+| P2-8 | ✅ BUILT | Memory selector — AI-powered relevance reranking |
+| P3-5 | ✅ BUILT | Pattern detection — bigram/trigram/error/slow/dominant |
+| P3-9 | ✅ BUILT | Calendar tools — 283 lines |
+
+**Remaining genuinely unbuilt**: P1-1 (Hub daemon), P2-2 (Dream mode deploy), P3-1 through P3-4, P3-6 through P3-8, P3-10
 
 ---
 
