@@ -224,6 +224,19 @@ _SPAWN_AGENT_DEFINITION: dict = {
                 "type": "string",
                 "description": "The specific task for this agent to execute",
             },
+            "state_file": {
+                "type": "string",
+                "description": "Path to a JSON state file to update on completion (e.g. 'state/evolution-status.json')",
+            },
+            "state_key": {
+                "type": "string",
+                "description": "Dot-notation key to set to true in the state file on completion (e.g. 'phases.phase_1.tasks.first_impressions')",
+            },
+            "complexity": {
+                "type": "string",
+                "description": "Task complexity for spawn budget (trivial/simple/medium/complex/variable). Defaults to 'medium'.",
+                "enum": ["trivial", "simple", "medium", "complex", "variable"],
+            },
         },
         "required": ["mind_id", "manifest_path", "task"],
     },
@@ -233,6 +246,52 @@ _SPAWN_AGENT_DEFINITION: dict = {
 _AGENT_TASKS_DIR = "data/agent_tasks"
 _AGENT_RESULTS_DIR = "data/submind_results"
 _AGENT_TIMEOUT_SECONDS = 180  # 3 minutes max per agent task
+
+# Spawn budget tracking — prevents agent over-spawning (Gap 3)
+_SPAWN_BUDGETS: dict[str, int] = {}  # team_lead_mind_id -> remaining spawns
+_SPAWN_BUDGET_LIMITS: dict[str, int] = {
+    "trivial": 1,
+    "simple": 2,
+    "medium": 3,
+    "complex": 5,
+    "variable": 8,
+}
+_DEFAULT_SPAWN_BUDGET = 3  # If no complexity info provided
+
+
+def _update_state_file(mind_root: Path, state_file: str, state_key: str) -> str:
+    """Update a JSON state file by setting a dot-notation key to True.
+
+    Returns status message.
+    """
+    if not state_file or not state_key:
+        return ""
+
+    path = mind_root / state_file
+    if not path.exists():
+        return f"WARNING: State file not found: {state_file}"
+
+    try:
+        data = json.loads(path.read_text())
+
+        # Navigate dot-notation key
+        keys = state_key.split(".")
+        obj = data
+        for k in keys[:-1]:
+            if k not in obj:
+                obj[k] = {}
+            obj = obj[k]
+
+        obj[keys[-1]] = True
+        path.write_text(json.dumps(data, indent=2))
+        return f"State updated: {state_file}[{state_key}] = true"
+    except Exception as e:
+        return f"WARNING: Failed to update state: {e}"
+
+
+def reset_spawn_budget(team_lead_mind_id: str) -> None:
+    """Reset spawn budget for a team lead (called at task start)."""
+    _SPAWN_BUDGETS.pop(team_lead_mind_id, None)
 
 
 def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
@@ -250,6 +309,9 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
         mind_id = tool_input.get("mind_id", "").strip()
         manifest_path = tool_input.get("manifest_path", "").strip()
         task = tool_input.get("task", "").strip()
+        state_file = tool_input.get("state_file", "").strip()
+        state_key = tool_input.get("state_key", "").strip()
+        complexity = tool_input.get("complexity", "medium").strip()
 
         if not mind_id:
             return "ERROR: mind_id is required"
@@ -257,6 +319,19 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
             return "ERROR: manifest_path is required"
         if not task:
             return "ERROR: task is required — agents need a specific task to execute"
+
+        # --- Gap 3: Spawn budget enforcement ---
+        _SPAWN_BUDGETS.setdefault(
+            team_lead_mind_id,
+            _SPAWN_BUDGET_LIMITS.get(complexity, _DEFAULT_SPAWN_BUDGET),
+        )
+        if _SPAWN_BUDGETS[team_lead_mind_id] <= 0:
+            return (
+                f"BUDGET EXCEEDED: Spawn limit reached for this task. "
+                f"You have spawned the maximum number of agents for "
+                f"{complexity} complexity. Synthesize results from "
+                f"existing agents instead of spawning more."
+            )
 
         # Verify the manifest declares role: agent
         try:
@@ -276,13 +351,18 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
         task_dir = mind_root / _AGENT_TASKS_DIR
         task_dir.mkdir(parents=True, exist_ok=True)
         task_file = task_dir / f"{task_id}.json"
-        task_file.write_text(json.dumps({
+        task_data = {
             "task_id": task_id,
             "task": task,
             "from": team_lead_mind_id,
             "mind_id": mind_id,
             "timestamp": time.time(),
-        }))
+        }
+        if state_file:
+            task_data["state_file"] = state_file
+        if state_key:
+            task_data["state_key"] = state_key
+        task_file.write_text(json.dumps(task_data))
 
         try:
             # Spawn agent with --task-file flag (runs task directly, no IPC needed)
@@ -292,10 +372,15 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
                 extra_args=["--task-file", str(task_file)],
             )
 
+            # Decrement spawn budget after successful spawn
+            _SPAWN_BUDGETS[team_lead_mind_id] -= 1
+            budget_remaining = _SPAWN_BUDGETS[team_lead_mind_id]
+
             parts = [
                 f"Spawned agent '{mind_id}' (pane: {handle.pane_id})",
                 f"Task ID: {task_id}",
                 f"Task: {task[:200]}",
+                f"Spawn budget: {budget_remaining} remaining",
                 "Waiting for agent to complete...",
             ]
 
@@ -310,16 +395,24 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
                         success = result_data.get("success", True)
                         elapsed = round(time.time() - start, 1)
                         if success:
-                            return (
-                                f"Agent '{mind_id}' completed task ({elapsed}s):\n\n"
-                                f"{result_text}"
-                            )
+                            # Gap 2: Update state file on successful completion
+                            state_msg = _update_state_file(mind_root, state_file, state_key)
+                            result_parts = [
+                                f"Agent '{mind_id}' completed task ({elapsed}s):",
+                                "",
+                                result_text,
+                                f"Spawn budget: {budget_remaining} remaining",
+                            ]
+                            if state_msg:
+                                result_parts.append(state_msg)
+                            return "\n".join(result_parts)
                         else:
                             error = result_data.get("error", "Unknown error")
                             return (
                                 f"Agent '{mind_id}' FAILED ({elapsed}s):\n"
                                 f"Error: {error}\n"
-                                f"Partial result: {result_text}"
+                                f"Partial result: {result_text}\n"
+                                f"Spawn budget: {budget_remaining} remaining"
                             )
                     except json.JSONDecodeError:
                         pass  # File still being written, retry
@@ -335,7 +428,8 @@ def _make_spawn_agent_handler(spawner, bus=None, team_lead_mind_id: str = ""):
 
             return (
                 f"Agent '{mind_id}' TIMED OUT after {elapsed}s.\n"
-                f"Last pane output:\n{output_text}"
+                f"Last pane output:\n{output_text}\n"
+                f"Spawn budget: {budget_remaining} remaining"
             )
 
         except Exception as e:

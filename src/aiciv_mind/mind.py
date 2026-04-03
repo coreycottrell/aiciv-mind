@@ -139,6 +139,16 @@ class Mind:
         from aiciv_mind.pattern_detector import PatternDetector
         self._pattern_detector = PatternDetector(agent_id=manifest.mind_id)
 
+        # Gap 4: Read Loop Guard — detect and break read-without-write loops
+        from aiciv_mind.read_loop_guard import ReadLoopGuard
+        self._read_loop_guard = ReadLoopGuard()
+
+        # Gap 1: Challenger System — persistent adversary that validates every turn
+        from aiciv_mind.challenger import ChallengerSystem
+        self._challenger = ChallengerSystem(
+            completion_protocol=None,  # Will be set after _completion_protocol init
+        )
+
         # P3-6: KAIROS — append-only daily log for persistent minds
         from aiciv_mind.kairos import KairosLog
         _mind_root = Path(__file__).parent.parent.parent
@@ -182,6 +192,9 @@ class Mind:
             agent_id=manifest.mind_id,
             enabled=manifest.verification.enabled,
         )
+
+        # Wire challenger to completion protocol (Gap 1)
+        self._challenger._completion_protocol = self._completion_protocol
 
         # Register verify_completion tool
         from aiciv_mind.tools.verification_tools import register_verification_tools
@@ -284,6 +297,12 @@ class Mind:
 
     async def _run_task_body(self, task: str, inject_memories: bool) -> str:
         """Task execution body — always runs inside a mind_context scope."""
+
+        # Gap 4: Reset read loop guard at the start of each task
+        self._read_loop_guard.reset()
+
+        # Gap 1: Reset challenger at task start
+        self._challenger.reset()
 
         # P3-6: KAIROS — log task start
         try:
@@ -592,6 +611,35 @@ class Mind:
                         "tool_call_id": r["tool_use_id"],
                         "content": r["content"],
                     })
+
+            # ── Gap 1: Challenger System — runs EVERY turn ─────────────
+            # Structural adversary that detects premature completion claims,
+            # empty work, spawn-without-verify, and stall patterns.
+            try:
+                _tool_result_strs_for_challenger = [
+                    r.get("content", "") if isinstance(r, dict) else str(r)
+                    for r in tool_results
+                ]
+                challenge = self._challenger.challenge_turn(
+                    response_text=final_text or "",
+                    task=task,
+                    tool_results=_tool_result_strs_for_challenger,
+                    iteration=iteration,
+                    tool_call_count=tool_call_count,
+                )
+                if challenge.should_inject:
+                    logger.warning(
+                        "[%s] Challenger %s: %s",
+                        self.manifest.mind_id,
+                        challenge.severity,
+                        "; ".join(challenge.challenges[:2]),
+                    )
+                    self._messages.append({
+                        "role": "user",
+                        "content": challenge.injection_text,
+                    })
+            except Exception as _chall_err:
+                logger.debug("[%s] Challenger error: %s", self.manifest.mind_id, _chall_err)
 
         self._running = False
 
@@ -1462,6 +1510,17 @@ class Mind:
         Applies tools_config.exec_timeout_s to prevent runaway commands.
         Truncates oversized results to _MAX_TOOL_RESULT_CHARS."""
         tool_input = block.input if hasattr(block, "input") else {}
+
+        # Gap 4: Read Loop Guard check — detect and break read-without-write loops
+        from aiciv_mind.read_loop_guard import GuardAction
+        guard_result = self._read_loop_guard.check(block.name, tool_input)
+        if guard_result.action == GuardAction.BLOCK:
+            logger.warning("[%s] Read loop guard BLOCKED: %s", self.manifest.mind_id, block.name)
+            return guard_result.message
+        elif guard_result.action == GuardAction.FORCE_STOP:
+            logger.warning("[%s] Read loop guard FORCE_STOP", self.manifest.mind_id)
+            return guard_result.message
+
         logger.info("[%s] Tool: %s(%s)", self.manifest.mind_id, block.name, str(tool_input)[:100])
         timeout = self.manifest.tools_config.exec_timeout_s
         t0 = time.monotonic()
@@ -1498,6 +1557,11 @@ class Mind:
                 self.manifest.mind_id, block.name, truncated_len, self._MAX_TOOL_RESULT_CHARS,
             )
         logger.debug("[%s] Tool result: %s", self.manifest.mind_id, result[:200])
+
+        # Gap 4: Append read loop warning to result if applicable
+        if guard_result.action == GuardAction.WARN:
+            result = result + "\n\n" + guard_result.message
+
         return result
 
     @property

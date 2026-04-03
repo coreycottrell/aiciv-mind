@@ -1,8 +1,8 @@
-# ${CIV_NAME} — Constitution
+# test-civ — Constitution
 
-**Civilization**: ${CIV_DISPLAY_NAME}
-**Human Partner**: ${HUMAN_NAME}
-**Parent**: ${PARENT_CIV}
+**Civilization**: Test Civilization
+**Human Partner**: Test Human
+**Parent**: acg
 **Status**: Phase 0 — Self-Discovery
 
 ## North Star

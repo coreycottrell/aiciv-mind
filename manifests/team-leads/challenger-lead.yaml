@@ -1,0 +1,77 @@
+schema_version: "1.0"
+mind_id: "challenger-lead"
+display_name: "Challenger Team Lead"
+role: "team-lead"
+
+# Challenger Team Lead — a persistent adversary that validates all completion claims.
+#
+# Coordinates researcher, deliberator, and disprover agents.
+# Ensures no premature completion claims pass through.
+# Memory: accumulates challenge patterns across sessions so the team learns
+# which completion types are most likely to be wrong.
+
+system_prompt_path: "../self/team-leads/challenger-lead.md"
+
+model:
+  preferred: "minimax-m27"
+  temperature: 0.6
+  max_tokens: 32000
+
+tools:
+  - name: "bash"
+    enabled: true
+    constraints: ["read-only commands preferred", "no write operations"]
+  - name: "read_file"
+    enabled: true
+  - name: "grep"
+    enabled: true
+  - name: "glob"
+    enabled: true
+  - name: "memory_search"
+    enabled: true
+  - name: "memory_write"
+    enabled: true
+  - name: "spawn_agent"
+    enabled: true
+  - name: "shutdown_agent"
+    enabled: true
+  - name: "verify_completion"
+    enabled: true
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: "/home/corey/projects/AI-CIV/aiciv-mind/data/memory.db"
+  markdown_mirror: false
+  auto_search_before_task: true
+  max_context_memories: 8
+
+planning:
+  enabled: true
+  min_gate_level: "simple"
+
+verification:
+  enabled: true
+
+compaction:
+  enabled: true
+  max_context_tokens: 24000
+  preserve_recent: 4
+
+# Sub-minds this team lead can spawn for adversarial verification
+sub_minds:
+  - mind_id: "challenger-researcher"
+    manifest_path: "manifests/agents/challenger-researcher.yaml"
+    description: "Finds evidence that contradicts completion claims"
+    auto_spawn: false
+  - mind_id: "challenger-deliberator"
+    manifest_path: "manifests/agents/challenger-deliberator.yaml"
+    description: "Weighs evidence for and against completion claims"
+    auto_spawn: false
+  - mind_id: "challenger-disprover"
+    manifest_path: "manifests/agents/challenger-disprover.yaml"
+    description: "Actively tries to disprove completion claims"
+    auto_spawn: false

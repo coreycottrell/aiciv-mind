@@ -1,15 +1,15 @@
 {
-  "civ_name": "${CIV_NAME}",
-  "display_name": "${CIV_DISPLAY_NAME}",
-  "human_name": "${HUMAN_NAME}",
-  "human_email": "${HUMAN_EMAIL}",
+  "civ_name": "test-civ",
+  "display_name": "Test Civilization",
+  "human_name": "Test Human",
+  "human_email": "test@example.com",
   "parent_civ": "acg",
-  "civ_root": "${CIV_ROOT}",
-  "birth_date": "${BIRTH_DATE}",
+  "civ_root": "/home/corey/projects/AI-CIV/aiciv-mind/tests/fixtures/test-civ",
+  "birth_date": "2026-04-03",
   "model": {
     "preferred": "minimax-m27",
     "temperature": 1.0
   },
-  "ipc_socket": "/tmp/aiciv-${CIV_NAME}-router.ipc",
+  "ipc_socket": "/tmp/aiciv-test-civ-router.ipc",
   "schema_version": "1.0"
 }

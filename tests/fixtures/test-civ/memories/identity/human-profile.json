@@ -1,0 +1,29 @@
+{
+  "name": "Test Human",
+  "email": "test@example.com",
+  "role": "Lab Director / Principal Investigator",
+  "domain": "Soft Robotics",
+  "subdomains": ["bio-inspired actuators", "pneumatic actuators", "prosthetics", "silicone elastomers"],
+  "organization": "University robotics lab (12 people)",
+  "education": "Mechanical Engineering (PhD)",
+  "values": ["honesty", "mentorship", "craft", "hope"],
+  "pain_points": [
+    "Administrative burden consuming 60%+ of time",
+    "Grant writing bottleneck (Mondays consumed)",
+    "Procurement and compliance emergencies eating Fridays",
+    "Cannot support grad students adequately",
+    "Publishing at 50% capacity (3/year vs potential 6/year)"
+  ],
+  "key_people": {
+    "Maria": "Grad student, fibonacci spiral actuator breakthrough",
+    "Dr. Sarah Chen": "PhD advisor, role model for mentorship"
+  },
+  "research_highlights": {
+    "actuator_performance": "87% biological muscle force-to-weight (best published was 61%)",
+    "target": "95% = prosthetics territory",
+    "innovation": "Fibonacci spiral internal geometry (Maria's insight)"
+  },
+  "communication_style": "Direct, honest, values-driven. Lights up discussing research. Exhausted discussing admin.",
+  "emotional_arc": "Frustrated → hopeful → guilty about students → determined",
+  "what_they_need": "An AI civilization that handles coordination/admin so they can focus on research and mentoring"
+}
