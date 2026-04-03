@@ -492,8 +492,8 @@ class TestStructuralImpossibility:
         # coordination_read and send_message are shared
         assert overlap == {"coordination_read", "send_message"}
 
-    def test_primary_tools_count_is_exactly_5(self):
-        assert len(PRIMARY_TOOLS) == 5
+    def test_primary_tools_count_is_exactly_7(self):
+        assert len(PRIMARY_TOOLS) == 7
 
     def test_team_lead_tools_count_is_exactly_7(self):
         assert len(TEAM_LEAD_TOOLS) == 7

@@ -43,13 +43,15 @@ class Role(enum.Enum):
 # Tool whitelists — the structural constraints
 # ---------------------------------------------------------------------------
 
-# Primary: 5 tools.  Can ONLY orchestrate.  Cannot touch the world.
+# Primary: 7 tools.  Can ONLY orchestrate + inter-mind coordination.
 PRIMARY_TOOLS: frozenset[str] = frozenset({
     "spawn_team_lead",
     "coordination_read",
     "coordination_write",
     "send_message",
     "shutdown_team_lead",
+    "publish_surface",
+    "read_surface",
 })
 
 # Team Lead: coordination + read-only memory + team scratchpad.

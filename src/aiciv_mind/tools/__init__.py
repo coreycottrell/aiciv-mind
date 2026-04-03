@@ -276,6 +276,13 @@ class ToolRegistry:
             from aiciv_mind.tools.hub_tools import register_hub_tools
             register_hub_tools(registry, suite_client, queue_path=queue_path)
 
+            # Inter-mind coordination API (publish/read coordination surfaces)
+            from aiciv_mind.tools.coordination_api_tools import register_coordination_api_tools
+            register_coordination_api_tools(
+                registry, suite_client,
+                mind_id=agent_id, civ_id="acg",
+            )
+
         if context_store is not None:
             from aiciv_mind.tools.context_tools import register_context_tools
             register_context_tools(

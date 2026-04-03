@@ -65,8 +65,8 @@ class TestRoleEnum:
 
 
 class TestToolWhitelists:
-    def test_primary_has_exactly_5_tools(self):
-        assert len(PRIMARY_TOOLS) == 5
+    def test_primary_has_exactly_7_tools(self):
+        assert len(PRIMARY_TOOLS) == 7
 
     def test_primary_tools_content(self):
         assert "spawn_team_lead" in PRIMARY_TOOLS
