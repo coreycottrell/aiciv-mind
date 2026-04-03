@@ -789,7 +789,9 @@ def _make_mind_for_parser(tool_names: list[str] | None = None):
         auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
         memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
     )
-    mind = Mind(manifest=manifest, memory=store, tools=registry)
+    # Pass bus=MagicMock() to skip filter_by_role (sub-mind path) so mock
+    # registry isn't replaced by a nested MagicMock that loses configured names().
+    mind = Mind(manifest=manifest, memory=store, tools=registry, bus=MagicMock())
     return mind, store
 
 
@@ -1021,6 +1023,58 @@ class TestTextToolCallParser:
         blocks = mind._parse_text_tool_calls(text)
         assert len(blocks) == 1
         assert blocks[0].input["tags"] == ["a", "b", "c"]
+        store.close()
+
+    # --- Hybrid XML format: <invoke name="X", "arguments": {JSON}> ---
+
+    def test_hybrid_xml_colon_separator(self):
+        """Hybrid XML with colon: <invoke name="X", "arguments": {...}>"""
+        mind, store = _make_mind_for_parser(["spawn_team_lead"])
+        text = (
+            '<minimax:tool_call>\n'
+            '<invoke name="spawn_team_lead", "arguments": '
+            '{"mind_id": "ops-lead", "manifest_path": "manifests/team-leads/ops-lead.yaml"}'
+            '>\n</invoke>\n</minimax:tool_call>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "spawn_team_lead"
+        assert blocks[0].input["mind_id"] == "ops-lead"
+        store.close()
+
+    def test_hybrid_xml_angle_bracket_separator(self):
+        """Hybrid XML with >: <invoke name="X", "arguments"> {...}
+
+        This is the EXACT format Root emits in production (daemon log 2026-04-03).
+        """
+        mind, store = _make_mind_for_parser(["spawn_team_lead"])
+        text = (
+            '<minimax:tool_call>\n'
+            '<invoke name="spawn_team_lead", "arguments"> '
+            '{"mind_id": "ops-lead", "manifest_path": "manifests/team-leads/ops-lead.yaml", '
+            '"objective": "check system health"}\n'
+            '</invoke>\n</minimax:tool_call>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1, f"Expected 1 block, got {len(blocks)}"
+        assert blocks[0].name == "spawn_team_lead"
+        assert blocks[0].input["mind_id"] == "ops-lead"
+        assert blocks[0].input["objective"] == "check system health"
+        store.close()
+
+    def test_hybrid_xml_angle_bracket_with_newline(self):
+        """Hybrid XML with > followed by newline before JSON body."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = (
+            '<invoke name="memory_search", "arguments">\n'
+            '{"query": "parser bug", "limit": 10}\n'
+            '</invoke>'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        assert blocks[0].input["query"] == "parser bug"
+        assert blocks[0].input["limit"] == 10
         store.close()
 
     # --- Edge cases ---

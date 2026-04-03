@@ -1354,17 +1354,22 @@ class Mind:
         #   <invoke name="X">\n</invoke>   (no params, missing closing)
         # M2.7 hybrid format — JSON args inside XML invoke tags (check FIRST)
         # <invoke name="tool_name", "arguments": {"key": "value"}>
+        # Also handles: <invoke name="tool_name", "arguments"> {"key": "value"}
+        # (M2.7 sometimes closes the tag with > before the JSON body)
         # Must run before standard XML parser which would match these but lose args.
         if not blocks:
             hybrid_name_re = re.compile(
-                r'<invoke\s+name="([^"]+)"\s*,\s*"arguments"\s*:\s*',
+                r'<invoke\s+name="([^"]+)"\s*,\s*"arguments"\s*[:>]\s*',
             )
             for match in hybrid_name_re.finditer(text):
                 name = _normalize_tool_name(match.group(1))
                 if not name:
                     continue
                 # Extract JSON object using brace counting (handles nested {})
+                # Skip any whitespace between separator and opening brace
                 start = match.end()
+                while start < len(text) and text[start] in ' \t\n\r':
+                    start += 1
                 if start >= len(text) or text[start] != '{':
                     continue
                 depth = 0
