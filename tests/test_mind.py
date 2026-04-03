@@ -1008,3 +1008,57 @@ async def test_oversized_tool_result_truncated(minimal_manifest, memory_store):
     content = tool_result_msgs[0]["content"][0]["content"]
     assert "TRUNCATED" in content
     assert len(content) < 50_000  # Should be ~30K + marker, not 50K
+
+
+# ---------------------------------------------------------------------------
+# Role-based tool filtering in Mind.__init__
+# ---------------------------------------------------------------------------
+
+
+async def test_mind_primary_role_filters_tools(memory_store):
+    """Mind with role='primary' should only see PRIMARY_TOOLS."""
+    manifest = MindManifest(
+        mind_id="primary-test",
+        display_name="Primary Test",
+        role="primary",
+        system_prompt="You are a conductor.",
+        model=ModelConfig(preferred="ollama/qwen2.5-coder:14b"),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=memory_store)
+    tool_names = mind._tools.names()
+    # Primary should NOT have bash, read_file, write_file, etc.
+    assert "bash" not in tool_names
+    assert "read_file" not in tool_names
+    assert "write_file" not in tool_names
+    assert "memory_search" not in tool_names
+
+
+async def test_mind_agent_role_keeps_all_tools(memory_store):
+    """Mind with role='agent' should see all registered tools."""
+    manifest = MindManifest(
+        mind_id="agent-test",
+        display_name="Agent Test",
+        role="agent",
+        system_prompt="You are an agent.",
+        model=ModelConfig(preferred="ollama/qwen2.5-coder:14b"),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=memory_store)
+    tool_names = mind._tools.names()
+    # Agent should have everything
+    assert "bash" in tool_names
+    assert "read_file" in tool_names
+    assert "memory_search" in tool_names
+
+
+async def test_mind_freeform_role_keeps_all_tools(minimal_manifest, memory_store):
+    """Mind with a free-form role (e.g., 'worker') should keep all tools."""
+    assert minimal_manifest.role == "worker"
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+    tool_names = mind._tools.names()
+    # Worker role is not in the hierarchy — no filtering applied
+    assert "bash" in tool_names
+    assert "read_file" in tool_names

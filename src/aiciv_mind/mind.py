@@ -96,6 +96,23 @@ class Mind:
         from aiciv_mind.tools.verification_tools import register_verification_tools
         register_verification_tools(self._tools, self._completion_protocol)
 
+        # Apply role-based tool filtering (Design Principle 5: structural constraint).
+        # This ensures the LLM never sees tools outside its role's whitelist.
+        # Only filter when the role is a recognized hierarchy level (primary/team_lead/agent).
+        try:
+            role = manifest.parsed_role()
+            self._tools = self._tools.filter_by_role(role)
+            logger.info(
+                "[%s] Role-based filtering applied: role=%s, %d tools available",
+                manifest.mind_id, role.value, len(self._tools.names()),
+            )
+        except (ValueError, AttributeError, KeyError):
+            # Free-form role string (e.g. "worker") or mock manifest — skip filtering
+            logger.debug(
+                "[%s] Role '%s' is not a hierarchy level — skipping tool filtering",
+                manifest.mind_id, getattr(manifest, 'role', 'unknown'),
+            )
+
         # Session learner (Principle 7: Self-Improving Loop)
         self._session_learner = SessionLearner(
             agent_id=manifest.mind_id,
