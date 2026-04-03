@@ -252,7 +252,7 @@ Review before pushing.""")
 
         # Load the skill
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             registry.execute("load_skill", {"skill_id": "deploy-review"})
         )
         assert "Deploy Review" in result
@@ -292,7 +292,7 @@ No hooks here.""")
         register_skill_tools(registry, MockMemoryStore(), str(tmp_path))
 
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             registry.execute("load_skill", {"skill_id": "basic-skill"})
         )
         assert "Basic Skill" in result
@@ -334,16 +334,15 @@ hooks:
         register_skill_tools(registry, MockMemoryStore(), str(tmp_path))
 
         import asyncio
-        loop = asyncio.get_event_loop()
 
         # Load skill — installs hooks
-        loop.run_until_complete(
+        asyncio.run(
             registry.execute("load_skill", {"skill_id": "deploy-lock"})
         )
         assert "netlify_deploy" in hook_runner.blocked_tools
 
         # Unload skill — removes hooks
-        result = loop.run_until_complete(
+        result = asyncio.run(
             registry.execute("unload_skill", {"skill_id": "deploy-lock"})
         )
         assert "unloaded" in result.lower() or "removed" in result.lower()

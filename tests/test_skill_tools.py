@@ -110,7 +110,7 @@ def test_load_skill_tool(tmp_path, memory_store: MemoryStore) -> None:
 
     # Execute
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         registry.execute("load_skill", {"skill_id": "test-skill"})
     )
 
@@ -128,7 +128,7 @@ def test_load_skill_not_found(tmp_path, memory_store: MemoryStore) -> None:
     register_skill_tools(registry, memory_store, str(tmp_path))
 
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         registry.execute("load_skill", {"skill_id": "nope"})
     )
     assert "ERROR" in result
@@ -144,7 +144,7 @@ def test_list_skills_tool(tmp_path, memory_store: MemoryStore) -> None:
     register_skill_tools(registry, memory_store, str(tmp_path))
 
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         registry.execute("list_skills", {})
     )
     assert "sk-a" in result
@@ -159,7 +159,7 @@ def test_list_skills_tool_empty(tmp_path, memory_store: MemoryStore) -> None:
     register_skill_tools(registry, memory_store, str(tmp_path))
 
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         registry.execute("list_skills", {})
     )
     assert "No skills registered" in result
@@ -173,7 +173,7 @@ def test_create_skill_tool(tmp_path, memory_store: MemoryStore) -> None:
     content = "---\nskill_id: new-skill\ndomain: test\n---\n# New Skill\nCreated at runtime."
 
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         registry.execute("create_skill", {
             "skill_id": "new-skill",
             "domain": "test",
