@@ -72,6 +72,7 @@ PRIMARY_TOOLS: frozenset[str] = frozenset({
     "scratchpad_append",     # scratchpad_tools.py — append to journal
     "memory_search",         # memory_tools.py — search for routing decisions
     "ab_model_test",         # ab_test_tools.py — A/B model comparison (parallel sub-minds)
+    "talk_to_acg",           # acg_tools.py — send messages to ACG Primary via tmux
 })
 
 # Team Lead: coordination + read-only memory + team scratchpad.
