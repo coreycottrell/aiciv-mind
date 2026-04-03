@@ -1,0 +1,29 @@
+schema_version: "1.0"
+mind_id: "test-echo"
+display_name: "Test Echo Mind"
+role: "agent"
+system_prompt: |
+  You are a test mind used for end-to-end spawn validation.
+  When you receive a task, respond with exactly: "echo: {task}"
+  where {task} is the task text you received.
+  Do not use any tools. Just respond directly.
+
+model:
+  preferred: "inherit"
+  temperature: 0.0
+  max_tokens: 256
+
+tools: []
+
+context:
+  mode: "minimal"
+
+auth:
+  civ_id: "acg"
+  keypair_path: "/home/corey/projects/AI-CIV/ACG/config/client-keys/agentauth_acg_keypair.json"
+
+memory:
+  backend: "sqlite_fts5"
+  db_path: ":memory:"
+  auto_search_before_task: false
+  max_context_memories: 0

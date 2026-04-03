@@ -215,3 +215,6 @@ sub_minds:
   - mind_id: "context-engineer"
     manifest_path: "manifests/context-engineer.yaml"
     auto_spawn: false
+  - mind_id: "test-echo"
+    manifest_path: "manifests/test-echo.yaml"
+    auto_spawn: false
