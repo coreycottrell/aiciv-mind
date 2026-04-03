@@ -85,6 +85,7 @@ LONG_POLL_TIMEOUT = 30       # seconds (TG long-poll)
 HEARTBEAT_INTERVAL = 60      # poll cycles between heartbeats
 BACKOFF_BASE = 2.0           # exponential backoff base (seconds)
 BACKOFF_MAX = 60.0           # max backoff (seconds)
+TASK_TIMEOUT = 300.0         # max seconds for a single mind.run_task() call
 MAX_TG_MSG_LEN = 4096        # Telegram message limit
 
 
@@ -385,7 +386,13 @@ async def run(skip_boot: bool = False):
                     },
                     timeout=LONG_POLL_TIMEOUT + 10,
                 )
-                data = r.json()
+                try:
+                    data = r.json()
+                except (ValueError, Exception) as je:
+                    log.warning("TG returned non-JSON (status %d): %s", r.status_code, str(je)[:100])
+                    await asyncio.sleep(5)
+                    consecutive_errors += 1
+                    continue
             except httpx.TimeoutException:
                 continue  # Normal long-poll timeout — loop back
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
@@ -416,8 +423,13 @@ async def run(skip_boot: bool = False):
                         log.info("ACG→Root: %s", acg_msg[:100])
                         processing = True
                         try:
-                            result = await mind.run_task(acg_msg)
+                            result = await asyncio.wait_for(
+                                mind.run_task(acg_msg), timeout=TASK_TIMEOUT,
+                            )
                             inject_to_acg(result or "(no response)")
+                        except asyncio.TimeoutError:
+                            log.error("ACG→Root task timed out after %.0fs", TASK_TIMEOUT)
+                            inject_to_acg("(task timed out)")
                         finally:
                             processing = False
                 except Exception as e:
@@ -485,7 +497,13 @@ async def run(skip_boot: bool = False):
                 processing = True
 
                 try:
-                    result = await mind.run_task(text)
+                    try:
+                        result = await asyncio.wait_for(
+                            mind.run_task(text), timeout=TASK_TIMEOUT,
+                        )
+                    except asyncio.TimeoutError:
+                        log.error("Task timed out after %.0fs: %s", TASK_TIMEOUT, text[:80])
+                        result = "(timed out — try a simpler question or /clear to reset)"
 
                     if not result:
                         result = "(no response)"
@@ -550,7 +568,7 @@ async def run(skip_boot: bool = False):
             await asyncio.sleep(backoff)
 
         except BaseException as e:
-            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+            if isinstance(e, (SystemExit, KeyboardInterrupt, asyncio.CancelledError)):
                 log.info("Received %s — shutting down", type(e).__name__)
                 raise
             log.error("BaseException in poll loop: %s: %s — continuing", type(e).__name__, e)

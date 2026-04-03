@@ -269,47 +269,61 @@ class MemoryStore:
         is returned instead.  This prevents duplicate memories from rapid
         retries or concurrent writes.
         """
-        # Dedup check — prevent identical memories within 30s window
-        dup = self._conn.execute(
-            """
-            SELECT id FROM memories
-            WHERE agent_id = ? AND title = ? AND content = ?
-              AND created_at > datetime('now', '-30 seconds')
-            LIMIT 1
-            """,
-            (memory.agent_id, memory.title, memory.content),
-        ).fetchone()
-        if dup:
-            logger.debug("Dedup: skipping duplicate memory '%s' (existing: %s)", memory.title, dup["id"])
-            return dup["id"]
+        # Atomic dedup check + insert with retry for DB lock contention.
+        # The dedup SELECT and INSERT run in the same implicit transaction
+        # (Python sqlite3 module auto-starts a transaction on DML).
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                dup = self._conn.execute(
+                    """
+                    SELECT id FROM memories
+                    WHERE agent_id = ? AND title = ? AND content = ?
+                      AND created_at > datetime('now', '-30 seconds')
+                    LIMIT 1
+                    """,
+                    (memory.agent_id, memory.title, memory.content),
+                ).fetchone()
+                if dup:
+                    logger.debug("Dedup: skipping duplicate memory '%s' (existing: %s)", memory.title, dup["id"])
+                    return dup["id"]
 
-        tags_json = json.dumps(memory.tags)
-        self._conn.execute(
-            """
-            INSERT INTO memories
-                (id, agent_id, domain, session_id, memory_type, title, content,
-                 source_path, confidence, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                memory.id,
-                memory.agent_id,
-                memory.domain,
-                memory.session_id,
-                memory.memory_type,
-                memory.title,
-                memory.content,
-                memory.source_path,
-                memory.confidence,
-                tags_json,
-            ),
-        )
-        for tag in memory.tags:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)",
-                (memory.id, tag),
-            )
-        self._conn.commit()
+                tags_json = json.dumps(memory.tags)
+                self._conn.execute(
+                    """
+                    INSERT INTO memories
+                        (id, agent_id, domain, session_id, memory_type, title, content,
+                         source_path, confidence, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory.id,
+                        memory.agent_id,
+                        memory.domain,
+                        memory.session_id,
+                        memory.memory_type,
+                        memory.title,
+                        memory.content,
+                        memory.source_path,
+                        memory.confidence,
+                        tags_json,
+                    ),
+                )
+                for tag in memory.tags:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)",
+                        (memory.id, tag),
+                    )
+                self._conn.commit()
+                break  # success
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt < max_retries - 1:
+                    import time as _time
+                    wait = 0.5 * (attempt + 1)
+                    logger.warning("DB locked on store() (attempt %d/%d) — retrying in %.1fs", attempt + 1, max_retries, wait)
+                    _time.sleep(wait)
+                    continue
+                raise  # re-raise if not a lock error or exhausted retries
 
         # P1 auto-linking: find similar memories and create graph links
         if self._auto_link:
