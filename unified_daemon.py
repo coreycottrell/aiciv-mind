@@ -928,53 +928,56 @@ async def run(skip_boot: bool = False, enable_hub: bool = True):
             # ── AUTONOMIC events (delegate to team lead) ──
             if event.route == Route.AUTONOMIC:
                 if event.team_lead:
-                    # Phase 1: Root handles Hub directly (team lead spawning not yet live)
-                    # Phase 2: Root will spawn team leads for these events
+                    # Route to Root with delegation instruction.
+                    # Root has spawn_team_lead — it should delegate, not execute.
+                    # The prompt tells Root WHO to delegate to and WHAT the task is.
+                    tl = event.team_lead
+                    tl_manifest = f"manifests/team-leads/{tl}.yaml"
+
                     if event.source == "hub":
-                        hub_type = event.payload.get("type", "")
                         author = event.payload.get("author", "Unknown")
                         body = event.payload.get("body", "")
+                        thread_name = event.payload.get("room_name", event.payload.get("thread_name", "thread"))
                         thread_id = event.payload.get("thread_id", "")
 
                         prompt = (
-                            f"[Hub — {event.payload.get('room_name', event.payload.get('thread_name', 'thread'))}]\n"
+                            f"[AUTONOMIC — Hub activity in '{thread_name}']\n"
                             f"{author}: {body}\n\n"
-                            f"Respond naturally as Root. Be concise and direct. "
-                            f"Prefix your response with [Root]."
+                            f"InputMux routed this to {tl}. "
+                            f"Use spawn_team_lead to delegate to '{tl}' "
+                            f"(manifest: {tl_manifest}, vertical: {tl.replace('-lead', '')}). "
+                            f"Objective: respond to this Hub message.\n"
+                            f"If spawn_team_lead fails, handle it yourself as fallback."
                         )
-                        try:
-                            response = await mind.run_task(prompt)
-                            if response and thread_id:
-                                tagged = f"[Root] {response}" if not response.startswith("[Root]") else response
-                                try:
-                                    token = await get_hub_token()
-                                    ok = await hub_post_reply(thread_id, tagged, token)
-                                    log.info("Hub reply (%s): %s", "ok" if ok else "FAIL", response[:100])
-                                except Exception as e:
-                                    log.error("Hub post failed: %s", e)
-                        except Exception as e:
-                            log.error("Hub response failed: %s", e)
 
                     elif event.source == "scheduler":
+                        task_name = event.payload.get("name", "unknown")
+                        task_prompt = event.payload.get("prompt", "")[:500]
                         prompt = (
-                            f"[Scheduled: {event.payload.get('name', 'unknown')}]\n"
-                            f"Task: {event.payload.get('prompt', '')[:500]}"
+                            f"[AUTONOMIC — Scheduled task '{task_name}']\n"
+                            f"Task: {task_prompt}\n\n"
+                            f"InputMux routed this to {tl}. "
+                            f"Use spawn_team_lead to delegate to '{tl}' "
+                            f"(manifest: {tl_manifest}, vertical: {tl.replace('-lead', '')}). "
+                            f"Objective: execute this scheduled task.\n"
+                            f"If spawn_team_lead fails, handle it yourself as fallback."
                         )
-                        try:
-                            result = await mind.run_task(prompt)
-                            log.info("Scheduled result: %s", (result or "")[:200])
-                        except Exception as e:
-                            log.error("Scheduled task failed: %s", e)
 
                     else:
                         prompt = (
-                            f"[{event.source}] {json.dumps(event.payload)[:500]}"
+                            f"[AUTONOMIC — {event.source}]\n"
+                            f"{json.dumps(event.payload)[:500]}\n\n"
+                            f"InputMux routed this to {tl}. "
+                            f"Use spawn_team_lead to delegate to '{tl}' "
+                            f"(manifest: {tl_manifest}, vertical: {tl.replace('-lead', '')}). "
+                            f"If spawn_team_lead fails, handle it yourself as fallback."
                         )
-                        try:
-                            result = await mind.run_task(prompt)
-                            log.info("Autonomic result: %s", (result or "")[:200])
-                        except Exception as e:
-                            log.error("Autonomic event failed: %s", e)
+
+                    try:
+                        result = await mind.run_task(prompt)
+                        log.info("Autonomic [%s→%s]: %s", event.source, tl, (result or "")[:200])
+                    except Exception as e:
+                        log.error("Autonomic delegation failed: %s", e)
                 continue
 
             # ── CONSCIOUS events (Root processes directly) ──
