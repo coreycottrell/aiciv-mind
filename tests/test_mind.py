@@ -1,5 +1,5 @@
 """
-Tests for aiciv_mind.Mind — anthropic SDK tool-use loop via LiteLLM proxy.
+Tests for aiciv_mind.Mind — OpenAI-compatible tool-use loop via LiteLLM proxy.
 
 Uses unittest.mock to avoid any live API calls.
 """
@@ -7,6 +7,7 @@ Uses unittest.mock to avoid any live API calls.
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -43,48 +44,43 @@ def memory_store():
 
 
 # ---------------------------------------------------------------------------
-# Helpers — build mock anthropic responses
+# Helpers — build mock OpenAI chat completion responses
 # ---------------------------------------------------------------------------
 
 
-def make_text_block(text: str) -> MagicMock:
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    return block
+def make_tool_call(tool_id: str, name: str, input_dict: dict) -> MagicMock:
+    """Build a mock OpenAI tool_call object."""
+    tc = MagicMock()
+    tc.id = tool_id
+    tc.type = "function"
+    tc.function = MagicMock()
+    tc.function.name = name
+    tc.function.arguments = json.dumps(input_dict)
+    return tc
 
 
-def make_tool_use_block(tool_id: str, name: str, input_dict: dict) -> MagicMock:
-    block = MagicMock()
-    block.type = "tool_use"
-    block.id = tool_id
-    block.name = name
-    block.input = input_dict
-    return block
+def make_response(text=None, tool_calls=None, finish_reason=None) -> MagicMock:
+    """Build a mock OpenAI chat.completions.create() response."""
+    msg = MagicMock()
+    msg.role = "assistant"
+    msg.content = text
+    msg.tool_calls = tool_calls or []
 
+    if finish_reason is None:
+        finish_reason = "tool_calls" if tool_calls else "stop"
 
-def make_response(text=None, tool_blocks=None, stop_reason="end_turn") -> MagicMock:
-    """Build a mock anthropic messages.create() response."""
-    content = []
-    if text is not None:
-        content.append(make_text_block(text))
-    if tool_blocks:
-        content.extend(tool_blocks)
+    choice = MagicMock()
+    choice.message = msg
+    choice.finish_reason = finish_reason
+
+    usage = MagicMock()
+    usage.prompt_tokens = 0
+    usage.completion_tokens = 0
 
     resp = MagicMock()
-    resp.content = content
-    resp.stop_reason = stop_reason
+    resp.choices = [choice]
+    resp.usage = usage
     return resp
-
-
-def make_stream_ctx(response: MagicMock) -> MagicMock:
-    """Wrap a response in an async context manager mimicking messages.stream()."""
-    stream = AsyncMock()
-    stream.get_final_message = AsyncMock(return_value=response)
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=stream)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +93,8 @@ async def test_run_task_no_tools_returns_text(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(make_response(text="Hello world!")),
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=make_response(text="Hello world!"),
     ):
         result = await mind.run_task("Say hello", inject_memories=False)
 
@@ -109,13 +105,13 @@ async def test_run_task_single_tool_call(minimal_manifest, memory_store):
     """Model calls one tool, gets result, then returns final text."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("call_001", "bash", {"command": "echo hi"})
-    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    tc = make_tool_call("call_001", "bash", {"command": "echo hi"})
+    first = make_response(tool_calls=[tc], finish_reason="tool_calls")
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hi\n"
@@ -127,31 +123,29 @@ async def test_run_task_single_tool_call(minimal_manifest, memory_store):
     mock_exec.assert_called_once_with("bash", {"command": "echo hi"})
 
 
-async def test_tool_result_appended_as_tool_result_block(minimal_manifest, memory_store):
-    """Tool results go back as role=user with type=tool_result content blocks."""
+async def test_tool_result_appended_as_tool_message(minimal_manifest, memory_store):
+    """Tool results go back as role=tool messages (OpenAI format)."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("call_xyz", "bash", {"command": "ls"})
-    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    tc = make_tool_call("call_xyz", "bash", {"command": "ls"})
+    first = make_response(tool_calls=[tc], finish_reason="tool_calls")
     second = make_response(text="Listed.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(mind._tools, "execute", new_callable=AsyncMock, return_value="a.txt"):
             await mind.run_task("List files", inject_memories=False)
 
-    # Find the user message that contains tool_result
+    # Find tool result messages (OpenAI format: role="tool")
     tool_result_msgs = [
         m for m in mind._messages
-        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        if m.get("role") == "tool"
     ]
     assert len(tool_result_msgs) == 1
-    result_block = tool_result_msgs[0]["content"][0]
-    assert result_block["type"] == "tool_result"
-    assert result_block["tool_use_id"] == "call_xyz"
-    assert result_block["content"] == "a.txt"
+    assert tool_result_msgs[0]["tool_call_id"] == "call_xyz"
+    assert tool_result_msgs[0]["content"] == "a.txt"
 
 
 async def test_system_prompt_passed_to_api(minimal_manifest, memory_store):
@@ -159,15 +153,17 @@ async def test_system_prompt_passed_to_api(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
     captured = []
 
-    def capture(**kwargs):
+    async def capture(**kwargs):
         captured.append(kwargs)
-        return make_stream_ctx(make_response(text="ok"))
+        return make_response(text="ok")
 
-    with patch.object(mind._client.messages, "stream", side_effect=capture):
+    with patch.object(mind._client.chat.completions, "create", new_callable=AsyncMock, side_effect=capture):
         await mind.run_task("test", inject_memories=False)
 
-    assert "system" in captured[0]
-    assert "test agent" in captured[0]["system"]
+    # System prompt is the first message in the messages array (OpenAI format)
+    messages = captured[0]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "test agent" in messages[0]["content"]
 
 
 async def test_model_name_from_manifest(minimal_manifest, memory_store):
@@ -175,11 +171,11 @@ async def test_model_name_from_manifest(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
     captured = []
 
-    def capture(**kwargs):
+    async def capture(**kwargs):
         captured.append(kwargs)
-        return make_stream_ctx(make_response(text="ok"))
+        return make_response(text="ok")
 
-    with patch.object(mind._client.messages, "stream", side_effect=capture):
+    with patch.object(mind._client.chat.completions, "create", new_callable=AsyncMock, side_effect=capture):
         await mind.run_task("test", inject_memories=False)
 
     assert captured[0]["model"] == "ollama/qwen2.5-coder:14b"
@@ -189,14 +185,14 @@ async def test_multiple_tool_calls_all_executed(minimal_manifest, memory_store):
     """All tool_use blocks in one response are executed before the next API call."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc1 = make_tool_use_block("c1", "bash", {"command": "echo a"})
-    tc2 = make_tool_use_block("c2", "bash", {"command": "echo b"})
-    first = make_response(tool_blocks=[tc1, tc2], stop_reason="tool_use")
+    tc1 = make_tool_call("c1", "bash", {"command": "echo a"})
+    tc2 = make_tool_call("c2", "bash", {"command": "echo b"})
+    first = make_response(tool_calls=[tc1, tc2], finish_reason="tool_calls")
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="out"
@@ -218,18 +214,18 @@ async def test_stop_exits_loop_early(minimal_manifest, memory_store):
     """stop() causes the tool loop to exit after the current iteration."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("c1", "bash", {"command": "echo loop"})
-    loop_response = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    tc = make_tool_call("c1", "bash", {"command": "echo loop"})
+    loop_response = make_response(tool_calls=[tc], finish_reason="tool_calls")
 
     call_count = 0
 
-    def mock_create(**kwargs):
+    async def mock_create(**kwargs):
         nonlocal call_count
         call_count += 1
         mind.stop()
-        return make_stream_ctx(loop_response)
+        return loop_response
 
-    with patch.object(mind._client.messages, "stream", side_effect=mock_create):
+    with patch.object(mind._client.chat.completions, "create", new_callable=AsyncMock, side_effect=mock_create):
         with patch.object(mind._tools, "execute", new_callable=AsyncMock, return_value="out"):
             await mind.run_task("loop task", inject_memories=False)
 
@@ -283,8 +279,8 @@ async def test_run_task_empty_response(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(make_response()),  # no text, no tools
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=make_response(),  # no text, no tools
     ):
         result = await mind.run_task("Do nothing", inject_memories=False)
 
@@ -394,25 +390,25 @@ def test_cache_stats_mixed_hits_and_writes(minimal_manifest, memory_store):
 async def test_native_tool_use_with_end_turn_still_executes(minimal_manifest, memory_store):
     """
     CRITICAL FIX: Ollama/LiteLLM returns native tool_use blocks but sets
-    stop_reason='end_turn' (not 'tool_use'). Tools must still execute.
+    finish_reason='stop' (not 'tool_use'). Tools must still execute.
 
     Previously, the check `if not synthetic_calls and stop_reason == 'end_turn': break`
     caused all native tool calls from Ollama-backed models to be silently skipped.
     """
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("call_ollama_1", "bash", {"command": "echo hi"})
+    tc = make_tool_call("call_ollama_1", "bash", {"command": "echo hi"})
     # Ollama pattern: tool_use blocks present BUT stop_reason is "end_turn"
     first = make_response(
         text="I'll run the command now.",
-        tool_blocks=[tc],
-        stop_reason="end_turn",  # THE BUG: Ollama doesn't set "tool_use"
+        tool_calls=[tc],
+        finish_reason="stop",  # THE BUG: Ollama doesn't set "tool_use"
     )
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hi\n"
@@ -426,18 +422,18 @@ async def test_native_tool_use_with_end_turn_still_executes(minimal_manifest, me
 
 async def test_native_tool_use_with_stop_reason_executes(minimal_manifest, memory_store):
     """
-    Ollama may also return stop_reason='stop' (mapped differently by LiteLLM versions).
+    Ollama may also return finish_reason='stop' (mapped differently by LiteLLM versions).
     Tool_use blocks should execute regardless of any stop_reason value.
     """
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("call_stop_1", "bash", {"command": "ls"})
-    first = make_response(tool_blocks=[tc], stop_reason="stop")
+    tc = make_tool_call("call_stop_1", "bash", {"command": "ls"})
+    first = make_response(tool_calls=[tc], finish_reason="stop")
     second = make_response(text="Listed.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="a.txt"
@@ -455,17 +451,17 @@ async def test_native_text_plus_tool_use_end_turn_executes(minimal_manifest, mem
     """
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc = make_tool_use_block("call_mix_1", "memory_search", {"query": "recent"})
+    tc = make_tool_call("call_mix_1", "memory_search", {"query": "recent"})
     first = make_response(
         text="Let me search my memories.",
-        tool_blocks=[tc],
-        stop_reason="end_turn",
+        tool_calls=[tc],
+        finish_reason="stop",
     )
     second = make_response(text="I found 3 relevant memories.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock,
@@ -481,14 +477,14 @@ async def test_multiple_native_tools_end_turn_all_execute(minimal_manifest, memo
     """Multiple native tool blocks with end_turn: ALL tools execute."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
-    tc1 = make_tool_use_block("c1", "bash", {"command": "echo a"})
-    tc2 = make_tool_use_block("c2", "bash", {"command": "echo b"})
-    first = make_response(tool_blocks=[tc1, tc2], stop_reason="end_turn")
+    tc1 = make_tool_call("c1", "bash", {"command": "echo a"})
+    tc2 = make_tool_call("c2", "bash", {"command": "echo b"})
+    first = make_response(tool_calls=[tc1, tc2], finish_reason="stop")
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="out"
@@ -505,8 +501,8 @@ async def test_no_tool_use_end_turn_breaks_correctly(minimal_manifest, memory_st
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(make_response(text="All done!", stop_reason="end_turn")),
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=make_response(text="All done!", finish_reason="stop"),
     ):
         result = await mind.run_task("Just chat", inject_memories=False)
 
@@ -524,12 +520,12 @@ async def test_synthetic_tool_calls_still_work(minimal_manifest, memory_store):
         '<parameter name="command">echo hello</parameter>\n'
         '</invoke>'
     )
-    first = make_response(text=xml_text, stop_reason="end_turn")
+    first = make_response(text=xml_text, finish_reason="stop")
     second = make_response(text="Got it: hello")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
@@ -554,12 +550,12 @@ async def test_json_format_tool_call_parsing(minimal_manifest, memory_store):
         'Let me check.\n'
         '{"name": "bash", "arguments": {"command": "pwd"}}\n'
     )
-    first = make_response(text=json_text, stop_reason="end_turn")
+    first = make_response(text=json_text, finish_reason="stop")
     second = make_response(text="/home/corey/projects")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="/home/corey"
@@ -578,12 +574,12 @@ async def test_openai_function_format_parsing(minimal_manifest, memory_store):
         '{"type": "function", "function": '
         '{"name": "bash", "parameters": {"command": "ls"}}}'
     )
-    first = make_response(text=func_text, stop_reason="end_turn")
+    first = make_response(text=func_text, finish_reason="stop")
     second = make_response(text="Files listed.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="a.py"
@@ -599,12 +595,12 @@ async def test_case_insensitive_tool_name_parsing(minimal_manifest, memory_store
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     json_text = '{"name": "Bash", "arguments": {"command": "echo test"}}'
-    first = make_response(text=json_text, stop_reason="end_turn")
+    first = make_response(text=json_text, finish_reason="stop")
     second = make_response(text="test")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="test"
@@ -627,12 +623,12 @@ async def test_tool_call_block_format_parsing(minimal_manifest, memory_store):
         'args => {"command": "date"}\n'
         '[/TOOL_CALL]'
     )
-    first = make_response(text=tc_text, stop_reason="end_turn")
+    first = make_response(text=tc_text, finish_reason="stop")
     second = make_response(text="Today is Wednesday.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="Wed Apr 2"
@@ -654,12 +650,12 @@ async def test_xml_invoke_with_wrapper_parsing(minimal_manifest, memory_store):
         '</invoke>'
         '</minimax:tool_call>'
     )
-    first = make_response(text=xml_text, stop_reason="end_turn")
+    first = make_response(text=xml_text, finish_reason="stop")
     second = make_response(text="You are root.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="corey"
@@ -690,12 +686,12 @@ async def test_minimax_json_array_tool_call_parsing(minimal_manifest, memory_sto
         ']\n'
         '</minimax:tool_call>'
     )
-    first = make_response(text=json_array_text, stop_reason="end_turn")
+    first = make_response(text=json_array_text, finish_reason="stop")
     second = make_response(text="Output: hello")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
@@ -711,12 +707,12 @@ async def test_minimax_json_array_with_args_key(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     text = '{"tool": "bash", "args": {"command": "ls"}}'
-    first = make_response(text=text, stop_reason="end_turn")
+    first = make_response(text=text, finish_reason="stop")
     second = make_response(text="Listed files.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="file1.py"
@@ -732,11 +728,11 @@ async def test_unrecognized_tool_name_ignored(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     json_text = '{"name": "nonexistent_tool", "arguments": {"x": 1}}'
-    first = make_response(text=json_text, stop_reason="end_turn")
+    first = make_response(text=json_text, finish_reason="stop")
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(first),
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=first,
     ):
         # Should NOT crash — unrecognized tool names are skipped
         result = await mind.run_task("Try bad tool", inject_memories=False)
@@ -755,12 +751,12 @@ async def test_synthetic_result_injected_as_user_text(minimal_manifest, memory_s
         '<parameter name="command">echo ok</parameter>\n'
         '</invoke>'
     )
-    first = make_response(text=xml_text, stop_reason="end_turn")
+    first = make_response(text=xml_text, finish_reason="stop")
     second = make_response(text="Done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         with patch.object(
             mind._tools, "execute", new_callable=AsyncMock, return_value="ok"
@@ -801,25 +797,25 @@ async def test_read_only_tools_can_run_concurrently(minimal_manifest, memory_sto
         read_only=True,
     )
 
-    tc1 = make_tool_use_block("c1", "ro_tool_a", {})
-    tc2 = make_tool_use_block("c2", "ro_tool_b", {})
-    first = make_response(tool_blocks=[tc1, tc2], stop_reason="tool_use")
+    tc1 = make_tool_call("c1", "ro_tool_a", {})
+    tc2 = make_tool_call("c2", "ro_tool_b", {})
+    first = make_response(tool_calls=[tc1, tc2], finish_reason="tool_calls")
     second = make_response(text="Both done.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         result = await mind.run_task("Read both", inject_memories=False)
 
     assert result == "Both done."
-    # Both results should be in the tool_result message
+    # Both results should be in separate role="tool" messages
     result_msgs = [
         m for m in mind._messages
-        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        if m.get("role") == "tool"
     ]
-    assert len(result_msgs) == 1
-    contents = [r["content"] for r in result_msgs[0]["content"]]
+    assert len(result_msgs) == 2
+    contents = [m["content"] for m in result_msgs]
     assert "a_result" in contents
     assert "b_result" in contents
 
@@ -843,17 +839,12 @@ async def test_model_call_timeout_raises(memory_store):
     )
     mind = Mind(manifest=manifest, memory=memory_store)
 
-    class SlowCtx:
-        async def __aenter__(self):
-            await asyncio.sleep(5)  # Way longer than 0.1s timeout
-        async def __aexit__(self, *a):
-            pass
-
-    def slow_stream(**kwargs):
-        return SlowCtx()
+    async def slow_create(**kwargs):
+        await asyncio.sleep(5)  # Way longer than 0.1s timeout
+        return make_response(text="Never reached")
 
     with patch.object(
-        mind._client.messages, "stream", side_effect=slow_stream,
+        mind._client.chat.completions, "create", new_callable=AsyncMock, side_effect=slow_create,
     ):
         with pytest.raises(TimeoutError):
             await mind.run_task("Do something slow", inject_memories=False)
@@ -869,8 +860,8 @@ async def test_model_call_no_timeout_when_zero(minimal_manifest, memory_store):
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(make_response(text="Fast response")),
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=make_response(text="Fast response"),
     ):
         result = await mind.run_task("Quick task", inject_memories=False)
 
@@ -916,8 +907,8 @@ async def test_compaction_uses_model_limit_when_lower(memory_store):
     # 30000 < 50000 → without the fix, compaction would NOT trigger
 
     with patch.object(
-        mind._client.messages, "stream",
-        return_value=make_stream_ctx(make_response(text="Done after compaction")),
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        return_value=make_response(text="Done after compaction"),
     ):
         result = await mind.run_task("Test compaction", inject_memories=False)
 
@@ -959,13 +950,13 @@ async def test_tool_execution_timeout_returns_error(memory_store):
         slow_tool,
     )
 
-    tc = make_tool_use_block("call_slow", "slow_tool", {})
-    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    tc = make_tool_call("call_slow", "slow_tool", {})
+    first = make_response(tool_calls=[tc], finish_reason="tool_calls")
     second = make_response(text="Handled the timeout.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         result = await mind.run_task("Run slow tool", inject_memories=False)
 
@@ -973,12 +964,11 @@ async def test_tool_execution_timeout_returns_error(memory_store):
     # The tool result fed back to model should contain the timeout error
     tool_result_msgs = [
         m for m in mind._messages
-        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        if m.get("role") == "tool"
     ]
     assert any(
-        "timed out" in str(item.get("content", ""))
-        for msg in tool_result_msgs
-        for item in msg["content"]
+        "timed out" in m.get("content", "")
+        for m in tool_result_msgs
     )
 
 
@@ -1003,13 +993,13 @@ async def test_oversized_tool_result_truncated(minimal_manifest, memory_store):
         big_tool,
     )
 
-    tc = make_tool_use_block("call_big", "big_tool", {})
-    first = make_response(tool_blocks=[tc], stop_reason="tool_use")
+    tc = make_tool_call("call_big", "big_tool", {})
+    first = make_response(tool_calls=[tc], finish_reason="tool_calls")
     second = make_response(text="Got truncated result.")
 
     with patch.object(
-        mind._client.messages, "stream",
-        side_effect=[make_stream_ctx(first), make_stream_ctx(second)],
+        mind._client.chat.completions, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
     ):
         result = await mind.run_task("Get big output", inject_memories=False)
 
@@ -1017,10 +1007,10 @@ async def test_oversized_tool_result_truncated(minimal_manifest, memory_store):
     # Find the tool result in messages and verify truncation
     tool_result_msgs = [
         m for m in mind._messages
-        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        if m.get("role") == "tool"
     ]
     assert len(tool_result_msgs) == 1
-    content = tool_result_msgs[0]["content"][0]["content"]
+    content = tool_result_msgs[0]["content"]
     assert "TRUNCATED" in content
     assert len(content) < 50_000  # Should be ~30K + marker, not 50K
 

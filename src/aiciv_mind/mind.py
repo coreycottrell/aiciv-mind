@@ -1,8 +1,8 @@
 """
 Mind — the core agent loop for aiciv-mind.
 
-Uses anthropic Python SDK pointed at LiteLLM proxy (default: localhost:4000).
-LiteLLM translates Anthropic API format to Ollama, OpenRouter, or any other backend.
+Uses OpenAI-compatible API via LiteLLM proxy (default: localhost:4000).
+LiteLLM translates OpenAI chat format to Ollama, OpenRouter, or any other backend.
 
 Environment variables:
   MIND_API_URL  — LiteLLM proxy URL (default: http://localhost:4000)
@@ -22,7 +22,74 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import anthropic
+from openai import AsyncOpenAI
+
+
+# ---------------------------------------------------------------------------
+# Response normalization — adapts OpenAI ChatCompletion to the Anthropic-like
+# interface (.content list of blocks, .stop_reason, .usage) that the rest of
+# mind.py relies on.  This lets us swap the SDK without touching parsing code.
+# ---------------------------------------------------------------------------
+
+class _TextBlock:
+    __slots__ = ("type", "text")
+    def __init__(self, text: str):
+        self.type = "text"
+        self.text = text
+
+class _ToolUseBlock:
+    __slots__ = ("type", "id", "name", "input")
+    def __init__(self, id: str, name: str, input: dict):
+        self.type = "tool_use"
+        self.id = id
+        self.name = name
+        self.input = input
+
+class _NormalizedUsage:
+    __slots__ = ("input_tokens", "output_tokens",
+                 "cache_read_input_tokens", "cache_creation_input_tokens")
+    def __init__(self, openai_usage: Any):
+        self.input_tokens = getattr(openai_usage, "prompt_tokens", 0) or 0
+        self.output_tokens = getattr(openai_usage, "completion_tokens", 0) or 0
+        self.cache_read_input_tokens = 0
+        self.cache_creation_input_tokens = 0
+
+class _NormalizedResponse:
+    """Adapts an OpenAI ChatCompletion to the Anthropic-like interface."""
+    __slots__ = ("content", "stop_reason", "usage", "_raw_tool_calls")
+
+    def __init__(self, openai_response: Any):
+        choice = openai_response.choices[0]
+        msg = choice.message
+
+        self.content: list = []
+        if msg.content:
+            self.content.append(_TextBlock(msg.content))
+
+        self._raw_tool_calls = msg.tool_calls or []
+        for tc in self._raw_tool_calls:
+            args = tc.function.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            self.content.append(_ToolUseBlock(
+                id=tc.id,
+                name=tc.function.name,
+                input=args,
+            ))
+
+        # Normalize finish_reason → Anthropic-style stop_reason
+        fr = choice.finish_reason
+        if fr == "tool_calls":
+            self.stop_reason = "tool_use"
+        elif fr == "stop":
+            self.stop_reason = "end_turn"
+        else:
+            self.stop_reason = fr or "end_turn"
+
+        self.usage = _NormalizedUsage(openai_response.usage) if openai_response.usage else None
 
 from aiciv_mind.context import mind_context
 from aiciv_mind.learning import SessionLearner, TaskOutcome
@@ -39,7 +106,7 @@ logger = logging.getLogger(__name__)
 
 class Mind:
     """
-    Core agent loop. Loads a manifest, connects to LiteLLM proxy via anthropic SDK,
+    Core agent loop. Loads a manifest, connects to LiteLLM proxy via OpenAI SDK,
     executes tool-use loop until end_turn.
     """
 
@@ -84,7 +151,7 @@ class Mind:
                 audit_log_path=str(_mind_root / "data" / "tool_audit.jsonl"),
             )
             self._tools.set_hooks(hooks)
-        self._client = anthropic.AsyncAnthropic(
+        self._client = AsyncOpenAI(
             base_url=os.environ.get("MIND_API_URL", "http://localhost:4000"),
             api_key=os.environ.get("MIND_API_KEY", "sk-1234"),
         )
@@ -262,7 +329,7 @@ class Mind:
             turn_type="user",
         )
 
-        tools_list = self._tools.build_anthropic_tools(
+        tools_list = self._tools.build_openai_tools(
             enabled=self.manifest.enabled_tool_names()
         )
 
@@ -343,8 +410,18 @@ class Mind:
                 raise  # let the daemon's handler decide retry/skip
             iter_latency = int((time.monotonic() - iter_start) * 1000)
 
-            # Append assistant response to history
-            self._messages.append({"role": "assistant", "content": response.content})
+            # Append assistant response to history (OpenAI chat format)
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
+            text_parts = [b.text for b in response.content if getattr(b, "type", None) == "text"]
+            if text_parts:
+                assistant_msg["content"] = "\n".join(text_parts)
+            if response._raw_tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in response._raw_tool_calls
+                ]
+            self._messages.append(assistant_msg)
 
             # Log assistant turn to session JSONL
             self._log_session_turn(
@@ -469,7 +546,13 @@ class Mind:
                 )
                 self._messages.append({"role": "user", "content": result_text})
             else:
-                self._messages.append({"role": "user", "content": tool_results})
+                # OpenAI format: each tool result is a separate message
+                for r in tool_results:
+                    self._messages.append({
+                        "role": "tool",
+                        "tool_call_id": r["tool_use_id"],
+                        "content": r["content"],
+                    })
 
         self._running = False
 
@@ -480,11 +563,11 @@ class Mind:
             # Collect tool result strings for evidence extraction
             _tool_result_strs = []
             for msg in self._messages:
+                role = msg.get("role", "")
                 content = msg.get("content", "")
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "tool_result":
-                            _tool_result_strs.append(str(item.get("content", "")))
+                # OpenAI format: tool results are role="tool" messages
+                if role == "tool" and isinstance(content, str):
+                    _tool_result_strs.append(content)
                 elif isinstance(content, str) and "[Tool result:" in content:
                     _tool_result_strs.append(content)
 
@@ -778,7 +861,7 @@ class Mind:
         return context
 
     async def _call_model(self, system_prompt: str, tools_list: list[dict]) -> Any:
-        """Single API call with current message history."""
+        """Single API call with current message history (OpenAI chat format)."""
         # Model selection: use router if available, else manifest default
         model_id = self.manifest.model.preferred
         if self._model_router is not None and self._current_task:
@@ -787,34 +870,24 @@ class Mind:
             except Exception as e:
                 logger.debug("ModelRouter.select failed, using default: %s", e)
 
+        # OpenAI format: system prompt is the first message
+        api_messages = [{"role": "system", "content": system_prompt}] + self._messages
+
         kwargs: dict[str, Any] = dict(
             model=model_id,
             max_tokens=self.manifest.model.max_tokens,
             temperature=self.manifest.model.temperature,
-            system=system_prompt,
-            messages=self._messages,
+            messages=api_messages,
         )
-        if self.manifest.model.extra_body:
-            kwargs["extra_body"] = self.manifest.model.extra_body
         if tools_list:
             kwargs["tools"] = tools_list
 
         t0 = time.monotonic()
         timeout = self.manifest.model.call_timeout_s
-
-        # Use streaming to avoid Anthropic SDK 10-minute timeout on large
-        # contexts.  messages.stream() returns an async context manager;
-        # get_final_message() collects chunks into a full Message object
-        # (with .content, .stop_reason, .usage) so callers work unchanged.
-        async def _stream_and_collect() -> Any:
-            async with self._client.messages.stream(**kwargs) as stream:
-                return await stream.get_final_message()
-
+        coro = self._client.chat.completions.create(**kwargs)
         if timeout > 0:
             try:
-                response = await asyncio.wait_for(
-                    _stream_and_collect(), timeout=timeout,
-                )
+                raw_response = await asyncio.wait_for(coro, timeout=timeout)
             except asyncio.TimeoutError:
                 latency_ms = int((time.monotonic() - t0) * 1000)
                 logger.error(
@@ -824,9 +897,10 @@ class Mind:
                 )
                 raise
         else:
-            response = await _stream_and_collect()
+            raw_response = await coro
         latency_ms = int((time.monotonic() - t0) * 1000)
 
+        response = _NormalizedResponse(raw_response)
         self._log_cache_stats(response)
         self._log_token_usage(response, latency_ms)
         return response
@@ -835,7 +909,7 @@ class Mind:
         """
         Log prompt cache hit/miss from API response usage metadata.
 
-        LiteLLM surfaces cache stats from OpenRouter/MiniMax in the anthropic
+        LiteLLM surfaces cache stats from OpenRouter/MiniMax in the
         usage object as cache_read_input_tokens / cache_creation_input_tokens.
         Not all backends return these fields — we log when present, skip silently
         when absent.  Wrapped in try/except: this is telemetry, never breaks the loop.
