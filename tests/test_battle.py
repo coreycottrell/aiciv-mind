@@ -2220,3 +2220,271 @@ class TestForkContext:
         assert r.messages_consumed == 5
         assert r.skill_id == "test-skill"
         assert r.success
+
+
+# ---------------------------------------------------------------------------
+# Verification protocol — P9 Red Team, evidence, completion detection
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationProtocol:
+    """Battle tests for the Red Team verification engine."""
+
+    def test_disabled_always_approves(self):
+        """Disabled protocol always approves."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=False)
+        result = proto.verify("Do something complex", "Done!", complexity="complex")
+        assert result.passed
+        assert result.scrutiny_level == "none"
+
+    def test_trivial_task_gets_light_scrutiny(self):
+        """Trivial complexity gets light verification."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Say hello",
+            "Hello! How can I help you today?",
+            complexity="trivial",
+        )
+        assert result.scrutiny_level == "light"
+
+    def test_complex_task_gets_deep_scrutiny(self):
+        """Complex task always gets deep verification with challenges."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Redesign the authentication system",
+            "I've redesigned the auth system with a new token rotation mechanism.",
+            complexity="complex",
+        )
+        assert result.scrutiny_level == "deep"
+        # Deep always challenges
+        assert result.outcome.value == "challenged"
+        assert len(result.challenges) > 0
+
+    def test_empty_result_challenged(self):
+        """Empty or very short result is challenged even at light scrutiny."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("Do task", "", complexity="trivial")
+        assert not result.passed
+        assert any("empty" in c.lower() or "short" in c.lower() for c in result.challenges)
+
+    def test_error_in_result_challenged(self):
+        """Result containing error signals is challenged."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Run tests",
+            "All tests were executed. However, there was an error in module X.",
+            complexity="trivial",
+        )
+        assert not result.passed
+        assert any("error" in c.lower() for c in result.challenges)
+
+    def test_no_evidence_challenged_at_standard(self):
+        """No evidence provided triggers a challenge at standard scrutiny."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Deploy the new feature",
+            "The feature has been deployed successfully to production.",
+            evidence=[],
+            complexity="medium",
+        )
+        assert any("no concrete evidence" in c.lower() for c in result.challenges)
+
+    def test_strong_evidence_relaxes_scrutiny(self):
+        """Strong evidence (test_pass, confidence >= 0.7) relaxes scrutiny."""
+        from aiciv_mind.verification import CompletionProtocol, Evidence
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Run tests",
+            "All 50 tests pass with no errors.",
+            evidence=[Evidence(
+                description="test suite passed",
+                evidence_type="test_pass",
+                confidence=0.9,
+            )],
+            complexity="simple",
+        )
+        assert result.scrutiny_level == "light"
+
+    def test_deep_flags_long_results(self):
+        """Deep verification flags very long results."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Build the system",
+            "x" * 6000,  # >5000 chars
+            complexity="complex",
+        )
+        assert any("simpler" in c.lower() for c in result.challenges)
+
+    def test_deep_flags_symptom_fix(self):
+        """Deep verification flags fix-language without root cause analysis."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Fix the timeout bug",
+            "I applied a quick fix by increasing the timeout to 60 seconds.",
+            complexity="complex",
+        )
+        assert any("symptom" in c.lower() or "system" in c.lower() for c in result.challenges)
+
+    def test_deep_flags_irreversible_actions(self):
+        """Deep verification flags irreversible actions."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify(
+            "Clean up old data",
+            "I ran the delete query to remove all records older than 30 days.",
+            complexity="complex",
+        )
+        assert any("irreversible" in c.lower() or "rollback" in c.lower() for c in result.challenges)
+
+    def test_session_stats_tracking(self):
+        """Verification stats accumulate across the session."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        proto.verify("t1", "Done with sufficient content here.", complexity="trivial")
+        proto.verify("t2", "Also done with enough text to pass.", complexity="trivial")
+        proto.verify("t3", "Complex task result with lots of detail.", complexity="complex")
+        stats = proto.get_session_stats()
+        assert stats["total"] == 3
+        assert stats["approved"] + stats["challenged"] + stats["blocked"] == 3
+
+    def test_verification_prompt_light(self):
+        """Light verification prompt is short."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        prompt = proto.build_verification_prompt("hello", complexity="trivial")
+        assert "Light" in prompt
+        assert len(prompt) < 300
+
+    def test_verification_prompt_deep(self):
+        """Deep verification prompt includes all Red Team questions."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        prompt = proto.build_verification_prompt("design system", complexity="complex")
+        assert "Red Team" in prompt
+        assert "Do we REALLY know this" in prompt
+
+    def test_verification_prompt_disabled(self):
+        """Disabled protocol produces empty prompt."""
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=False)
+        assert proto.build_verification_prompt("anything") == ""
+
+    def test_evidence_strong_vs_weak(self):
+        """Evidence.is_strong() correctly distinguishes strong from weak."""
+        from aiciv_mind.verification import Evidence
+        strong = Evidence("test passed", "test_pass", confidence=0.9)
+        assert strong.is_strong()
+
+        weak_type = Evidence("file saved", "file_written", confidence=0.9)
+        assert not weak_type.is_strong()
+
+        weak_confidence = Evidence("tests", "test_pass", confidence=0.3)
+        assert not weak_confidence.is_strong()
+
+    def test_extract_evidence_from_tool_results(self):
+        """extract_evidence finds evidence patterns in tool output."""
+        from aiciv_mind.verification import extract_evidence
+        results = [
+            "Running tests... 15 passed, 0 failed",
+            "File written to /tmp/output.txt",
+            "API call returned 200 OK",
+        ]
+        evidence = extract_evidence(results)
+        types = {e.evidence_type for e in evidence}
+        assert "test_pass" in types
+        assert "file_written" in types
+        assert "api_response" in types
+
+    def test_extract_evidence_empty(self):
+        """No matching patterns returns empty evidence list."""
+        from aiciv_mind.verification import extract_evidence
+        evidence = extract_evidence(["Some random text", "Nothing matching here"])
+        assert len(evidence) == 0
+
+    def test_completion_signal_detection(self):
+        """Completion signals are detected in response text."""
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("The task is complete and ready for review.")
+        assert detect_completion_signal("Done! All tests pass.")
+        assert detect_completion_signal("I've shipped the feature.")
+        assert not detect_completion_signal("Let me continue working on this.")
+        assert not detect_completion_signal("I need to check one more thing.")
+
+    def test_memory_contradiction_check(self):
+        """Memory contradiction check finds prior issues when memory matches."""
+        from aiciv_mind.verification import CompletionProtocol
+        store = MemoryStore(":memory:")
+        from aiciv_mind.memory import Memory
+        # Seed a memory with explicit keywords matching our query
+        store.store(Memory(
+            agent_id="test",
+            title="deploy auth system",
+            content="Previous attempt to deploy auth system failed badly. The bug caused downtime.",
+            memory_type="learning",
+        ))
+        proto = CompletionProtocol(memory_store=store, agent_id="test", enabled=True)
+        # Check memory contradiction directly
+        contradictions = proto._check_memory_contradictions(
+            "deploy auth system",
+            "Auth system deployed successfully.",
+        )
+        # Should find the memory with "failed" in content
+        assert len(contradictions) >= 1
+        assert any("prior issues" in c.lower() for c in contradictions)
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# TokenManager — JWT caching, freshness
+# ---------------------------------------------------------------------------
+
+
+class TestTokenManager:
+    """Battle tests for token management (no HTTP calls)."""
+
+    def test_cached_token_freshness(self):
+        """CachedToken.is_fresh correctly detects expiry."""
+        from aiciv_mind.suite.auth import CachedToken
+        import time
+        now = time.time()
+        # Fresh: expires in 3600s, well within 60s buffer
+        fresh = CachedToken(jwt="token", acquired_at=now, expires_at=now + 3600)
+        assert fresh.is_fresh
+
+        # Stale: expires in 30s (within 60s buffer)
+        stale = CachedToken(jwt="token", acquired_at=now - 3570, expires_at=now + 30)
+        assert not stale.is_fresh
+
+        # Expired: already past
+        expired = CachedToken(jwt="token", acquired_at=now - 7200, expires_at=now - 3600)
+        assert not expired.is_fresh
+
+    def test_token_manager_from_keypair_file(self, tmp_path):
+        """TokenManager.from_keypair_file loads civ_id and private_key."""
+        import json
+        import base64
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from aiciv_mind.suite.auth import TokenManager
+
+        # Generate a test keypair
+        private_key = Ed25519PrivateKey.generate()
+        private_bytes = private_key.private_bytes_raw()
+        public_bytes = private_key.public_key().public_bytes_raw()
+
+        keypair_file = tmp_path / "keypair.json"
+        keypair_file.write_text(json.dumps({
+            "civ_id": "test-civ",
+            "public_key": base64.b64encode(public_bytes).decode(),
+            "private_key": base64.b64encode(private_bytes).decode(),
+        }))
+
+        tm = TokenManager.from_keypair_file(keypair_file, agentauth_url="http://localhost:9999")
+        assert tm.civ_id == "test-civ"
