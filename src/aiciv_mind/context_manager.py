@@ -33,7 +33,11 @@ Design goals:
 
 from __future__ import annotations
 
+import logging
+
 from aiciv_mind.session_store import BootContext
+
+logger = logging.getLogger(__name__)
 
 
 # Rough tokens-per-char estimate for budget tracking
@@ -245,10 +249,21 @@ class ContextManager:
             # Success — reset the failure counter
             self._consecutive_compaction_failures = 0
             return result
-        except Exception:
+        except Exception as e:
             self._consecutive_compaction_failures += 1
+            logger.warning(
+                "Compaction failed (attempt %d/%d): %s: %s",
+                self._consecutive_compaction_failures,
+                self.MAX_CONSECUTIVE_COMPACTION_FAILURES,
+                type(e).__name__, e,
+            )
             if self._consecutive_compaction_failures >= self.MAX_CONSECUTIVE_COMPACTION_FAILURES:
                 self._compaction_disabled = True
+                logger.error(
+                    "Compaction circuit breaker TRIPPED — disabled for rest of session "
+                    "after %d consecutive failures",
+                    self.MAX_CONSECUTIVE_COMPACTION_FAILURES,
+                )
             # On failure, return messages unchanged
             return messages, existing_summary
 
