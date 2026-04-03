@@ -399,3 +399,46 @@ class TestManualLinking:
         ).fetchone()["depth_score"]
 
         assert cited_score > uncited_score
+
+
+# ---------------------------------------------------------------------------
+# Memory dedup (P0-5)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryDedup:
+    """Prevent duplicate memories within a 30-second window."""
+
+    def test_duplicate_within_window_returns_existing_id(self, store_no_auto):
+        """Storing the same title+content+agent_id twice returns the first ID."""
+        m1 = _mem(title="Pattern X", content="Discovered pattern X works well")
+        first_id = store_no_auto.store(m1)
+
+        m2 = _mem(title="Pattern X", content="Discovered pattern X works well")
+        second_id = store_no_auto.store(m2)
+
+        assert second_id == first_id  # Returns existing, not new
+
+        # Only one memory in the DB
+        count = store_no_auto._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE title = 'Pattern X'"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_different_content_not_deduped(self, store_no_auto):
+        """Different content = different memory, even with same title."""
+        m1 = _mem(title="Same Title", content="Content A")
+        m2 = _mem(title="Same Title", content="Content B")
+        id1 = store_no_auto.store(m1)
+        id2 = store_no_auto.store(m2)
+
+        assert id1 != id2
+
+    def test_different_agent_not_deduped(self, store_no_auto):
+        """Same title+content but different agent_id = different memory."""
+        m1 = _mem(agent_id="agent-a", title="Shared", content="Same content")
+        m2 = _mem(agent_id="agent-b", title="Shared", content="Same content")
+        id1 = store_no_auto.store(m1)
+        id2 = store_no_auto.store(m2)
+
+        assert id1 != id2

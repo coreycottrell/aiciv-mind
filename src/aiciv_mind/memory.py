@@ -263,7 +263,26 @@ class MemoryStore:
 
         Inserts the memory row, then inserts each tag into memory_tags.
         Returns the memory's UUID string.
+
+        Dedup: if an identical title+content+agent_id was written within the
+        last 30 seconds, the store is skipped and the existing memory's ID
+        is returned instead.  This prevents duplicate memories from rapid
+        retries or concurrent writes.
         """
+        # Dedup check — prevent identical memories within 30s window
+        dup = self._conn.execute(
+            """
+            SELECT id FROM memories
+            WHERE agent_id = ? AND title = ? AND content = ?
+              AND created_at > datetime('now', '-30 seconds')
+            LIMIT 1
+            """,
+            (memory.agent_id, memory.title, memory.content),
+        ).fetchone()
+        if dup:
+            logger.debug("Dedup: skipping duplicate memory '%s' (existing: %s)", memory.title, dup["id"])
+            return dup["id"]
+
         tags_json = json.dumps(memory.tags)
         self._conn.execute(
             """
