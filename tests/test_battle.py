@@ -2488,3 +2488,493 @@ class TestTokenManager:
 
         tm = TokenManager.from_keypair_file(keypair_file, agentauth_url="http://localhost:9999")
         assert tm.civ_id == "test-civ"
+
+
+# ---------------------------------------------------------------------------
+# MindRegistry — in-memory sub-mind registry, heartbeat tracking
+# ---------------------------------------------------------------------------
+
+
+class TestMindRegistry:
+    """Battle tests for MindHandle + MindRegistry state management."""
+
+    def _make_handle(self, mind_id: str = "sub-1", **kwargs) -> "MindHandle":
+        from aiciv_mind.registry import MindHandle, MindState
+        defaults = dict(
+            mind_id=mind_id,
+            manifest_path=f"/tmp/{mind_id}.yaml",
+            window_name=f"win-{mind_id}",
+            pane_id=f"%{hash(mind_id) % 100}",
+            pid=12345,
+            zmq_identity=mind_id.encode("utf-8"),
+        )
+        defaults.update(kwargs)
+        return MindHandle(**defaults)
+
+    def test_handle_uptime_positive(self):
+        """MindHandle.uptime_seconds returns positive value."""
+        h = self._make_handle()
+        assert h.uptime_seconds >= 0
+
+    def test_handle_is_alive_starting(self):
+        """Starting state counts as alive."""
+        from aiciv_mind.registry import MindState
+        h = self._make_handle(state=MindState.STARTING)
+        assert h.is_alive()
+
+    def test_handle_is_alive_running(self):
+        """Running state counts as alive."""
+        from aiciv_mind.registry import MindState
+        h = self._make_handle(state=MindState.RUNNING)
+        assert h.is_alive()
+
+    def test_handle_not_alive_stopped(self):
+        """Stopped state is not alive."""
+        from aiciv_mind.registry import MindState
+        h = self._make_handle(state=MindState.STOPPED)
+        assert not h.is_alive()
+
+    def test_handle_not_alive_crashed(self):
+        """Crashed state is not alive."""
+        from aiciv_mind.registry import MindState
+        h = self._make_handle(state=MindState.CRASHED)
+        assert not h.is_alive()
+
+    def test_handle_not_alive_stopping(self):
+        """Stopping state is not alive."""
+        from aiciv_mind.registry import MindState
+        h = self._make_handle(state=MindState.STOPPING)
+        assert not h.is_alive()
+
+    def test_register_and_get(self):
+        """Register a handle and retrieve it by mind_id."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        h = self._make_handle("alpha")
+        reg.register(h)
+        assert reg.get("alpha") is h
+        assert reg.get("nonexistent") is None
+
+    def test_register_overwrites(self):
+        """Registering same mind_id replaces the previous handle."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        h1 = self._make_handle("alpha", pid=100)
+        h2 = self._make_handle("alpha", pid=200)
+        reg.register(h1)
+        reg.register(h2)
+        assert reg.get("alpha").pid == 200
+        assert len(reg) == 1
+
+    def test_all_returns_all(self):
+        """all() returns every registered handle."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        for name in ["a", "b", "c"]:
+            reg.register(self._make_handle(name))
+        assert len(reg.all()) == 3
+
+    def test_all_running_filters(self):
+        """all_running() returns only RUNNING handles."""
+        from aiciv_mind.registry import MindRegistry, MindState
+        reg = MindRegistry()
+        h1 = self._make_handle("a", state=MindState.RUNNING)
+        h2 = self._make_handle("b", state=MindState.STARTING)
+        h3 = self._make_handle("c", state=MindState.STOPPED)
+        reg.register(h1)
+        reg.register(h2)
+        reg.register(h3)
+        running = reg.all_running()
+        assert len(running) == 1
+        assert running[0].mind_id == "a"
+
+    def test_all_alive_filters(self):
+        """all_alive() returns STARTING and RUNNING."""
+        from aiciv_mind.registry import MindRegistry, MindState
+        reg = MindRegistry()
+        h1 = self._make_handle("a", state=MindState.RUNNING)
+        h2 = self._make_handle("b", state=MindState.STARTING)
+        h3 = self._make_handle("c", state=MindState.STOPPED)
+        h4 = self._make_handle("d", state=MindState.CRASHED)
+        for h in [h1, h2, h3, h4]:
+            reg.register(h)
+        alive = reg.all_alive()
+        assert len(alive) == 2
+        assert {h.mind_id for h in alive} == {"a", "b"}
+
+    def test_mark_state(self):
+        """mark_state transitions handle state."""
+        from aiciv_mind.registry import MindRegistry, MindState
+        reg = MindRegistry()
+        reg.register(self._make_handle("x"))
+        assert reg.get("x").state == MindState.STARTING
+        reg.mark_state("x", MindState.RUNNING)
+        assert reg.get("x").state == MindState.RUNNING
+        reg.mark_state("x", MindState.STOPPED)
+        assert reg.get("x").state == MindState.STOPPED
+
+    def test_mark_state_unknown_raises(self):
+        """mark_state on unknown mind_id raises KeyError."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        with pytest.raises(KeyError):
+            reg.mark_state("ghost", "running")
+
+    def test_record_heartbeat(self):
+        """record_heartbeat updates last_heartbeat timestamp."""
+        import time
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        h = self._make_handle("hb-test")
+        assert h.last_heartbeat == 0.0
+        reg.register(h)
+        reg.record_heartbeat("hb-test")
+        assert reg.get("hb-test").last_heartbeat > 0
+
+    def test_record_heartbeat_unknown_is_noop(self):
+        """record_heartbeat on unknown mind_id does nothing (no error)."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        reg.record_heartbeat("ghost")  # Should not raise
+
+    def test_unresponsive_empty_registry(self):
+        """unresponsive() on empty registry returns empty list."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        assert reg.unresponsive() == []
+
+    def test_unresponsive_fresh_mind_exempt(self):
+        """Recently started mind with no heartbeat is exempt from unresponsive."""
+        from aiciv_mind.registry import MindRegistry, MindState
+        reg = MindRegistry()
+        h = self._make_handle("fresh", state=MindState.RUNNING)
+        # started_at is time.monotonic() (just now), so uptime < 15s default
+        reg.register(h)
+        assert reg.unresponsive(timeout_seconds=15.0) == []
+
+    def test_unresponsive_stale_no_heartbeat(self):
+        """Mind running longer than timeout with no heartbeat is unresponsive."""
+        import time
+        from aiciv_mind.registry import MindRegistry, MindState, MindHandle
+        reg = MindRegistry()
+        h = MindHandle(
+            mind_id="stale",
+            manifest_path="/tmp/s.yaml",
+            window_name="win",
+            pane_id="%1",
+            pid=99999,
+            zmq_identity=b"stale",
+            started_at=time.monotonic() - 60,  # Started 60s ago
+            state=MindState.RUNNING,
+            last_heartbeat=0.0,  # Never heartbeated
+        )
+        reg.register(h)
+        unresponsive = reg.unresponsive(timeout_seconds=15.0)
+        assert len(unresponsive) == 1
+        assert unresponsive[0].mind_id == "stale"
+
+    def test_unresponsive_old_heartbeat(self):
+        """Mind with heartbeat older than timeout is unresponsive."""
+        import time
+        from aiciv_mind.registry import MindRegistry, MindState, MindHandle
+        reg = MindRegistry()
+        h = MindHandle(
+            mind_id="old-hb",
+            manifest_path="/tmp/o.yaml",
+            window_name="win",
+            pane_id="%2",
+            pid=99998,
+            zmq_identity=b"old-hb",
+            started_at=time.monotonic() - 120,
+            state=MindState.RUNNING,
+            last_heartbeat=time.monotonic() - 30,  # 30s since last heartbeat
+        )
+        reg.register(h)
+        assert len(reg.unresponsive(timeout_seconds=15.0)) == 1
+        assert len(reg.unresponsive(timeout_seconds=60.0)) == 0  # Within larger timeout
+
+    def test_unresponsive_ignores_non_running(self):
+        """Non-RUNNING minds are never flagged as unresponsive."""
+        import time
+        from aiciv_mind.registry import MindRegistry, MindState, MindHandle
+        reg = MindRegistry()
+        for state in [MindState.STARTING, MindState.STOPPING, MindState.STOPPED, MindState.CRASHED]:
+            h = MindHandle(
+                mind_id=f"m-{state}",
+                manifest_path=f"/tmp/{state}.yaml",
+                window_name="win",
+                pane_id="%0",
+                pid=11111,
+                zmq_identity=state.encode(),
+                started_at=time.monotonic() - 120,
+                state=state,
+                last_heartbeat=0.0,
+            )
+            reg.register(h)
+        assert reg.unresponsive(timeout_seconds=1.0) == []
+
+    def test_remove(self):
+        """remove() returns the handle and removes it from the registry."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        h = self._make_handle("removable")
+        reg.register(h)
+        assert len(reg) == 1
+        removed = reg.remove("removable")
+        assert removed is h
+        assert len(reg) == 0
+        assert reg.get("removable") is None
+
+    def test_remove_nonexistent_returns_none(self):
+        """remove() on unknown mind_id returns None."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        assert reg.remove("ghost") is None
+
+    def test_len_and_iter(self):
+        """__len__ and __iter__ work correctly."""
+        from aiciv_mind.registry import MindRegistry
+        reg = MindRegistry()
+        assert len(reg) == 0
+        for name in ["a", "b", "c"]:
+            reg.register(self._make_handle(name))
+        assert len(reg) == 3
+        ids = {h.mind_id for h in reg}
+        assert ids == {"a", "b", "c"}
+
+
+# ---------------------------------------------------------------------------
+# ConsolidationLock — file-based PID lock, stale detection
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidationLock:
+    """Battle tests for Dream Mode file-based locking."""
+
+    def test_acquire_release(self, tmp_path):
+        """Basic acquire/release cycle."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "test.lock")
+        assert not lock.is_held_by_us
+        assert lock.acquire()
+        assert lock.is_held_by_us
+        assert lock.lock_path.exists()
+        lock.release()
+        assert not lock.is_held_by_us
+        assert not lock.lock_path.exists()
+
+    def test_reentrant_acquire(self, tmp_path):
+        """acquire() returns True if already held by us (re-entrant)."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "test.lock")
+        assert lock.acquire()
+        assert lock.acquire()  # Re-entrant
+        assert lock.is_held_by_us
+        lock.release()
+
+    def test_release_without_acquire_is_noop(self, tmp_path):
+        """release() without acquire does nothing (no error)."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "test.lock")
+        lock.release()  # Should not raise
+
+    def test_lock_file_contains_pid(self, tmp_path):
+        """Lock file JSON contains our PID."""
+        import json, os
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "test.lock", operation="consolidate")
+        lock.acquire()
+        data = json.loads(lock.lock_path.read_text())
+        assert data["pid"] == os.getpid()
+        assert data["operation"] == "consolidate"
+        assert "started_at" in data
+        lock.release()
+
+    def test_is_held_with_live_process(self, tmp_path):
+        """is_held() returns True when lock held by live process (us)."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "test.lock")
+        lock.acquire()
+        # Create a second lock instance pointing at same file
+        lock2 = ConsolidationLock(tmp_path / "test.lock")
+        assert lock2.is_held()
+        lock.release()
+
+    def test_is_held_false_no_file(self, tmp_path):
+        """is_held() returns False when no lock file exists."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "nonexistent.lock")
+        assert not lock.is_held()
+
+    def test_is_held_false_dead_pid(self, tmp_path):
+        """is_held() returns False when lock file has dead PID."""
+        import json
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "stale.lock"
+        lock_path.write_text(json.dumps({
+            "pid": 99999999,  # Very likely dead PID
+            "started_at": 0,
+            "operation": "dream",
+        }))
+        lock = ConsolidationLock(lock_path)
+        assert not lock.is_held()
+
+    def test_steal_stale_lock(self, tmp_path):
+        """acquire() steals lock from dead PID."""
+        import json, os
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "stale.lock"
+        lock_path.write_text(json.dumps({
+            "pid": 99999999,
+            "started_at": 0,
+            "operation": "dream",
+        }))
+        lock = ConsolidationLock(lock_path)
+        assert lock.acquire()  # Should steal from dead PID
+        assert lock.is_held_by_us
+        data = json.loads(lock_path.read_text())
+        assert data["pid"] == os.getpid()
+        lock.release()
+
+    def test_cannot_acquire_live_lock(self, tmp_path):
+        """acquire() returns False when lock held by live process."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock1 = ConsolidationLock(tmp_path / "live.lock")
+        lock1.acquire()
+        # Second lock instance tries to acquire same file
+        lock2 = ConsolidationLock(tmp_path / "live.lock")
+        assert not lock2.acquire()
+        assert not lock2.is_held_by_us
+        lock1.release()
+
+    def test_sync_context_manager(self, tmp_path):
+        """Synchronous context manager acquires and releases."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "ctx.lock"
+        lock = ConsolidationLock(lock_path)
+        with lock:
+            assert lock.is_held_by_us
+            assert lock_path.exists()
+        assert not lock.is_held_by_us
+        assert not lock_path.exists()
+
+    def test_sync_context_manager_blocked_raises(self, tmp_path):
+        """Synchronous context manager raises ConsolidationLockHeld when blocked."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock, ConsolidationLockHeld
+        lock1 = ConsolidationLock(tmp_path / "block.lock")
+        lock1.acquire()
+        lock2 = ConsolidationLock(tmp_path / "block.lock")
+        with pytest.raises(ConsolidationLockHeld):
+            with lock2:
+                pass  # Should never reach here
+        lock1.release()
+
+    def test_async_context_manager(self, tmp_path):
+        """Async context manager acquires and releases."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+
+        async def _run():
+            lock_path = tmp_path / "async.lock"
+            lock = ConsolidationLock(lock_path)
+            async with lock:
+                assert lock.is_held_by_us
+                assert lock_path.exists()
+            assert not lock.is_held_by_us
+            assert not lock_path.exists()
+
+        asyncio.run(_run())
+
+    def test_async_context_manager_blocked_raises(self, tmp_path):
+        """Async context manager raises ConsolidationLockHeld when blocked."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock, ConsolidationLockHeld
+
+        async def _run():
+            lock1 = ConsolidationLock(tmp_path / "async-block.lock")
+            lock1.acquire()
+            lock2 = ConsolidationLock(tmp_path / "async-block.lock")
+            with pytest.raises(ConsolidationLockHeld):
+                async with lock2:
+                    pass
+            lock1.release()
+
+        asyncio.run(_run())
+
+    def test_holder_info_returns_dict(self, tmp_path):
+        """holder_info() returns lock info when held by live process."""
+        import os
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "info.lock", operation="test-op")
+        lock.acquire()
+        info = lock.holder_info()
+        assert info is not None
+        assert info["pid"] == os.getpid()
+        assert info["operation"] == "test-op"
+        lock.release()
+
+    def test_holder_info_none_no_file(self, tmp_path):
+        """holder_info() returns None when no lock file."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock = ConsolidationLock(tmp_path / "nope.lock")
+        assert lock.holder_info() is None
+
+    def test_holder_info_none_dead_pid(self, tmp_path):
+        """holder_info() returns None when lock has dead PID."""
+        import json
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "dead.lock"
+        lock_path.write_text(json.dumps({
+            "pid": 99999999,
+            "started_at": 0,
+            "operation": "dream",
+        }))
+        lock = ConsolidationLock(lock_path)
+        assert lock.holder_info() is None
+
+    def test_corrupt_lock_file_handled(self, tmp_path):
+        """Corrupt lock file is treated as no lock."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "corrupt.lock"
+        lock_path.write_text("NOT VALID JSON {{{{")
+        lock = ConsolidationLock(lock_path)
+        assert not lock.is_held()
+        # Should be able to acquire (corrupt file = no valid lock)
+        assert lock.acquire()
+        lock.release()
+
+    def test_lock_creates_parent_dirs(self, tmp_path):
+        """Lock file creation creates parent directories."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        deep_path = tmp_path / "a" / "b" / "c" / "deep.lock"
+        lock = ConsolidationLock(deep_path)
+        assert lock.acquire()
+        assert deep_path.exists()
+        lock.release()
+
+    def test_pid_alive_negative_pid(self):
+        """_pid_alive returns False for negative PID."""
+        from aiciv_mind.consolidation_lock import _pid_alive
+        assert not _pid_alive(-1)
+        assert not _pid_alive(0)
+
+    def test_pid_alive_current_process(self):
+        """_pid_alive returns True for current process."""
+        import os
+        from aiciv_mind.consolidation_lock import _pid_alive
+        assert _pid_alive(os.getpid())
+
+    def test_pid_alive_dead_process(self):
+        """_pid_alive returns False for very high PID (likely nonexistent)."""
+        from aiciv_mind.consolidation_lock import _pid_alive
+        assert not _pid_alive(99999999)
+
+    def test_release_cleans_up_on_exception(self, tmp_path):
+        """Context manager releases lock even on exception."""
+        from aiciv_mind.consolidation_lock import ConsolidationLock
+        lock_path = tmp_path / "exc.lock"
+        lock = ConsolidationLock(lock_path)
+        with pytest.raises(ValueError):
+            with lock:
+                assert lock.is_held_by_us
+                raise ValueError("boom")
+        assert not lock.is_held_by_us
+        assert not lock_path.exists()
