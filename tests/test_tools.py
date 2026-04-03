@@ -508,3 +508,110 @@ async def test_blocked_tool_skips_timeout():
     )
     result = await registry.execute("forbidden", {})
     assert result.startswith("BLOCKED:")
+
+
+# ---------------------------------------------------------------------------
+# Input sanitization tests (parser bug 9d882df9 — trailing comma on integers)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_integer_trailing_comma():
+    """M2.7 emits '10,' instead of 10 — sanitizer strips the trailing comma."""
+    registry = ToolRegistry()
+    registry.register(
+        "test_tool",
+        {
+            "name": "test_tool",
+            "description": "test",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "limit"},
+                    "query": {"type": "string", "description": "query"},
+                },
+            },
+        },
+        handler=lambda inp: f"limit={inp['limit']}:{type(inp['limit']).__name__}",
+    )
+    result = registry._sanitize_tool_input("test_tool", {"limit": "10,", "query": "test"})
+    assert result["limit"] == 10
+    assert isinstance(result["limit"], int)
+    assert result["query"] == "test"  # strings untouched
+
+
+def test_sanitize_integer_already_correct():
+    """When the value is already an int, don't break it."""
+    registry = ToolRegistry()
+    registry.register(
+        "test_tool",
+        {
+            "name": "test_tool",
+            "description": "test",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+        handler=lambda inp: "ok",
+    )
+    result = registry._sanitize_tool_input("test_tool", {"limit": 10})
+    assert result["limit"] == 10
+    assert isinstance(result["limit"], int)
+
+
+def test_sanitize_boolean_string():
+    """M2.7 sometimes emits 'true' instead of true."""
+    registry = ToolRegistry()
+    registry.register(
+        "test_tool",
+        {
+            "name": "test_tool",
+            "description": "test",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "use_depth": {"type": "boolean"},
+                },
+            },
+        },
+        handler=lambda inp: "ok",
+    )
+    result = registry._sanitize_tool_input("test_tool", {"use_depth": "true"})
+    assert result["use_depth"] is True
+    result2 = registry._sanitize_tool_input("test_tool", {"use_depth": "false"})
+    assert result2["use_depth"] is False
+
+
+@pytest.mark.asyncio
+async def test_sanitize_prevents_memory_search_crash():
+    """End-to-end: the exact bug — memory_search with limit='10,' no longer crashes."""
+    captured = {}
+
+    def mock_handler(tool_input: dict) -> str:
+        # This is what memory_search does — int(tool_input.get("limit", 5))
+        limit = int(tool_input.get("limit", 5))
+        captured["limit"] = limit
+        return f"found {limit} results"
+
+    registry = ToolRegistry()
+    registry.register(
+        "memory_search",
+        {
+            "name": "memory_search",
+            "description": "test",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+        handler=mock_handler,
+    )
+    # This would previously raise ValueError: invalid literal for int() with base 10: '10,'
+    result = await registry.execute("memory_search", {"query": "test", "limit": "10,"})
+    assert "found 10 results" in result
+    assert captured["limit"] == 10

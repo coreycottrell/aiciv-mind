@@ -99,6 +99,50 @@ class ToolRegistry:
             return list(self._tools.values())
         return [self._tools[n] for n in enabled if n in self._tools]
 
+    def _sanitize_tool_input(self, name: str, tool_input: dict) -> dict:
+        """Coerce tool_input values to match the tool's schema types.
+
+        Open-source models (M2.7, Gemma, etc.) frequently emit malformed
+        tool arguments — trailing commas on integers ("10,"), stringified
+        booleans ("true"), etc. This method uses the tool's input_schema to
+        fix these before any handler sees them.
+
+        SYSTEM > SYMPTOM: one sanitization point protects ALL tools.
+        """
+        schema = self._tools.get(name, {}).get("input_schema", {})
+        props = schema.get("properties", {})
+        if not props:
+            return tool_input
+
+        sanitized = dict(tool_input)
+        for key, spec in props.items():
+            if key not in sanitized:
+                continue
+            val = sanitized[key]
+            expected = spec.get("type")
+
+            if expected == "integer" and not isinstance(val, int):
+                # Strip trailing commas/whitespace, then coerce
+                try:
+                    sanitized[key] = int(str(val).rstrip(", \t\n"))
+                except (ValueError, TypeError):
+                    pass  # Leave as-is; handler will deal with it
+
+            elif expected == "number" and not isinstance(val, (int, float)):
+                try:
+                    sanitized[key] = float(str(val).rstrip(", \t\n"))
+                except (ValueError, TypeError):
+                    pass
+
+            elif expected == "boolean" and not isinstance(val, bool):
+                sv = str(val).strip().lower()
+                if sv in ("true", "1", "yes"):
+                    sanitized[key] = True
+                elif sv in ("false", "0", "no"):
+                    sanitized[key] = False
+
+        return sanitized
+
     async def execute(self, name: str, tool_input: dict) -> str:
         """
         Execute a tool by name with the given input dict.
@@ -112,6 +156,9 @@ class ToolRegistry:
 
         Returns the tool's string output, or an error/blocked message.
         """
+        # Sanitize input using tool schema BEFORE any processing
+        tool_input = self._sanitize_tool_input(name, tool_input)
+
         # Pre-hook: can deny the tool call
         if self._hooks:
             pre = self._hooks.pre_tool_use(name, tool_input)
