@@ -178,4 +178,5 @@ def register_submind_tools(
         _SEND_DEFINITION,
         _make_send_handler(bus, primary_mind_id),
         read_only=False,
+        timeout=120.0,
     )

@@ -29,7 +29,8 @@ DEFAULT_TOOL_TIMEOUT: float = 15.0
 # Tools that get longer timeouts by default (they legitimately take time)
 _LONG_RUNNING_TOOLS: set[str] = {
     "bash", "web_search", "web_fetch", "voice_send",
-    "netlify_deploy", "spawn_submind",
+    "netlify_deploy", "spawn_submind", "send_to_submind",
+    "spawn_team_lead",
 }
 LONG_TOOL_TIMEOUT: float = 120.0
 
