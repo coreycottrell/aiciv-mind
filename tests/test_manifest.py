@@ -226,3 +226,43 @@ def test_context_mode_minimal(tmp_path: Path) -> None:
     manifest_path = write_yaml(tmp_path, data)
     manifest = MindManifest.from_yaml(manifest_path)
     assert manifest.context.mode == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# Test: model inheritance (P2-10)
+# ---------------------------------------------------------------------------
+
+
+def test_model_inherit_flag(tmp_path: Path) -> None:
+    """Model with preferred='inherit' is detected."""
+    data = {**MINIMAL_VALID, "model": {"preferred": "inherit"}}
+    manifest_path = write_yaml(tmp_path, data)
+    manifest = MindManifest.from_yaml(manifest_path)
+    assert manifest.model.is_inherit is True
+
+
+def test_model_resolve_inheritance(tmp_path: Path) -> None:
+    """resolve_inheritance replaces 'inherit' with parent model."""
+    data = {**MINIMAL_VALID, "model": {"preferred": "inherit"}}
+    manifest_path = write_yaml(tmp_path, data)
+    manifest = MindManifest.from_yaml(manifest_path)
+
+    resolved = manifest.model.resolve_inheritance("minimax/MiniMax-M1-80k")
+    assert resolved.preferred == "minimax/MiniMax-M1-80k"
+    assert resolved.temperature == manifest.model.temperature  # Other fields preserved
+
+
+def test_model_resolve_no_inherit(tmp_path: Path) -> None:
+    """resolve_inheritance with explicit model returns self."""
+    manifest_path = write_yaml(tmp_path, MINIMAL_VALID)
+    manifest = MindManifest.from_yaml(manifest_path)
+
+    resolved = manifest.model.resolve_inheritance("some/other-model")
+    assert resolved.preferred == manifest.model.preferred  # Unchanged
+
+
+def test_model_not_inherit_by_default(tmp_path: Path) -> None:
+    """Default model config is not inherit."""
+    manifest_path = write_yaml(tmp_path, MINIMAL_VALID)
+    manifest = MindManifest.from_yaml(manifest_path)
+    assert manifest.model.is_inherit is False

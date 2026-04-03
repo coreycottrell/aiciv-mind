@@ -25,12 +25,33 @@ class ToolConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """LLM model configuration."""
+    """
+    LLM model configuration.
+
+    preferred can be set to "inherit" to use the parent mind's model string.
+    This enables prompt cache alignment — sub-minds sharing their parent's
+    model hit the same prefix cache (up to 80% cost reduction on OpenRouter).
+    Call resolve_inheritance(parent_model) to substitute the actual model.
+    """
 
     preferred: str = "ollama/qwen2.5-coder:14b"
     temperature: float = 0.7
     max_tokens: int = 4096
     call_timeout_s: float = 120.0  # Max seconds per model API call (0 = no timeout)
+
+    @property
+    def is_inherit(self) -> bool:
+        """True if this config wants to inherit the parent's model."""
+        return self.preferred.lower() == "inherit"
+
+    def resolve_inheritance(self, parent_model: str) -> "ModelConfig":
+        """
+        Return a new ModelConfig with 'inherit' resolved to the parent's model.
+        If preferred is not 'inherit', returns self unchanged.
+        """
+        if not self.is_inherit:
+            return self
+        return self.model_copy(update={"preferred": parent_model})
 
 
 class AuthConfig(BaseModel):
