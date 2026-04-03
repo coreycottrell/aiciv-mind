@@ -892,6 +892,13 @@ class Mind:
                 name = _normalize_tool_name(fn.get("name"))
                 args = fn.get("parameters", fn.get("arguments", {}))
 
+            # Format 3: {"tool": "tool_name", "arguments": {...}} or "args": {...}
+            # MiniMax M2.7 emits this inside <minimax:tool_call> wrappers
+            if not name:
+                name = _normalize_tool_name(obj.get("tool"))
+                if name:
+                    args = obj.get("arguments", obj.get("args", {}))
+
             if not name:
                 continue
             if not isinstance(args, dict):

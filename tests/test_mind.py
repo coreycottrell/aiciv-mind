@@ -659,6 +659,63 @@ async def test_xml_invoke_with_wrapper_parsing(minimal_manifest, memory_store):
     mock_exec.assert_called_once_with("bash", {"command": "whoami"})
 
 
+async def test_minimax_json_array_tool_call_parsing(minimal_manifest, memory_store):
+    """<minimax:tool_call>[{"tool": "bash", "arguments": {...}}]</minimax:tool_call> format.
+
+    MiniMax M2.7 via Ollama Cloud often emits tool calls as a JSON array
+    inside <minimax:tool_call> tags, using "tool" key instead of "name".
+    """
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    json_array_text = (
+        '<minimax:tool_call>\n'
+        '[\n'
+        '  {\n'
+        '    "tool": "bash",\n'
+        '    "arguments": {\n'
+        '      "command": "echo hello"\n'
+        '    }\n'
+        '  }\n'
+        ']\n'
+        '</minimax:tool_call>'
+    )
+    first = make_response(text=json_array_text, stop_reason="end_turn")
+    second = make_response(text="Output: hello")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="hello"
+        ) as mock_exec:
+            result = await mind.run_task("Echo test", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "echo hello"})
+
+
+async def test_minimax_json_array_with_args_key(minimal_manifest, memory_store):
+    """MiniMax sometimes uses "args" instead of "arguments"."""
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    text = '{"tool": "bash", "args": {"command": "ls"}}'
+    first = make_response(text=text, stop_reason="end_turn")
+    second = make_response(text="Listed files.")
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        side_effect=[first, second],
+    ):
+        with patch.object(
+            mind._tools, "execute", new_callable=AsyncMock, return_value="file1.py"
+        ) as mock_exec:
+            result = await mind.run_task("List files", inject_memories=False)
+
+    assert mock_exec.call_count == 1
+    mock_exec.assert_called_once_with("bash", {"command": "ls"})
+
+
 async def test_unrecognized_tool_name_ignored(minimal_manifest, memory_store):
     """Tool calls with names not in the registry are silently ignored."""
     mind = Mind(manifest=minimal_manifest, memory=memory_store)
