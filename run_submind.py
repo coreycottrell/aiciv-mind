@@ -71,8 +71,11 @@ async def run_submind(manifest_path: str, mind_id: str) -> None:
             os.makedirs(db_dir, exist_ok=True)
     memory = MemoryStore(db_path)
 
-    # Build tool registry (sub-minds don't get spawn_submind tool)
-    tools = ToolRegistry.default(memory_store=memory)
+    # Build tool registry with role from manifest.
+    # Team leads get spawn_agent; agents get full tools; primary gets spawn_team_lead.
+    # The role also drives filter_by_role() in Mind.__init__ (defense-in-depth).
+    role_str = manifest.role.replace("-", "_") if manifest.role else "agent"
+    tools = ToolRegistry.default(memory_store=memory, role=role_str, agent_id=manifest.mind_id)
 
     # Connect IPC bus
     bus = SubMindBus(mind_id=manifest.mind_id)
