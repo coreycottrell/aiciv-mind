@@ -27,6 +27,9 @@ data/
 *.db-wal
 *.db-shm
 
+# Scratchpads — ephemeral daily working notes (identity-sensitive)
+scratchpads/
+
 # CRITICAL: Never commit keypairs or secrets
 *keypair*.json
 *_keypair.json
