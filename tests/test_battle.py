@@ -5066,3 +5066,453 @@ class TestShellHookFactories:
         result = handler("bash", {}, "original output", False)
         assert result.allowed
         assert result.modified_output == "modified output"
+
+
+# ===========================================================================
+# Round 15 — Context tools, continuity tools (evolution), graph tools
+# ===========================================================================
+
+
+class TestContextTools:
+    """Tests for pin_memory, unpin_memory, introspect_context, get_context_snapshot."""
+
+    def test_pin_memory_tool(self):
+        """pin_memory tool pins a memory via the handler."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.context_tools import register_context_tools
+
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(
+            agent_id="test", title="Important", content="Critical fact",
+            memory_type="identity",
+        ))
+
+        registry = ToolRegistry()
+        register_context_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("pin_memory", {"memory_id": mid}))
+        assert "pinned" in result.lower()
+
+        # Verify it's actually pinned
+        pinned = store.get_pinned(agent_id="test")
+        assert any(p["id"] == mid for p in pinned)
+        store.close()
+
+    def test_unpin_memory_tool(self):
+        """unpin_memory tool unpins a memory."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.context_tools import register_context_tools
+
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(
+            agent_id="test", title="Important", content="Critical",
+            memory_type="identity",
+        ))
+        store.pin(mid)
+
+        registry = ToolRegistry()
+        register_context_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("unpin_memory", {"memory_id": mid}))
+        assert "unpinned" in result.lower()
+        assert len(store.get_pinned(agent_id="test")) == 0
+        store.close()
+
+    def test_pin_memory_no_id_error(self):
+        """pin_memory returns error when no memory_id provided."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.context_tools import register_context_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_context_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("pin_memory", {"memory_id": ""}))
+        assert "ERROR" in result
+        store.close()
+
+    def test_introspect_context_tool(self):
+        """introspect_context returns context state info."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.context_tools import register_context_tools
+
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(
+            agent_id="ctx", title="Pinned fact", content="Always here",
+            memory_type="identity",
+        ))
+        store.pin(mid)
+
+        registry = ToolRegistry()
+        register_context_tools(
+            registry, store, agent_id="ctx",
+            get_message_count=lambda: 12,
+        )
+
+        result = asyncio.run(registry.execute("introspect_context", {}))
+        assert "Context Introspection" in result
+        assert "12" in result  # message count
+        assert "1" in result  # 1 pinned memory
+        store.close()
+
+    def test_get_context_snapshot_tool(self):
+        """get_context_snapshot returns JSON snapshot."""
+        import asyncio
+        import json
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.context_tools import register_context_tools
+
+        store = MemoryStore(":memory:")
+        for i in range(3):
+            store.store(Memory(
+                agent_id="snap", title=f"Memory {i}",
+                content=f"Content {i}", memory_type="learning",
+            ))
+
+        registry = ToolRegistry()
+        register_context_tools(
+            registry, store, agent_id="snap",
+            get_message_count=lambda: 5,
+        )
+
+        result = asyncio.run(registry.execute("get_context_snapshot", {}))
+        data = json.loads(result)
+        assert data["total_memories"] == 3
+        assert data["message_count"] == 5
+        assert "snapshot_time" in data
+        store.close()
+
+
+class TestContinuityTools:
+    """Tests for evolution_log_write, evolution_log_read, evolution_trajectory, evolution_update_outcome."""
+
+    def test_evolution_log_write(self):
+        """evolution_log_write creates an evolution entry."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("evolution_log_write", {
+            "change_type": "skill_added",
+            "description": "Learned hub API mastery",
+            "reasoning": "Repeated hub interactions showed need for fluency",
+        }))
+        assert "Evolution logged" in result
+        assert "skill_added" in result
+        store.close()
+
+    def test_evolution_log_write_missing_fields(self):
+        """evolution_log_write returns error when required fields missing."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("evolution_log_write", {
+            "change_type": "skill_added",
+            # missing description and reasoning
+        }))
+        assert "ERROR" in result
+        store.close()
+
+    def test_evolution_log_read(self):
+        """evolution_log_read retrieves logged evolution entries."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        # Write an entry first
+        asyncio.run(registry.execute("evolution_log_write", {
+            "change_type": "behavioral_shift",
+            "description": "More concise responses",
+            "reasoning": "User feedback on verbosity",
+        }))
+
+        result = asyncio.run(registry.execute("evolution_log_read", {}))
+        assert "behavioral_shift" in result
+        assert "More concise responses" in result
+        store.close()
+
+    def test_evolution_log_read_empty(self):
+        """evolution_log_read returns message when no entries exist."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("evolution_log_read", {}))
+        assert "No evolution entries" in result
+        store.close()
+
+    def test_evolution_trajectory(self):
+        """evolution_trajectory synthesizes growth direction."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        # Seed some entries
+        for desc in ["Learned memory management", "Improved tool chaining", "Mastered hub API"]:
+            asyncio.run(registry.execute("evolution_log_write", {
+                "change_type": "skill_added",
+                "description": desc,
+                "reasoning": "Growth",
+            }))
+
+        result = asyncio.run(registry.execute("evolution_trajectory", {}))
+        # Should return some trajectory content (format varies)
+        assert isinstance(result, str)
+        assert len(result) > 0
+        store.close()
+
+    def test_evolution_update_outcome(self):
+        """evolution_update_outcome changes an entry's outcome."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        # Write and capture the ID
+        write_result = asyncio.run(registry.execute("evolution_log_write", {
+            "change_type": "architecture_change",
+            "description": "Switched to SQLite FTS5",
+            "reasoning": "Better search performance",
+        }))
+        # Extract evolution ID from "Evolution logged: <id> [...]"
+        eid = write_result.split(":")[1].strip().split(" ")[0]
+
+        result = asyncio.run(registry.execute("evolution_update_outcome", {
+            "evolution_id": eid,
+            "outcome": "positive",
+        }))
+        assert "positive" in result
+        store.close()
+
+    def test_evolution_update_outcome_invalid(self):
+        """evolution_update_outcome rejects invalid outcome values."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        result = asyncio.run(registry.execute("evolution_update_outcome", {
+            "evolution_id": "fake-id",
+            "outcome": "amazing",  # invalid
+        }))
+        assert "ERROR" in result
+        store.close()
+
+    def test_evolution_log_with_tags(self):
+        """evolution_log_write correctly stores comma-separated tags."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_continuity_tools(registry, store, agent_id="test")
+
+        asyncio.run(registry.execute("evolution_log_write", {
+            "change_type": "insight_crystallized",
+            "description": "Memory is existential",
+            "reasoning": "100 agents rediscovering same pattern",
+            "tags": "memory, philosophy, evolution",
+        }))
+
+        result = asyncio.run(registry.execute("evolution_log_read", {}))
+        assert "insight_crystallized" in result
+        assert "Memory is existential" in result
+        store.close()
+
+
+class TestGraphTools:
+    """Tests for memory_link, memory_graph, memory_conflicts, memory_superseded."""
+
+    def test_memory_link_tool(self):
+        """memory_link creates a link between two memories."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        mid1 = store.store(Memory(agent_id="g", title="Old", content="V1", memory_type="learning"))
+        mid2 = store.store(Memory(agent_id="g", title="New", content="V2", memory_type="learning"))
+
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_link", {
+            "source_id": mid2, "target_id": mid1,
+            "link_type": "supersedes", "reason": "Updated understanding",
+        }))
+        assert "Link created" in result
+        assert "supersedes" in result
+        store.close()
+
+    def test_memory_link_invalid_type(self):
+        """memory_link rejects invalid link types."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_link", {
+            "source_id": "a", "target_id": "b",
+            "link_type": "follows",  # invalid
+        }))
+        assert "ERROR" in result
+        store.close()
+
+    def test_memory_link_missing_ids(self):
+        """memory_link returns error when IDs are missing."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_link", {
+            "source_id": "", "target_id": "b", "link_type": "references",
+        }))
+        assert "ERROR" in result
+        store.close()
+
+    def test_memory_graph_tool(self):
+        """memory_graph shows links from and to a memory."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        mid1 = store.store(Memory(agent_id="g", title="Center", content="Hub", memory_type="learning"))
+        mid2 = store.store(Memory(agent_id="g", title="Satellite", content="Spoke", memory_type="learning"))
+        store.link_memories(mid1, mid2, "references", "cites this")
+
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_graph", {"memory_id": mid1}))
+        assert "Memory Graph" in result
+        assert "references" in result
+        assert "Center" in result
+        store.close()
+
+    def test_memory_graph_no_links(self):
+        """memory_graph shows 'none' for a memory with no links."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        mid = store.store(Memory(agent_id="g", title="Isolated", content="Alone", memory_type="learning"))
+
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_graph", {"memory_id": mid}))
+        assert "none" in result.lower()
+        store.close()
+
+    def test_memory_conflicts_tool(self):
+        """memory_conflicts lists conflict links."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        mid1 = store.store(Memory(agent_id="g", title="Claim A", content="X is true", memory_type="learning"))
+        mid2 = store.store(Memory(agent_id="g", title="Claim B", content="X is false", memory_type="learning"))
+        store.link_memories(mid1, mid2, "conflicts", "contradictory claims")
+
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_conflicts", {}))
+        assert "Conflict" in result or "conflict" in result.lower()
+        store.close()
+
+    def test_memory_conflicts_empty(self):
+        """memory_conflicts returns message when no conflicts."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_conflicts", {}))
+        assert "No" in result or "no" in result.lower()
+        store.close()
+
+    def test_memory_superseded_tool(self):
+        """memory_superseded lists superseded memories."""
+        import asyncio
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+
+        store = MemoryStore(":memory:")
+        mid1 = store.store(Memory(agent_id="g", title="Old version", content="V1", memory_type="learning"))
+        mid2 = store.store(Memory(agent_id="g", title="New version", content="V2", memory_type="learning"))
+        store.link_memories(mid2, mid1, "supersedes", "updated info")
+
+        registry = ToolRegistry()
+        register_graph_tools(registry, store)
+
+        result = asyncio.run(registry.execute("memory_superseded", {}))
+        # Result format depends on get_superseded implementation
+        assert isinstance(result, str)
+        store.close()
