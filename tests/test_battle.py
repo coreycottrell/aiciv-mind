@@ -3587,6 +3587,180 @@ class TestPlanningStress:
 
 
 # ---------------------------------------------------------------------------
+# Deeper Learning Loop — efficiency scores, insight generation
+# ---------------------------------------------------------------------------
+
+
+class TestLearningDeeper:
+    """Deeper battle tests for the self-improving learning loop."""
+
+    def test_task_outcome_succeeded_with_result(self):
+        """TaskOutcome.succeeded is True when no errors and result >= 20 chars."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(
+            task="test",
+            result="This is a sufficiently long result string.",
+            tool_call_count=3,
+        )
+        assert outcome.succeeded
+
+    def test_task_outcome_failed_with_errors(self):
+        """TaskOutcome.succeeded is False when tool_errors present."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(
+            task="test",
+            result="Result text here with enough chars.",
+            tool_errors=["bash failed"],
+            tool_call_count=3,
+        )
+        assert not outcome.succeeded
+
+    def test_task_outcome_failed_short_result(self):
+        """TaskOutcome.succeeded is False when result too short."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(task="test", result="short", tool_call_count=1)
+        assert not outcome.succeeded
+
+    def test_efficiency_score_ideal(self):
+        """Ideal efficiency: 3 tool calls, no errors = high score."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(
+            task="test", result="done", tool_call_count=3, tool_errors=[]
+        )
+        assert outcome.efficiency_score > 0.8
+
+    def test_efficiency_score_many_calls(self):
+        """Many tool calls reduce efficiency."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(
+            task="test", result="done", tool_call_count=20, tool_errors=[]
+        )
+        assert outcome.efficiency_score < 0.5
+
+    def test_efficiency_score_with_errors(self):
+        """Errors penalize efficiency score."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(
+            task="test", result="done", tool_call_count=3,
+            tool_errors=["err1", "err2"],
+        )
+        assert outcome.efficiency_score < 0.5
+
+    def test_efficiency_score_zero_calls(self):
+        """Zero tool calls = zero efficiency."""
+        from aiciv_mind.learning import TaskOutcome
+        outcome = TaskOutcome(task="test", result="done", tool_call_count=0)
+        assert outcome.efficiency_score == 0.0
+
+    def test_session_learner_empty_summary(self):
+        """SessionLearner with no outcomes returns empty summary."""
+        from aiciv_mind.learning import SessionLearner
+        learner = SessionLearner(agent_id="test")
+        summary = learner.summarize()
+        assert summary.task_count == 0
+
+    def test_session_learner_records_and_summarizes(self):
+        """SessionLearner accumulates outcomes and produces summary."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        for i in range(5):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result=f"Completed task {i} successfully with full output.",
+                tools_used=["bash", "read_file"],
+                tool_call_count=3,
+            ))
+        summary = learner.summarize()
+        assert summary.task_count == 5
+        assert summary.success_count == 5
+        assert summary.success_rate == 1.0
+        assert summary.total_tool_calls == 15
+        assert len(summary.most_used_tools) >= 1
+
+    def test_session_learner_detects_high_error_rate(self):
+        """SessionLearner generates insight when error rate > 30%."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        # All tasks have errors
+        for i in range(5):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result=f"Task {i} completed with errors in the output details.",
+                tools_used=["bash"],
+                tool_errors=["bash: command not found", "bash: timeout"],
+                tool_call_count=3,
+            ))
+        summary = learner.summarize()
+        assert summary.total_errors >= 10
+        assert len(summary.insights) >= 1
+        assert any("error" in i.lower() for i in summary.insights)
+
+    def test_session_learner_tracks_complexity_distribution(self):
+        """SessionLearner tracks complexity distribution from planning gate."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        complexities = ["trivial", "simple", "medium", "complex", "medium"]
+        for i, c in enumerate(complexities):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result=f"Result {i} with enough characters to count.",
+                planned_complexity=c,
+                tool_call_count=2,
+            ))
+        summary = learner.summarize()
+        assert summary.complexity_distribution["medium"] == 2
+        assert summary.complexity_distribution["trivial"] == 1
+
+    def test_session_learner_verification_stats(self):
+        """SessionLearner tracks verification outcomes."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        outcomes = ["approved", "approved", "challenged", "blocked"]
+        for i, v in enumerate(outcomes):
+            learner.record(TaskOutcome(
+                task=f"Task {i}",
+                result=f"Result {i} with enough characters to count.",
+                verification_outcome=v,
+                tool_call_count=2,
+            ))
+        summary = learner.summarize()
+        assert summary.verification_stats["approved"] == 2
+        assert summary.verification_stats["challenged"] == 1
+        assert summary.verification_stats["blocked"] == 1
+
+    def test_session_learner_planning_accuracy(self):
+        """SessionLearner reports planning accuracy."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        for adequate in [True, True, False, None]:
+            learner.record(TaskOutcome(
+                task="test",
+                result="Result with enough characters for validation.",
+                plan_was_adequate=adequate,
+                tool_call_count=2,
+            ))
+        summary = learner.summarize()
+        assert summary.planning_accuracy["adequate"] == 2
+        assert summary.planning_accuracy["inadequate"] == 1
+        assert summary.planning_accuracy["unknown"] == 1
+
+    def test_session_learner_memory_usefulness(self):
+        """SessionLearner tracks memory usefulness feedback."""
+        from aiciv_mind.learning import SessionLearner, TaskOutcome
+        learner = SessionLearner(agent_id="test")
+        for useful in [True, True, False, None]:
+            learner.record(TaskOutcome(
+                task="test",
+                result="Result with enough characters for validation.",
+                memory_was_useful=useful,
+                tool_call_count=2,
+            ))
+        summary = learner.summarize()
+        assert summary.memory_usefulness["useful"] == 2
+        assert summary.memory_usefulness["not_useful"] == 1
+
+
+# ---------------------------------------------------------------------------
 # ToolRegistry — core registration, execution, timeout, hooks
 # ---------------------------------------------------------------------------
 
