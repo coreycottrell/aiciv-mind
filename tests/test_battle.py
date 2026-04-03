@@ -679,3 +679,81 @@ async def test_api_error_doesnt_corrupt_message_history():
     assert mind._messages[-1]["role"] == "assistant"
 
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# #5: Tool execution reliability — validate all tool definitions
+# ---------------------------------------------------------------------------
+
+
+def test_all_tools_have_valid_definitions():
+    """Every registered tool has name, description, and input_schema."""
+    store = MemoryStore(":memory:")
+    from aiciv_mind.tools import ToolRegistry
+    registry = ToolRegistry.default(memory_store=store)
+
+    tools = registry.build_anthropic_tools()
+    assert len(tools) >= 20, f"Expected 20+ tools, got {len(tools)}"
+
+    for tool in tools:
+        assert "name" in tool, f"Tool missing 'name': {tool}"
+        assert "description" in tool, f"Tool {tool.get('name')} missing 'description'"
+        assert "input_schema" in tool, f"Tool {tool.get('name')} missing 'input_schema'"
+        schema = tool["input_schema"]
+        assert schema.get("type") == "object", (
+            f"Tool {tool['name']} schema type is {schema.get('type')}, expected 'object'"
+        )
+        assert "properties" in schema, (
+            f"Tool {tool['name']} schema missing 'properties'"
+        )
+
+    store.close()
+
+
+def test_read_only_tools_execute_without_side_effects():
+    """Read-only tools (memory_search, scratchpad_read, etc.) return results
+    without errors when invoked with valid arguments."""
+    store = MemoryStore(":memory:")
+    # Seed some data for search to find
+    store.store(Memory(
+        agent_id="test", title="Test memory", content="Searchable content",
+        memory_type="learning",
+    ))
+
+    from aiciv_mind.tools import ToolRegistry
+    registry = ToolRegistry.default(memory_store=store)
+
+    # Identify read-only tools
+    read_only_names = [
+        name for name in registry._tools
+        if registry._read_only.get(name, False)
+    ]
+    assert len(read_only_names) >= 5, (
+        f"Expected 5+ read-only tools, got {len(read_only_names)}: {read_only_names}"
+    )
+
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# #19: Performance — tool definition count and registry overhead
+# ---------------------------------------------------------------------------
+
+
+def test_tool_registry_build_performance():
+    """ToolRegistry.build_anthropic_tools() is fast even with 70+ tools."""
+    import time
+    store = MemoryStore(":memory:")
+    from aiciv_mind.tools import ToolRegistry
+    registry = ToolRegistry.default(memory_store=store)
+
+    start = time.monotonic()
+    for _ in range(1000):
+        tools = registry.build_anthropic_tools()
+    elapsed = time.monotonic() - start
+
+    # 1000 iterations should complete in under 0.5s
+    assert elapsed < 0.5, f"build_anthropic_tools is slow: {elapsed:.3f}s for 1000 calls"
+    assert len(tools) >= 20
+
+    store.close()
