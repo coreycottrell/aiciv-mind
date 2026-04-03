@@ -4320,3 +4320,749 @@ class TestMemoryDepthIntegration:
         # Should return some kind of trajectory string (may be empty if no identity)
         assert isinstance(trajectory, str)
         store.close()
+
+
+# ===========================================================================
+# Round 14 — HookRunner deep, InteractiveREPL, integrity tools, pattern tools
+# ===========================================================================
+
+
+class TestHookRunnerDeep:
+    """Deep tests for HookRunner: custom hooks, permission escalation, lifecycle."""
+
+    def test_custom_pre_hook_denies(self):
+        """Custom pre-hook can deny a tool call."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        hooks = HookRunner()
+
+        def deny_bash(tool_name, tool_input):
+            if "rm -rf" in str(tool_input):
+                return HookResult(allowed=False, message="dangerous command")
+            return HookResult(allowed=True)
+
+        hooks.register_pre_hook("safety", deny_bash, tools=["bash"])
+
+        # Should deny
+        result = hooks.pre_tool_use("bash", {"command": "rm -rf /"})
+        assert not result.allowed
+        assert "dangerous" in result.message
+
+        # Should allow (different command)
+        result = hooks.pre_tool_use("bash", {"command": "ls"})
+        assert result.allowed
+
+    def test_custom_pre_hook_only_fires_for_registered_tools(self):
+        """Pre-hook with tools filter only fires for those tools."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        calls = []
+        hooks = HookRunner()
+
+        def track(tool_name, tool_input):
+            calls.append(tool_name)
+            return HookResult(allowed=True)
+
+        hooks.register_pre_hook("tracker", track, tools=["bash", "write_file"])
+
+        hooks.pre_tool_use("bash", {})
+        hooks.pre_tool_use("read_file", {})  # Should NOT fire
+        hooks.pre_tool_use("write_file", {})
+        assert calls == ["bash", "write_file"]
+
+    def test_custom_pre_hook_all_tools_when_none(self):
+        """Pre-hook without tools filter fires for all tools."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        calls = []
+        hooks = HookRunner()
+
+        def track(tool_name, tool_input):
+            calls.append(tool_name)
+            return HookResult(allowed=True)
+
+        hooks.register_pre_hook("universal", track, tools=None)
+
+        hooks.pre_tool_use("bash", {})
+        hooks.pre_tool_use("read_file", {})
+        hooks.pre_tool_use("anything", {})
+        assert len(calls) == 3
+
+    def test_custom_post_hook_modifies_output(self):
+        """Post-hook can modify tool output."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        hooks = HookRunner()
+
+        def redact(tool_name, tool_input, output, is_error):
+            if "SECRET" in output:
+                return HookResult(allowed=True, modified_output="[REDACTED]")
+            return HookResult(allowed=True)
+
+        hooks.register_post_hook("redactor", redact)
+
+        result = hooks.post_tool_use("bash", {}, "contains SECRET data", False)
+        assert result.modified_output == "[REDACTED]"
+
+        result = hooks.post_tool_use("bash", {}, "safe output", False)
+        assert result.modified_output is None
+
+    def test_custom_post_hook_can_deny(self):
+        """Post-hook can suppress output by returning allowed=False."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        hooks = HookRunner()
+
+        def block_errors(tool_name, tool_input, output, is_error):
+            if is_error:
+                return HookResult(allowed=False, message="error suppressed")
+            return HookResult(allowed=True)
+
+        hooks.register_post_hook("error-blocker", block_errors)
+
+        result = hooks.post_tool_use("bash", {}, "error!", True)
+        assert not result.allowed
+        assert "suppressed" in result.message
+
+    def test_unregister_hook(self):
+        """unregister_hook removes a named hook."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        hooks = HookRunner()
+        hooks.register_pre_hook("temp", lambda t, i: HookResult(allowed=True))
+        assert "pre:temp" in hooks.custom_hooks
+
+        removed = hooks.unregister_hook("temp")
+        assert removed is True
+        assert "pre:temp" not in hooks.custom_hooks
+
+        # Unregistering nonexistent returns False
+        assert hooks.unregister_hook("nonexistent") is False
+
+    def test_custom_hooks_property(self):
+        """custom_hooks lists all registered hook names."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        hooks = HookRunner()
+        hooks.register_pre_hook("alpha", lambda t, i: HookResult(allowed=True))
+        hooks.register_post_hook("beta", lambda t, i, o, e: HookResult(allowed=True))
+
+        names = hooks.custom_hooks
+        assert "pre:alpha" in names
+        assert "post:beta" in names
+
+    def test_permission_escalation_approved(self):
+        """Permission escalation: handler approves the tool call."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionRequest, PermissionResponse
+
+        hooks = HookRunner(escalate_tools=["deploy"])
+
+        def approve_all(req: PermissionRequest) -> PermissionResponse:
+            return PermissionResponse(approved=True)
+
+        hooks.register_permission_handler(approve_all, mind_id="sub-1")
+
+        result = hooks.pre_tool_use("deploy", {"target": "prod"})
+        assert result.allowed
+
+    def test_permission_escalation_denied(self):
+        """Permission escalation: handler denies the tool call."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionRequest, PermissionResponse
+
+        hooks = HookRunner(escalate_tools=["deploy"])
+
+        def deny_all(req: PermissionRequest) -> PermissionResponse:
+            return PermissionResponse(approved=False, message="no prod deploys")
+
+        hooks.register_permission_handler(deny_all, mind_id="sub-1")
+
+        result = hooks.pre_tool_use("deploy", {"target": "prod"})
+        assert not result.allowed
+        assert "no prod deploys" in result.message
+
+    def test_permission_escalation_with_modified_input(self):
+        """Permission handler can modify the tool input."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionRequest, PermissionResponse
+
+        hooks = HookRunner(escalate_tools=["deploy"])
+
+        def redirect_to_staging(req: PermissionRequest) -> PermissionResponse:
+            return PermissionResponse(
+                approved=True,
+                modified_input={"target": "staging"},
+            )
+
+        hooks.register_permission_handler(redirect_to_staging, mind_id="sub-1")
+
+        result = hooks.pre_tool_use("deploy", {"target": "prod"})
+        assert result.allowed
+        assert result.modified_input == {"target": "staging"}
+
+    def test_permission_escalation_no_handler_fails_closed(self):
+        """Without a handler, escalation tools are denied (fail-closed)."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner(escalate_tools=["deploy"])
+        # No handler registered
+
+        result = hooks.pre_tool_use("deploy", {})
+        assert not result.allowed
+        assert "no permission handler" in result.message.lower()
+
+    def test_permission_escalation_handler_error_fails_closed(self):
+        """If permission handler raises, tool is denied (fail-closed)."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionRequest
+
+        hooks = HookRunner(escalate_tools=["deploy"])
+
+        def broken_handler(req: PermissionRequest):
+            raise RuntimeError("handler crashed")
+
+        hooks.register_permission_handler(broken_handler, mind_id="sub-1")
+
+        result = hooks.pre_tool_use("deploy", {})
+        assert not result.allowed
+        assert "error" in result.message.lower()
+
+    def test_add_remove_escalate_tool(self):
+        """Can dynamically add/remove tools from escalation list."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+        hooks.add_escalate_tool("git_push")
+        assert "git_push" in hooks.escalate_tools
+
+        hooks.remove_escalate_tool("git_push")
+        assert "git_push" not in hooks.escalate_tools
+
+    def test_lifecycle_on_stop_fires_callbacks(self):
+        """on_stop fires registered callbacks with correct args."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+        received = []
+
+        def callback(**kwargs):
+            received.append(kwargs)
+
+        hooks.register_on_stop(callback)
+        hooks.on_stop(mind_id="primary", result="done", tool_calls=5, session_id="s1")
+
+        assert len(received) == 1
+        assert received[0]["mind_id"] == "primary"
+        assert received[0]["result"] == "done"
+        assert received[0]["tool_calls"] == 5
+
+    def test_lifecycle_on_submind_stop_fires_callbacks(self):
+        """on_submind_stop fires registered callbacks."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+        received = []
+
+        def callback(**kwargs):
+            received.append(kwargs)
+
+        hooks.register_on_submind_stop(callback)
+        hooks.on_submind_stop(
+            parent_id="primary", child_id="researcher",
+            result="found 3 papers", exit_code=0,
+        )
+
+        assert len(received) == 1
+        assert received[0]["parent_id"] == "primary"
+        assert received[0]["child_id"] == "researcher"
+
+    def test_lifecycle_callback_error_doesnt_crash(self):
+        """Lifecycle callback errors are caught, don't crash the hooks system."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+
+        def bad_callback(**kwargs):
+            raise RuntimeError("callback exploded")
+
+        hooks.register_on_stop(bad_callback)
+        # Should not raise
+        hooks.on_stop(mind_id="test", result="done")
+
+    def test_lifecycle_logs_to_call_log(self):
+        """on_stop and on_submind_stop create audit log entries."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner(log_all=True)
+        hooks.on_stop(mind_id="primary", result="done")
+        hooks.on_submind_stop(parent_id="primary", child_id="sub", result="ok")
+
+        log = hooks.call_log
+        lifecycle_entries = [e for e in log if e.tool_name.startswith("__lifecycle")]
+        assert len(lifecycle_entries) == 2
+        assert lifecycle_entries[0].tool_name == "__lifecycle_stop__"
+        assert lifecycle_entries[1].tool_name == "__lifecycle_submind_stop__"
+
+    def test_pre_hook_error_is_non_fatal(self):
+        """Custom pre-hook that raises doesn't block the tool call."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+
+        def broken_hook(tool_name, tool_input):
+            raise ValueError("hook crashed")
+
+        hooks.register_pre_hook("broken", broken_hook)
+
+        # Should still allow (fail-open for custom hooks)
+        result = hooks.pre_tool_use("bash", {})
+        assert result.allowed
+
+    def test_stats_property(self):
+        """stats tracks total_calls, denied, logged."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner(blocked_tools=["dangerous"])
+        hooks.pre_tool_use("safe_tool", {})
+        hooks.pre_tool_use("dangerous", {})
+        hooks.pre_tool_use("safe_tool", {})
+
+        stats = hooks.stats
+        assert stats["total_calls"] == 3
+        assert stats["denied"] == 1
+        assert "dangerous" in stats["blocked_tools"]
+
+    def test_skill_hooks_with_warn_rules(self):
+        """Skill hooks can install warn rules."""
+        from aiciv_mind.tools.hooks import HookRunner
+
+        hooks = HookRunner()
+        hooks.install_skill_hooks("deploy-review", {
+            "blocked_tools": ["git_push"],
+            "pre_tool_use": [
+                {"tool": "bash", "action": "warn", "reason": "Be careful"},
+            ],
+        })
+
+        assert "git_push" in hooks.blocked_tools
+        assert "deploy-review" in hooks.active_skill_hooks
+        # Warn rules stored internally
+        assert hasattr(hooks, "_skill_warn_rules")
+        assert "bash" in hooks._skill_warn_rules
+
+    def test_check_order_blocked_before_escalation(self):
+        """Blocked tools are checked BEFORE escalation (hard deny)."""
+        from aiciv_mind.tools.hooks import HookRunner, PermissionRequest, PermissionResponse
+
+        hooks = HookRunner(blocked_tools=["deploy"], escalate_tools=["deploy"])
+
+        # Even with a permissive handler, blocked = denied
+        def approve_all(req: PermissionRequest) -> PermissionResponse:
+            return PermissionResponse(approved=True)
+
+        hooks.register_permission_handler(approve_all)
+
+        result = hooks.pre_tool_use("deploy", {})
+        assert not result.allowed
+        assert "blocked" in result.message.lower()
+
+    def test_multiple_custom_pre_hooks_short_circuit(self):
+        """First denying pre-hook short-circuits remaining hooks."""
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        calls = []
+        hooks = HookRunner()
+
+        def hook_a(t, i):
+            calls.append("a")
+            return HookResult(allowed=False, message="denied by a")
+
+        def hook_b(t, i):
+            calls.append("b")
+            return HookResult(allowed=True)
+
+        hooks.register_pre_hook("a", hook_a)
+        hooks.register_pre_hook("b", hook_b)
+
+        result = hooks.pre_tool_use("bash", {})
+        assert not result.allowed
+        assert calls == ["a"]  # b never called
+
+
+class TestInteractiveREPL:
+    """Tests for the InteractiveREPL command handler logic."""
+
+    def _make_mock_mind(self):
+        """Create a minimal mock Mind for REPL testing."""
+        from unittest.mock import MagicMock
+        mind = MagicMock()
+        mind.manifest.mind_id = "test-mind"
+        mind.manifest.role = "test"
+        mind.manifest.display_name = "Test Mind"
+        mind.manifest.model.preferred = "ollama/test:7b"
+        mind.manifest.enabled_tool_names.return_value = ["bash", "read_file"]
+        mind._messages = []
+        return mind
+
+    def test_repl_init(self):
+        """REPL initializes with running=True."""
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        assert repl._running is True
+        assert repl.mind is mind
+
+    def test_handle_quit_command(self):
+        """'/quit' sets running to False."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/quit"))
+        assert result is True
+        assert repl._running is False
+
+    def test_handle_exit_command(self):
+        """'/exit' also works."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/exit"))
+        assert result is True
+        assert repl._running is False
+
+    def test_handle_help_command(self, capsys):
+        """'/help' prints commands and returns True."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/help"))
+        assert result is True
+        captured = capsys.readouterr()
+        assert "/quit" in captured.out
+        assert "/help" in captured.out
+
+    def test_handle_status_command(self, capsys):
+        """'/status' prints mind info."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/status"))
+        assert result is True
+        captured = capsys.readouterr()
+        assert "test-mind" in captured.out
+
+    def test_handle_clear_command(self, capsys):
+        """'/clear' calls mind.clear_history() and writes handoff memory."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        mind.memory = self._make_mock_mind()  # mock memory store
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/clear"))
+        assert result is True
+        mind.clear_history.assert_called_once()
+        captured = capsys.readouterr()
+        assert "cleared" in captured.out.lower()
+
+    def test_handle_memories_command(self, capsys):
+        """'/memories query' searches memories."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        mind.memory.search.return_value = [
+            {"memory_type": "learning", "title": "Test Memory", "content": "Some content"},
+        ]
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/memories test"))
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Test Memory" in captured.out
+
+    def test_handle_unknown_command(self):
+        """Unknown commands return False."""
+        import asyncio
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        result = asyncio.run(repl._handle_command("/foobar"))
+        assert result is False
+
+    def test_commands_dict_has_expected_entries(self):
+        """COMMANDS dict lists all known commands."""
+        from aiciv_mind.interactive import InteractiveREPL
+        assert "/quit" in InteractiveREPL.COMMANDS
+        assert "/exit" in InteractiveREPL.COMMANDS
+        assert "/help" in InteractiveREPL.COMMANDS
+        assert "/status" in InteractiveREPL.COMMANDS
+        assert "/clear" in InteractiveREPL.COMMANDS
+
+    def test_print_banner(self, capsys):
+        """Banner prints mind info."""
+        from aiciv_mind.interactive import InteractiveREPL
+        mind = self._make_mock_mind()
+        repl = InteractiveREPL(mind)
+        repl._print_banner()
+        captured = capsys.readouterr()
+        assert "Test Mind" in captured.out
+        assert "aiciv-mind" in captured.out
+
+
+class TestIntegrityTool:
+    """Tests for the memory_selfcheck integrity tool."""
+
+    def test_selfcheck_passes_on_clean_db(self):
+        """Self-check on empty clean DB passes all checks."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.integrity_tools import register_integrity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_integrity_tools(registry, store)
+
+        import asyncio
+        result = asyncio.run(registry.execute("memory_selfcheck", {}))
+        assert "PASS Round-trip" in result
+        assert "PASS FTS5 sync" in result
+        assert "FAIL" not in result or "0 FAIL" in result
+        store.close()
+
+    def test_selfcheck_verbose_mode(self):
+        """Verbose mode includes additional stats."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.integrity_tools import register_integrity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_integrity_tools(registry, store)
+
+        import asyncio
+        result = asyncio.run(registry.execute("memory_selfcheck", {"verbose": True}))
+        assert "Verbose details" in result
+        assert "Memories:" in result
+        store.close()
+
+    def test_selfcheck_with_existing_data(self):
+        """Self-check works correctly with pre-existing memories."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.integrity_tools import register_integrity_tools
+
+        store = MemoryStore(":memory:")
+        # Store some real memories
+        for i in range(5):
+            store.store(Memory(
+                agent_id="test", title=f"Memory {i}",
+                content=f"Content {i}", memory_type="learning",
+                tags=["test", f"tag-{i}"],
+            ))
+
+        registry = ToolRegistry()
+        register_integrity_tools(registry, store)
+
+        import asyncio
+        result = asyncio.run(registry.execute("memory_selfcheck", {}))
+        assert "PASS" in result
+        # Should report tag integrity check on the 5 memories
+        assert "Tag integrity" in result
+        store.close()
+
+    def test_selfcheck_cleans_up_test_memory(self):
+        """Self-check removes its test memory after running."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.integrity_tools import register_integrity_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_integrity_tools(registry, store)
+
+        import asyncio
+        asyncio.run(registry.execute("memory_selfcheck", {}))
+
+        # No selfcheck memories should remain
+        results = store.search("integrityprobe", agent_id="__selfcheck__", limit=10)
+        assert len(results) == 0
+        store.close()
+
+
+class TestPatternTool:
+    """Tests for the loop1_pattern_scan tool."""
+
+    def test_no_loop1_memories(self):
+        """Returns message when no Loop 1 memories exist."""
+        from aiciv_mind.memory import MemoryStore
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.pattern_tools import register_pattern_tools
+
+        store = MemoryStore(":memory:")
+        registry = ToolRegistry()
+        register_pattern_tools(registry, store, agent_id="test")
+
+        import asyncio
+        result = asyncio.run(registry.execute("loop1_pattern_scan", {}))
+        assert "No Loop 1 memories" in result
+        store.close()
+
+    def test_detects_repeated_errors(self):
+        """Detects patterns when same tool errors 3+ times."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.pattern_tools import register_pattern_tools
+
+        store = MemoryStore(":memory:")
+        # Create 4 loop-1 errors for 'bash' tool
+        for i in range(4):
+            store.store(Memory(
+                agent_id="test",
+                title=f"Bash error {i}",
+                content=f"Errors: bash command failed with exit code 1",
+                memory_type="error",
+                tags=["loop-1", "bash", "task-learning"],
+            ))
+
+        registry = ToolRegistry()
+        register_pattern_tools(registry, store, agent_id="test")
+
+        import asyncio
+        result = asyncio.run(registry.execute("loop1_pattern_scan", {"threshold": 3}))
+        assert "Pattern Detected" in result
+        assert "bash" in result.lower()
+        store.close()
+
+    def test_below_threshold_no_pattern(self):
+        """1 error when threshold=3 should not flag a pattern."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.pattern_tools import register_pattern_tools
+
+        store = MemoryStore(":memory:")
+        # Only 1 error — well below any threshold
+        store.store(Memory(
+            agent_id="test",
+            title="Error 0",
+            content="Errors: network timeout",
+            memory_type="error",
+            tags=["loop-1", "web_fetch"],
+        ))
+
+        registry = ToolRegistry()
+        register_pattern_tools(registry, store, agent_id="test")
+
+        import asyncio
+        result = asyncio.run(registry.execute("loop1_pattern_scan", {"threshold": 3}))
+        assert "No repeated patterns" in result
+        store.close()
+
+    def test_custom_threshold_and_lookback(self):
+        """Respects custom threshold and lookback parameters."""
+        from aiciv_mind.memory import MemoryStore, Memory
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.pattern_tools import register_pattern_tools
+
+        store = MemoryStore(":memory:")
+        # Create 2 errors — threshold=2 should catch it
+        for i in range(2):
+            store.store(Memory(
+                agent_id="test",
+                title=f"Error {i}",
+                content="Errors: deploy failed at step 3",
+                memory_type="error",
+                tags=["loop-1", "deploy"],
+            ))
+
+        registry = ToolRegistry()
+        register_pattern_tools(registry, store, agent_id="test")
+
+        import asyncio
+        result = asyncio.run(registry.execute("loop1_pattern_scan", {
+            "threshold": 2, "lookback": 10,
+        }))
+        assert "Pattern Detected" in result
+        store.close()
+
+    def test_helper_has_loop1_tag(self):
+        """_has_loop1_tag correctly identifies loop-1 tagged memories."""
+        import json
+        from aiciv_mind.tools.pattern_tools import _has_loop1_tag
+
+        assert _has_loop1_tag({"tags": json.dumps(["loop-1", "error"])}) is True
+        assert _has_loop1_tag({"tags": json.dumps(["error"])}) is False
+        assert _has_loop1_tag({"tags": "invalid json"}) is False
+        assert _has_loop1_tag({}) is False
+
+    def test_extract_error_line(self):
+        """_extract_error_line finds the Errors: line."""
+        from aiciv_mind.tools.pattern_tools import _extract_error_line
+
+        content = "Task: do something\nErrors: connection refused\nDuration: 5s"
+        assert _extract_error_line(content) == "Errors: connection refused"
+
+        # "Errors: none" should be skipped
+        assert _extract_error_line("Errors: none") is None
+        assert _extract_error_line("No errors here") is None
+
+
+class TestShellHookFactories:
+    """Tests for make_shell_pre_hook and make_shell_post_hook."""
+
+    def test_shell_pre_hook_allow(self):
+        """Shell hook with exit 0 allows the tool call."""
+        from aiciv_mind.tools.hooks import make_shell_pre_hook
+
+        handler = make_shell_pre_hook("true")  # always exits 0
+        result = handler("bash", {"command": "ls"})
+        assert result.allowed
+
+    def test_shell_pre_hook_deny(self):
+        """Shell hook with non-zero exit denies the tool call."""
+        from aiciv_mind.tools.hooks import make_shell_pre_hook
+
+        handler = make_shell_pre_hook("echo 'not allowed' && exit 1")
+        result = handler("bash", {"command": "rm -rf /"})
+        assert not result.allowed
+        assert "not allowed" in result.message
+
+    def test_shell_pre_hook_timeout_allows(self):
+        """Shell hook timeout = fail-open (allow)."""
+        from aiciv_mind.tools.hooks import make_shell_pre_hook
+
+        handler = make_shell_pre_hook("sleep 10", timeout=0.1)
+        result = handler("bash", {})
+        assert result.allowed  # timeout = fail-open
+
+    def test_shell_pre_hook_receives_env_vars(self):
+        """Shell hook receives HOOK_TOOL_NAME and HOOK_TOOL_INPUT as env vars."""
+        from aiciv_mind.tools.hooks import make_shell_pre_hook
+
+        # Echo the env vars to stdout (but still exit 0)
+        handler = make_shell_pre_hook('echo "$HOOK_TOOL_NAME"')
+        result = handler("my_tool", {"key": "value"})
+        assert result.allowed
+
+    def test_shell_post_hook_allow(self):
+        """Shell post-hook with exit 0 allows."""
+        from aiciv_mind.tools.hooks import make_shell_post_hook
+
+        handler = make_shell_post_hook("true")
+        result = handler("bash", {}, "output", False)
+        assert result.allowed
+
+    def test_shell_post_hook_deny(self):
+        """Shell post-hook with non-zero exit denies."""
+        from aiciv_mind.tools.hooks import make_shell_post_hook
+
+        handler = make_shell_post_hook("exit 1")
+        result = handler("bash", {}, "output", False)
+        assert not result.allowed
+
+    def test_shell_post_hook_modifies_output(self):
+        """Shell post-hook stdout replaces output when exit 0."""
+        from aiciv_mind.tools.hooks import make_shell_post_hook
+
+        handler = make_shell_post_hook("echo 'modified output'")
+        result = handler("bash", {}, "original output", False)
+        assert result.allowed
+        assert result.modified_output == "modified output"
