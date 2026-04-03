@@ -10346,3 +10346,835 @@ class TestConsolidationLockStress:
             assert not lock.is_held_by_us
 
         asyncio.run(use_lock())
+
+
+# =============================================================================
+# ROUND 25: Wire protocol, verification engine, context compaction, suite, IPC
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# MindMessage wire protocol — all factory methods + round-trip fidelity
+# ---------------------------------------------------------------------------
+
+
+class TestMindMessageProtocol:
+    """Exhaustive MindMessage factory and wire-format tests."""
+
+    def test_task_factory_fields(self):
+        """task() sets correct type and payload."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.task("primary", "sub-1", "t-001", "Do research")
+        assert msg.type == MsgType.TASK
+        assert msg.sender == "primary"
+        assert msg.recipient == "sub-1"
+        assert msg.payload["task_id"] == "t-001"
+        assert msg.payload["objective"] == "Do research"
+        assert msg.payload["context"] == {}
+
+    def test_task_factory_with_context(self):
+        """task() passes context dict through."""
+        from aiciv_mind.ipc.messages import MindMessage
+        ctx = {"files": ["/a.py"], "priority": "high"}
+        msg = MindMessage.task("p", "s", "t-002", "Build it", context=ctx)
+        assert msg.payload["context"] == ctx
+
+    def test_result_factory_success(self):
+        """result() creates a success RESULT."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.result("sub-1", "primary", "t-001", "Done!", success=True)
+        assert msg.type == MsgType.RESULT
+        assert msg.payload["success"] is True
+        assert msg.payload["result"] == "Done!"
+        assert msg.payload["error"] is None
+
+    def test_result_factory_failure(self):
+        """result() creates an error RESULT."""
+        from aiciv_mind.ipc.messages import MindMessage
+        msg = MindMessage.result("sub-1", "primary", "t-001", "", success=False, error="OOM")
+        assert msg.payload["success"] is False
+        assert msg.payload["error"] == "OOM"
+
+    def test_shutdown_factory(self):
+        """shutdown() creates a SHUTDOWN message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.shutdown("primary", "sub-1", reason="session_end")
+        assert msg.type == MsgType.SHUTDOWN
+        assert msg.payload["reason"] == "session_end"
+
+    def test_shutdown_ack_factory(self):
+        """shutdown_ack() creates a SHUTDOWN_ACK."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.shutdown_ack("sub-1", "primary", mind_id="sub-1")
+        assert msg.type == MsgType.SHUTDOWN_ACK
+        assert msg.payload["mind_id"] == "sub-1"
+
+    def test_heartbeat_roundtrip(self):
+        """heartbeat() round-trips through to_bytes/from_bytes."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.heartbeat("primary", "sub-1")
+        assert msg.type == MsgType.HEARTBEAT
+        restored = MindMessage.from_bytes(msg.to_bytes())
+        assert restored.type == MsgType.HEARTBEAT
+        assert restored.sender == "primary"
+        assert restored.recipient == "sub-1"
+
+    def test_heartbeat_ack_factory(self):
+        """heartbeat_ack() creates correct message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.heartbeat_ack("sub-1", "primary")
+        assert msg.type == MsgType.HEARTBEAT_ACK
+
+    def test_status_factory(self):
+        """status() creates a STATUS message with progress and pct."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.status("sub-1", "primary", "t-001", "50% done", pct=50)
+        assert msg.type == MsgType.STATUS
+        assert msg.payload["task_id"] == "t-001"
+        assert msg.payload["progress"] == "50% done"
+        assert msg.payload["pct"] == 50
+
+    def test_log_factory(self):
+        """log() creates a LOG message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.log("sub-1", "primary", "warning", "Disk space low")
+        assert msg.type == MsgType.LOG
+        assert msg.payload["level"] == "warning"
+        assert msg.payload["message"] == "Disk space low"
+
+    def test_permission_request_factory(self):
+        """permission_request() creates correct fields."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.permission_request(
+            "sub-1", "primary", tool_name="bash",
+            tool_input={"command": "rm -rf /tmp/x"}, reason="dangerous"
+        )
+        assert msg.type == MsgType.PERMISSION_REQUEST
+        assert msg.payload["tool_name"] == "bash"
+        assert msg.payload["reason"] == "dangerous"
+
+    def test_permission_response_factory(self):
+        """permission_response() includes approval and modified input."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType
+        msg = MindMessage.permission_response(
+            "primary", "sub-1", request_id="req-1",
+            approved=True, message="Go ahead",
+            modified_input={"command": "ls /tmp"}
+        )
+        assert msg.type == MsgType.PERMISSION_RESPONSE
+        assert msg.payload["approved"] is True
+        assert msg.payload["modified_input"]["command"] == "ls /tmp"
+
+    def test_auto_generated_id_and_timestamp(self):
+        """Each MindMessage gets unique id and timestamp."""
+        from aiciv_mind.ipc.messages import MindMessage
+        m1 = MindMessage.heartbeat("a", "b")
+        m2 = MindMessage.heartbeat("a", "b")
+        assert m1.id != m2.id
+        assert isinstance(m1.timestamp, float)
+
+    def test_roundtrip_preserves_all_fields(self):
+        """Full round-trip preserves every field."""
+        from aiciv_mind.ipc.messages import MindMessage
+        original = MindMessage.task("p", "s", "t-42", "Analyze this", context={"key": "val"})
+        restored = MindMessage.from_bytes(original.to_bytes())
+        assert restored.type == original.type
+        assert restored.sender == original.sender
+        assert restored.recipient == original.recipient
+        assert restored.id == original.id
+        assert abs(restored.timestamp - original.timestamp) < 0.01
+        assert restored.payload == original.payload
+
+
+class TestMindCompletionEvent:
+    """MindCompletionEvent serialization and context line."""
+
+    def test_to_dict_all_fields(self):
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+        evt = MindCompletionEvent(
+            mind_id="research-lead", task_id="t-1", status="success",
+            summary="Found 3 papers", result="Full result text",
+            tokens_used=1240, tool_calls=5, duration_ms=3200,
+            tools_used=["web_search", "memory_search"],
+        )
+        d = evt.to_dict()
+        assert d["mind_id"] == "research-lead"
+        assert d["tokens_used"] == 1240
+        assert d["tools_used"] == ["web_search", "memory_search"]
+        assert d["error"] is None
+
+    def test_from_dict_round_trip(self):
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+        original = MindCompletionEvent(
+            mind_id="sub-1", task_id="t-2", status="error",
+            summary="Failed to connect", error="ConnectionTimeout",
+        )
+        restored = MindCompletionEvent.from_dict(original.to_dict())
+        assert restored.mind_id == original.mind_id
+        assert restored.status == "error"
+        assert restored.error == "ConnectionTimeout"
+        assert restored.tokens_used == 0  # default
+
+    def test_context_line_format(self):
+        from aiciv_mind.ipc.messages import MindCompletionEvent
+        evt = MindCompletionEvent(
+            mind_id="web-lead", task_id="t-3", status="success",
+            summary="Built login page", tokens_used=800, tool_calls=12, duration_ms=5000,
+        )
+        line = evt.context_line()
+        assert "[web-lead]" in line
+        assert "SUCCESS" in line
+        assert "Built login page" in line
+        assert "800t" in line
+        assert "12 tools" in line
+        assert "5000ms" in line
+
+    def test_completion_message_factory(self):
+        """MindMessage.completion() wraps an event in a COMPLETION message."""
+        from aiciv_mind.ipc.messages import MindMessage, MsgType, MindCompletionEvent
+        evt = MindCompletionEvent(
+            mind_id="sub-1", task_id="t-4", status="success", summary="Done",
+        )
+        msg = MindMessage.completion("sub-1", "primary", evt)
+        assert msg.type == MsgType.COMPLETION
+        assert msg.payload["mind_id"] == "sub-1"
+        assert msg.payload["summary"] == "Done"
+
+
+# ---------------------------------------------------------------------------
+# Verification engine — CompletionProtocol exhaustive tests
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationEngine:
+    """Deep tests for the verification/red-team system."""
+
+    def test_disabled_always_approves(self):
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+        proto = CompletionProtocol(enabled=False)
+        result = proto.verify("task", "result", complexity="complex")
+        assert result.outcome == VerificationOutcome.APPROVED
+        assert result.scrutiny_level == "none"
+
+    def test_trivial_gets_light_scrutiny(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("simple task", "Result is fine and complete", complexity="trivial")
+        assert result.scrutiny_level == "light"
+
+    def test_complex_gets_deep_scrutiny(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("complex migration", "We migrated the database", complexity="complex")
+        assert result.scrutiny_level == "deep"
+
+    def test_variable_gets_deep_scrutiny(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("variable task", "Completed something", complexity="variable")
+        assert result.scrutiny_level == "deep"
+
+    def test_light_challenges_empty_result(self):
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("task", "", complexity="trivial")
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("empty" in c.lower() or "short" in c.lower() for c in result.challenges)
+
+    def test_light_challenges_error_in_result(self):
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("task", "The command failed with an error code", complexity="trivial")
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("failed" in c.lower() or "error" in c.lower() for c in result.challenges)
+
+    def test_standard_challenges_no_evidence(self):
+        from aiciv_mind.verification import CompletionProtocol, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        result = proto.verify("deploy service", "Service deployed", complexity="simple")
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("evidence" in c.lower() for c in result.challenges)
+
+    def test_standard_approves_with_strong_evidence(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("All tests pass", "test_pass", confidence=0.9)]
+        result = proto.verify("fix bug", "Fixed the bug, tests pass",
+                              evidence=evidence, complexity="simple")
+        # Strong evidence → light scrutiny → should approve
+        assert result.outcome == VerificationOutcome.APPROVED
+
+    def test_standard_challenges_weak_evidence(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("Manual check", "manual_check", confidence=0.4)]
+        result = proto.verify("deploy service", "Looks deployed", evidence=evidence, complexity="medium")
+        assert result.outcome == VerificationOutcome.CHALLENGED
+        assert any("weak" in c.lower() for c in result.challenges)
+
+    def test_deep_challenges_long_result(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("Tests pass", "test_pass", confidence=0.9)]
+        long_result = "x" * 6000
+        result = proto.verify("task", long_result, evidence=evidence, complexity="complex")
+        assert result.scrutiny_level == "deep"
+        assert any("simpler" in c.lower() for c in result.challenges)
+
+    def test_deep_catches_symptom_fix(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence, VerificationOutcome
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("Tests pass", "test_pass", confidence=0.9)]
+        result = proto.verify("fix auth bug", "Applied a workaround to patch the issue",
+                              evidence=evidence, complexity="complex")
+        assert any("symptom" in c.lower() or "SYSTEM" in c for c in result.challenges)
+
+    def test_deep_catches_irreversible_actions(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("API 200", "api_response", confidence=0.8)]
+        result = proto.verify("deploy prod", "Deployed to production and deleted old containers",
+                              evidence=evidence, complexity="complex")
+        assert any("irreversible" in c.lower() or "rollback" in c.lower() for c in result.challenges)
+
+    def test_deep_always_asks_premortom(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence
+        proto = CompletionProtocol(enabled=True)
+        evidence = [Evidence("Tests pass", "test_pass", confidence=0.9)]
+        result = proto.verify("simple thing", "Done", evidence=evidence, complexity="complex")
+        assert any("pre-mortem" in c.lower() or "failure mode" in c.lower() for c in result.challenges)
+
+    def test_session_stats_empty(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        stats = proto.get_session_stats()
+        assert stats["total"] == 0
+
+    def test_session_stats_after_verifications(self):
+        from aiciv_mind.verification import CompletionProtocol, Evidence
+        proto = CompletionProtocol(enabled=True)
+        # Run a few verifications
+        proto.verify("t1", "result is good", complexity="trivial")
+        proto.verify("t2", "deployed", complexity="complex")
+        proto.verify("t3", "", complexity="trivial")  # empty result
+        stats = proto.get_session_stats()
+        assert stats["total"] == 3
+        assert stats["approved"] + stats["challenged"] + stats["blocked"] == 3
+
+    def test_build_verification_prompt_disabled(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=False)
+        assert proto.build_verification_prompt("task") == ""
+
+    def test_build_verification_prompt_light(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        prompt = proto.build_verification_prompt("task", complexity="trivial")
+        assert "Light" in prompt
+        assert "error" in prompt.lower()
+
+    def test_build_verification_prompt_standard(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        prompt = proto.build_verification_prompt("task", complexity="simple")
+        assert "Red Team" in prompt
+        # Standard = first 4 questions
+        assert "REALLY know" in prompt
+
+    def test_build_verification_prompt_deep(self):
+        from aiciv_mind.verification import CompletionProtocol
+        proto = CompletionProtocol(enabled=True)
+        prompt = proto.build_verification_prompt("task", complexity="complex")
+        assert "Red Team" in prompt
+        assert "reversible" in prompt.lower()  # Deep includes all 8 questions
+
+
+class TestEvidenceExtraction:
+    """Tests for extract_evidence and Evidence."""
+
+    def test_extract_test_pass(self):
+        from aiciv_mind.verification import extract_evidence
+        results = extract_evidence(["All 50 tests passed"])
+        types = [e.evidence_type for e in results]
+        assert "test_pass" in types
+
+    def test_extract_file_written(self):
+        from aiciv_mind.verification import extract_evidence
+        results = extract_evidence(["File created at /tmp/output.txt"])
+        types = [e.evidence_type for e in results]
+        assert "file_written" in types
+
+    def test_extract_api_response(self):
+        from aiciv_mind.verification import extract_evidence
+        results = extract_evidence(["Response: 200 OK"])
+        types = [e.evidence_type for e in results]
+        assert "api_response" in types
+
+    def test_extract_no_evidence(self):
+        from aiciv_mind.verification import extract_evidence
+        results = extract_evidence(["Just some random text with no signals"])
+        assert len(results) == 0
+
+    def test_evidence_is_strong(self):
+        from aiciv_mind.verification import Evidence
+        strong = Evidence("Tests pass", "test_pass", confidence=0.9)
+        weak = Evidence("Looks right", "manual_check", confidence=0.4)
+        assert strong.is_strong() is True
+        assert weak.is_strong() is False
+
+    def test_evidence_api_strong(self):
+        from aiciv_mind.verification import Evidence
+        e = Evidence("API returned 200", "api_response", confidence=0.8)
+        assert e.is_strong() is True
+
+    def test_evidence_file_written_not_strong(self):
+        from aiciv_mind.verification import Evidence
+        e = Evidence("File written", "file_written", confidence=0.8)
+        assert e.is_strong() is False  # file_written is not in strong types
+
+
+class TestCompletionSignalDetection:
+    """Tests for detect_completion_signal."""
+
+    def test_detects_done(self):
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("All done!") is True
+
+    def test_detects_shipped(self):
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("The feature is shipped to production") is True
+
+    def test_no_signal(self):
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("I'm still working on this") is False
+
+    def test_case_insensitive(self):
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("TASK COMPLETE") is True
+
+    def test_detects_merged(self):
+        from aiciv_mind.verification import detect_completion_signal
+        assert detect_completion_signal("PR merged successfully") is True
+
+
+# ---------------------------------------------------------------------------
+# ContextManager — boot, search, compaction, circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestContextManagerBoot:
+    """ContextManager.format_boot_context tests."""
+
+    def test_empty_boot_context(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(session_id="s-1", session_count=0, agent_id="test")
+        result = cm.format_boot_context(boot)
+        # Only header, no meaningful content → empty
+        assert result == ""
+
+    def test_boot_with_identity(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(
+            session_id="s-2", session_count=5, agent_id="test",
+            identity_memories=[{"title": "My Role", "content": "I am a research agent"}],
+        )
+        result = cm.format_boot_context(boot)
+        assert "My Role" in result
+        assert "research agent" in result
+        assert "Session ID: s-2" in result
+
+    def test_boot_with_handoff(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(
+            session_id="s-3", session_count=10, agent_id="test",
+            handoff_memory={"content": "Last session: deployed auth v2"},
+        )
+        result = cm.format_boot_context(boot)
+        assert "Previous Session Handoff" in result
+        assert "deployed auth v2" in result
+
+    def test_boot_with_pinned(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(
+            session_id="s-4", session_count=1,
+            pinned_memories=[{"title": "Critical", "content": "Never delete prod DB"}],
+        )
+        result = cm.format_boot_context(boot)
+        assert "Pinned Context" in result
+        assert "Never delete prod DB" in result
+
+    def test_boot_with_evolution(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(
+            session_id="s-5", session_count=3,
+            evolution_trajectory="Developing capability in reasoning",
+        )
+        result = cm.format_boot_context(boot)
+        assert "Evolution Trajectory" in result
+
+    def test_boot_with_top_by_depth(self):
+        from aiciv_mind.context_manager import ContextManager
+        from aiciv_mind.session_store import BootContext
+        cm = ContextManager()
+        boot = BootContext(
+            session_id="s-6", session_count=2,
+            top_by_depth_memories=[
+                {"title": "Core Skill", "content": "Pattern matching", "access_count": 42},
+            ],
+        )
+        result = cm.format_boot_context(boot)
+        assert "Core Knowledge" in result
+        assert "accessed 42x" in result
+
+
+class TestContextManagerSearch:
+    """ContextManager.format_search_results tests."""
+
+    def test_empty_results(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        assert cm.format_search_results([]) == ""
+
+    def test_formats_results(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        results = [
+            {"title": "Auth Pattern", "content": "Use JWT with Ed25519", "created_at": "2026-03-01"},
+        ]
+        text = cm.format_search_results(results)
+        assert "Auth Pattern" in text
+        assert "JWT with Ed25519" in text
+        assert "2026-03-01" in text
+        assert "HINTS, not facts" in text
+
+    def test_respects_max_memories(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager(max_context_memories=2)
+        results = [
+            {"title": f"M{i}", "content": f"Content {i}", "created_at": "2026-01-01"}
+            for i in range(10)
+        ]
+        text = cm.format_search_results(results)
+        # Should include at most 2 memories
+        assert text.count("###") <= 2
+
+    def test_respects_token_budget(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager(model_max_tokens=100)  # Tiny budget
+        results = [
+            {"title": "Big", "content": "x" * 10000, "created_at": "2026-01-01"},
+        ]
+        text = cm.format_search_results(results)
+        # Either empty (budget exceeded) or truncated
+        assert len(text) < 10000
+
+
+class TestContextManagerCompaction:
+    """ContextManager compaction and circuit breaker tests."""
+
+    def _make_messages(self, n: int) -> list:
+        msgs = []
+        for i in range(n):
+            role = "user" if i % 2 == 0 else "assistant"
+            msgs.append({"role": role, "content": f"Message {i} " + "x" * 100})
+        return msgs
+
+    def test_should_compact_few_messages(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        msgs = self._make_messages(4)
+        assert cm.should_compact(msgs, max_tokens=100) is False
+
+    def test_should_compact_many_messages(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        msgs = self._make_messages(20)
+        # Each msg ~108 chars, 20 msgs = ~2160 chars = ~540 tokens
+        assert cm.should_compact(msgs, max_tokens=100) is True
+
+    def test_compact_preserves_recent(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        msgs = self._make_messages(12)
+        compacted, summary = cm.compact_history(msgs, preserve_recent=4)
+        # Should have summary pair (2) + recent (4) = 6
+        assert len(compacted) <= 6 + 1  # May be slightly different depending on split logic
+        assert "COMPACTED" in compacted[0]["content"]
+
+    def test_compact_too_few_messages(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        msgs = self._make_messages(4)
+        compacted, summary = cm.compact_history(msgs, preserve_recent=4)
+        assert compacted == msgs  # Not enough to compact
+
+    def test_circuit_breaker_disables_compaction(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        # Trigger 3 failures by passing something that will cause _do_compact to fail
+        for _ in range(3):
+            cm._consecutive_compaction_failures += 1
+        cm._compaction_disabled = True
+        msgs = self._make_messages(20)
+        assert cm.should_compact(msgs, max_tokens=1) is False
+
+    def test_estimate_tokens(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager()
+        assert cm.estimate_tokens("abcd") == 1
+        assert cm.estimate_tokens("a" * 100) == 25
+
+    def test_has_budget(self):
+        from aiciv_mind.context_manager import ContextManager
+        cm = ContextManager(model_max_tokens=100)
+        # Budget = 100 * 0.8 * 4 = 320 chars
+        assert cm.has_budget(100) is True
+        assert cm.has_budget(400) is False
+
+    def test_extract_message_text_str(self):
+        from aiciv_mind.context_manager import ContextManager
+        assert ContextManager._extract_message_text({"content": "hello"}) == "hello"
+
+    def test_extract_message_text_list_of_dicts(self):
+        from aiciv_mind.context_manager import ContextManager
+        msg = {"content": [{"type": "text", "text": "hello"}, {"type": "text", "text": " world"}]}
+        result = ContextManager._extract_message_text(msg)
+        assert "hello" in result
+        assert "world" in result
+
+    def test_message_chars_str(self):
+        from aiciv_mind.context_manager import ContextManager
+        assert ContextManager._message_chars({"content": "abc"}) == 3
+
+    def test_message_chars_list(self):
+        from aiciv_mind.context_manager import ContextManager
+        msg = {"content": [{"type": "text", "text": "abcdef"}]}
+        chars = ContextManager._message_chars(msg)
+        assert chars >= 6
+
+
+# ---------------------------------------------------------------------------
+# SuiteClient / HubClient structural tests
+# ---------------------------------------------------------------------------
+
+
+class TestSuiteClientStructure:
+    """SuiteClient init and error path tests (no network)."""
+
+    def test_init_defaults(self):
+        from aiciv_mind.suite.client import SuiteClient
+        client = SuiteClient()
+        assert client.auth is None
+        assert client.hub is None
+
+    def test_get_token_before_connect_raises(self):
+        import asyncio
+        from aiciv_mind.suite.client import SuiteClient
+        client = SuiteClient()
+        with pytest.raises(RuntimeError, match="not initialized"):
+            asyncio.run(client.get_token())
+
+    def test_close_before_connect_is_safe(self):
+        import asyncio
+        from aiciv_mind.suite.client import SuiteClient
+        client = SuiteClient()
+        # Should not raise even if nothing was connected
+        asyncio.run(client.close())
+
+    def test_connect_missing_keypair_raises(self):
+        import asyncio
+        from aiciv_mind.suite.client import SuiteClient
+        with pytest.raises((FileNotFoundError, Exception)):
+            asyncio.run(SuiteClient.connect("/nonexistent/keypair.json", eager_auth=False))
+
+
+class TestHubClientStructure:
+    """HubClient method signatures and URL construction."""
+
+    def test_hub_client_has_expected_methods(self):
+        from aiciv_mind.suite.hub import HubClient
+        assert hasattr(HubClient, "list_threads")
+        assert hasattr(HubClient, "create_thread")
+        assert hasattr(HubClient, "reply_to_thread")
+        assert hasattr(HubClient, "list_rooms")
+        assert hasattr(HubClient, "get_feed")
+        assert hasattr(HubClient, "close")
+
+
+# ---------------------------------------------------------------------------
+# SubMind tools — definitions and handler error paths
+# ---------------------------------------------------------------------------
+
+
+class TestSubMindToolDefinitions:
+    """Verify submind tool registration definitions."""
+
+    def test_spawn_definition_fields(self):
+        from aiciv_mind.tools.submind_tools import _SPAWN_DEFINITION
+        assert _SPAWN_DEFINITION["name"] == "spawn_submind"
+        schema = _SPAWN_DEFINITION["input_schema"]
+        assert "mind_id" in schema["properties"]
+        assert "manifest_path" in schema["properties"]
+        assert "mind_id" in schema["required"]
+        assert "manifest_path" in schema["required"]
+
+    def test_send_definition_fields(self):
+        from aiciv_mind.tools.submind_tools import _SEND_DEFINITION
+        assert _SEND_DEFINITION["name"] == "send_to_submind"
+        schema = _SEND_DEFINITION["input_schema"]
+        assert "mind_id" in schema["properties"]
+        assert "task" in schema["properties"]
+        assert "timeout" in schema["properties"]
+
+    def test_spawn_handler_empty_mind_id(self):
+        import asyncio
+        from aiciv_mind.tools.submind_tools import _make_spawn_handler
+        handler = _make_spawn_handler(None)
+        result = asyncio.run(handler({"mind_id": "", "manifest_path": "/x"}))
+        assert "ERROR" in result
+
+    def test_spawn_handler_empty_manifest(self):
+        import asyncio
+        from aiciv_mind.tools.submind_tools import _make_spawn_handler
+        handler = _make_spawn_handler(None)
+        result = asyncio.run(handler({"mind_id": "sub-1", "manifest_path": ""}))
+        assert "ERROR" in result
+
+    def test_send_handler_empty_mind_id(self):
+        import asyncio
+        from aiciv_mind.tools.submind_tools import _make_send_handler
+        handler = _make_send_handler(None, "primary")
+        result = asyncio.run(handler({"mind_id": "", "task": "do something"}))
+        assert "ERROR" in result
+
+    def test_send_handler_empty_task(self):
+        import asyncio
+        from aiciv_mind.tools.submind_tools import _make_send_handler
+        handler = _make_send_handler(None, "primary")
+        result = asyncio.run(handler({"mind_id": "sub-1", "task": ""}))
+        assert "ERROR" in result
+
+    def test_register_submind_tools(self):
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.submind_tools import register_submind_tools
+
+        class MockSpawner:
+            pass
+
+        class MockBus:
+            def on(self, *a, **kw): pass
+
+        registry = ToolRegistry()
+        register_submind_tools(registry, MockSpawner(), MockBus(), "primary")
+        assert "spawn_submind" in registry.names()
+        assert "send_to_submind" in registry.names()
+
+
+# ---------------------------------------------------------------------------
+# IPC bus structural tests
+# ---------------------------------------------------------------------------
+
+
+class TestPrimaryBusStructure:
+    """PrimaryBus structural tests (no network)."""
+
+    def test_init_defaults(self):
+        from aiciv_mind.ipc.primary_bus import PrimaryBus
+        bus = PrimaryBus()
+        assert bus._running is False
+        assert bus._recv_task is None
+        bus._router.close(linger=0)
+        bus._ctx.term()
+
+    def test_handler_registration(self):
+        from aiciv_mind.ipc.primary_bus import PrimaryBus
+
+        async def dummy(msg): pass
+
+        bus = PrimaryBus()
+        bus.on("task", dummy)
+        bus.on("task", dummy)  # Multiple handlers per type
+        assert len(bus._handlers["task"]) == 2
+        bus._router.close(linger=0)
+        bus._ctx.term()
+
+    def test_close_sets_running_false(self):
+        from aiciv_mind.ipc.primary_bus import PrimaryBus
+        bus = PrimaryBus()
+        bus._running = True
+        bus.close()
+        assert bus._running is False
+
+
+class TestSubMindBusStructure:
+    """SubMindBus structural tests (no network)."""
+
+    def test_init_sets_identity(self):
+        import zmq
+        from aiciv_mind.ipc.submind_bus import SubMindBus
+        bus = SubMindBus("research-lead")
+        assert bus.mind_id == "research-lead"
+        identity = bus._dealer.getsockopt(zmq.IDENTITY)
+        assert identity == b"research-lead"
+        bus._dealer.close(linger=0)
+        bus._ctx.term()
+
+    def test_handler_registration(self):
+        from aiciv_mind.ipc.submind_bus import SubMindBus
+
+        async def dummy(msg): pass
+
+        bus = SubMindBus("test-mind")
+        bus.on("shutdown", dummy)
+        assert len(bus._handlers["shutdown"]) == 1
+        bus._dealer.close(linger=0)
+        bus._ctx.term()
+
+    def test_close_sets_running_false(self):
+        from aiciv_mind.ipc.submind_bus import SubMindBus
+        bus = SubMindBus("test-mind-2")
+        bus._running = True
+        bus.close()
+        assert bus._running is False
+
+
+# ---------------------------------------------------------------------------
+# Red Team question set integrity
+# ---------------------------------------------------------------------------
+
+
+class TestRedTeamQuestions:
+    """Verify the Red Team question set is intact."""
+
+    def test_eight_questions(self):
+        from aiciv_mind.verification import _RED_TEAM_QUESTIONS
+        assert len(_RED_TEAM_QUESTIONS) == 8
+
+    def test_each_question_is_tuple(self):
+        from aiciv_mind.verification import _RED_TEAM_QUESTIONS
+        for q in _RED_TEAM_QUESTIONS:
+            assert isinstance(q, tuple)
+            assert len(q) == 2
+            assert isinstance(q[0], str) and isinstance(q[1], str)
+
+    def test_evidence_patterns_cover_three_types(self):
+        from aiciv_mind.verification import _EVIDENCE_PATTERNS
+        assert "test_pass" in _EVIDENCE_PATTERNS
+        assert "file_written" in _EVIDENCE_PATTERNS
+        assert "api_response" in _EVIDENCE_PATTERNS
+
+    def test_completion_signals_exist(self):
+        from aiciv_mind.verification import _COMPLETION_SIGNALS
+        assert len(_COMPLETION_SIGNALS) >= 10
+        assert "done" in _COMPLETION_SIGNALS
+        assert "deployed" in _COMPLETION_SIGNALS
