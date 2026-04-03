@@ -9431,3 +9431,462 @@ class TestToolRegistryDefaultCombos:
         hooks = HookRunner()
         reg.set_hooks(hooks)
         assert reg.get_hooks() is hooks
+
+
+# ===========================================================================
+# Round 23 — Continuity tools (evolution log), graph tools (memory links),
+#             pattern tools (loop1 scan), integration tests, edge cases
+# ===========================================================================
+
+
+class TestContinuityToolsR23:
+    """Integration tests for evolution log tools — write, read, trajectory, update outcome."""
+
+    def test_register_continuity_tools(self, memory_store):
+        """register_continuity_tools() registers 4 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.continuity_tools import register_continuity_tools
+        reg = ToolRegistry()
+        register_continuity_tools(reg, memory_store, agent_id="test")
+        names = reg.names()
+        assert "evolution_log_write" in names
+        assert "evolution_log_read" in names
+        assert "evolution_trajectory" in names
+        assert "evolution_update_outcome" in names
+        assert reg.is_read_only("evolution_log_write") is False
+        assert reg.is_read_only("evolution_log_read") is True
+
+    def test_evolution_write_and_read(self, memory_store):
+        """Write an evolution entry, then read it back."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler, _make_read_handler
+        writer = _make_write_handler(memory_store, "test-agent")
+        reader = _make_read_handler(memory_store, "test-agent")
+
+        result = writer({
+            "change_type": "skill_added",
+            "description": "Added battle testing skill",
+            "reasoning": "Need comprehensive test coverage",
+            "tags": "testing,quality",
+        })
+        assert "Evolution logged" in result
+        assert "skill_added" in result
+
+        read_result = reader({"limit": 5})
+        assert "battle testing" in read_result
+        assert "skill_added" in read_result
+
+    def test_evolution_write_missing_fields(self, memory_store):
+        """Write handler returns error when required fields missing."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler
+        writer = _make_write_handler(memory_store, "test")
+        result = writer({"change_type": "", "description": "x", "reasoning": "y"})
+        assert "ERROR" in result
+
+    def test_evolution_read_empty(self, memory_store):
+        """Read handler returns message when no entries exist."""
+        from aiciv_mind.tools.continuity_tools import _make_read_handler
+        reader = _make_read_handler(memory_store, "nonexistent-agent")
+        result = reader({})
+        assert "No evolution entries" in result
+
+    def test_evolution_read_filtered_by_type(self, memory_store):
+        """Read handler filters by change_type."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler, _make_read_handler
+        writer = _make_write_handler(memory_store, "filter-test")
+        writer({"change_type": "skill_added", "description": "Skill A", "reasoning": "R"})
+        writer({"change_type": "behavioral_shift", "description": "Behavior B", "reasoning": "R"})
+
+        reader = _make_read_handler(memory_store, "filter-test")
+        result = reader({"change_type": "skill_added"})
+        assert "Skill A" in result
+        # behavioral_shift should not appear when filtering for skill_added
+        assert "Behavior B" not in result
+
+    def test_evolution_trajectory(self, memory_store):
+        """Trajectory handler returns synthesis text."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler, _make_trajectory_handler
+        writer = _make_write_handler(memory_store, "traj-test")
+        writer({"change_type": "insight_crystallized", "description": "Memory is existential", "reasoning": "Civilization depends on it"})
+
+        traj = _make_trajectory_handler(memory_store, "traj-test")
+        result = traj({"limit": 5})
+        # Returns trajectory text or "No evolution entries"
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_evolution_update_outcome(self, memory_store):
+        """Update outcome changes the outcome field."""
+        from aiciv_mind.tools.continuity_tools import _make_write_handler, _make_update_outcome_handler
+        writer = _make_write_handler(memory_store, "outcome-test")
+        write_result = writer({
+            "change_type": "skill_added",
+            "description": "Test skill",
+            "reasoning": "Testing",
+        })
+        # Extract evolution ID from result
+        eid = write_result.split(":")[1].strip().split(" ")[0]
+
+        updater = _make_update_outcome_handler(memory_store)
+        update_result = updater({"evolution_id": eid, "outcome": "positive"})
+        assert "positive" in update_result
+
+    def test_evolution_update_outcome_invalid(self, memory_store):
+        """Update outcome rejects invalid outcome values."""
+        from aiciv_mind.tools.continuity_tools import _make_update_outcome_handler
+        updater = _make_update_outcome_handler(memory_store)
+        result = updater({"evolution_id": "some-id", "outcome": "amazing"})
+        assert "ERROR" in result
+
+    def test_evolution_update_outcome_missing_id(self, memory_store):
+        """Update outcome returns error for missing evolution_id."""
+        from aiciv_mind.tools.continuity_tools import _make_update_outcome_handler
+        updater = _make_update_outcome_handler(memory_store)
+        result = updater({"evolution_id": "", "outcome": "positive"})
+        assert "ERROR" in result
+
+
+class TestGraphToolsR23:
+    """Integration tests for memory graph tools — link, graph, conflicts, superseded."""
+
+    def test_register_graph_tools(self, memory_store):
+        """register_graph_tools() registers 4 tools."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.graph_tools import register_graph_tools
+        reg = ToolRegistry()
+        register_graph_tools(reg, memory_store)
+        names = reg.names()
+        assert "memory_link" in names
+        assert "memory_graph" in names
+        assert "memory_conflicts" in names
+        assert "memory_superseded" in names
+
+    def test_link_memories_and_graph(self, memory_store):
+        """Create two memories, link them, then view the graph."""
+        from aiciv_mind.memory import Memory
+        from aiciv_mind.tools.graph_tools import _make_link_handler, _make_graph_handler
+
+        mem1_id = memory_store.store(Memory(
+            agent_id="graph-test", title="Auth Design", content="JWT tokens",
+            memory_type="learning",
+        ))
+        mem2_id = memory_store.store(Memory(
+            agent_id="graph-test", title="Auth Implementation", content="Implemented JWT",
+            memory_type="learning",
+        ))
+
+        linker = _make_link_handler(memory_store)
+        result = linker({
+            "source_id": mem2_id, "target_id": mem1_id,
+            "link_type": "references", "reason": "Implementation references the design",
+        })
+        assert "Link created" in result
+        assert "references" in result
+
+        grapher = _make_graph_handler(memory_store)
+        graph_result = grapher({"memory_id": mem1_id})
+        assert "Memory Graph" in graph_result
+        assert "Auth Design" in graph_result
+
+    def test_link_invalid_type(self, memory_store):
+        """link handler rejects invalid link_type."""
+        from aiciv_mind.tools.graph_tools import _make_link_handler
+        linker = _make_link_handler(memory_store)
+        result = linker({
+            "source_id": "a", "target_id": "b", "link_type": "invalid_type",
+        })
+        assert "ERROR" in result
+        assert "link_type" in result
+
+    def test_link_missing_ids(self, memory_store):
+        """link handler requires both source_id and target_id."""
+        from aiciv_mind.tools.graph_tools import _make_link_handler
+        linker = _make_link_handler(memory_store)
+        result = linker({"source_id": "", "target_id": "b", "link_type": "references"})
+        assert "ERROR" in result
+
+    def test_graph_missing_id(self, memory_store):
+        """graph handler requires memory_id."""
+        from aiciv_mind.tools.graph_tools import _make_graph_handler
+        grapher = _make_graph_handler(memory_store)
+        result = grapher({"memory_id": ""})
+        assert "ERROR" in result
+
+    def test_conflicts_handler_empty(self, memory_store):
+        """conflicts handler returns message when no conflicts exist."""
+        from aiciv_mind.tools.graph_tools import _make_conflicts_handler
+        handler = _make_conflicts_handler(memory_store)
+        result = handler({})
+        assert "No unresolved" in result
+
+    def test_superseded_handler_empty(self, memory_store):
+        """superseded handler returns message when no superseded memories."""
+        from aiciv_mind.tools.graph_tools import _make_superseded_handler
+        handler = _make_superseded_handler(memory_store)
+        result = handler({})
+        assert "No superseded" in result
+
+    def test_link_types_validated(self):
+        """Valid link types are supersedes, references, conflicts, compounds."""
+        from aiciv_mind.tools.graph_tools import _LINK_DEFINITION
+        desc = _LINK_DEFINITION["input_schema"]["properties"]["link_type"]["description"]
+        for lt in ("supersedes", "references", "conflicts", "compounds"):
+            assert lt in desc
+
+
+class TestPatternToolsR23:
+    """Integration tests for loop1_pattern_scan tool."""
+
+    def test_register_pattern_tools(self, memory_store):
+        """register_pattern_tools() registers loop1_pattern_scan."""
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.pattern_tools import register_pattern_tools
+        reg = ToolRegistry()
+        register_pattern_tools(reg, memory_store, agent_id="test")
+        assert "loop1_pattern_scan" in reg.names()
+        assert reg.is_read_only("loop1_pattern_scan") is True
+
+    def test_scan_no_loop1_memories(self, memory_store):
+        """Scan returns message when no Loop 1 memories exist."""
+        from aiciv_mind.tools.pattern_tools import _make_scan_handler
+        handler = _make_scan_handler(memory_store, "empty-agent")
+        result = handler({"threshold": 3, "lookback": 50})
+        assert "No Loop 1 memories" in result
+
+    def test_scan_with_loop1_errors_below_threshold(self, memory_store):
+        """Scan below threshold reports no patterns."""
+        import json
+        from aiciv_mind.memory import Memory
+        from aiciv_mind.tools.pattern_tools import _make_scan_handler
+
+        # Store 2 errors (below threshold of 3)
+        for i in range(2):
+            memory_store.store(Memory(
+                agent_id="pattern-test",
+                title=f"bash error {i}",
+                content="Errors: bash command failed\nOutput: permission denied",
+                memory_type="error",
+                tags=["loop-1", "bash"],
+            ))
+
+        handler = _make_scan_handler(memory_store, "pattern-test")
+        result = handler({"threshold": 3, "lookback": 50})
+        assert "No repeated patterns" in result or "No Loop 1" in result
+
+    def test_scan_with_loop1_errors_above_threshold(self, memory_store):
+        """Scan above threshold detects patterns."""
+        import json
+        from aiciv_mind.memory import Memory
+        from aiciv_mind.tools.pattern_tools import _make_scan_handler
+
+        # Store 4 errors (above threshold of 3)
+        for i in range(4):
+            memory_store.store(Memory(
+                agent_id="pattern-detect",
+                title=f"git error {i}",
+                content="Errors: git push refused\nOutput: rejected",
+                memory_type="error",
+                tags=["loop-1", "git_push"],
+            ))
+
+        handler = _make_scan_handler(memory_store, "pattern-detect")
+        result = handler({"threshold": 3, "lookback": 50})
+        assert "Pattern Detected" in result or "No repeated patterns" in result
+
+    def test_has_loop1_tag_true(self):
+        """_has_loop1_tag returns True for loop-1 tagged memories."""
+        import json
+        from aiciv_mind.tools.pattern_tools import _has_loop1_tag
+        mem = {"tags": json.dumps(["loop-1", "bash"])}
+        assert _has_loop1_tag(mem) is True
+
+    def test_has_loop1_tag_false(self):
+        """_has_loop1_tag returns False for non-loop-1 memories."""
+        import json
+        from aiciv_mind.tools.pattern_tools import _has_loop1_tag
+        mem = {"tags": json.dumps(["general"])}
+        assert _has_loop1_tag(mem) is False
+
+    def test_has_loop1_tag_bad_json(self):
+        """_has_loop1_tag handles malformed JSON gracefully."""
+        from aiciv_mind.tools.pattern_tools import _has_loop1_tag
+        mem = {"tags": "not valid json"}
+        assert _has_loop1_tag(mem) is False
+
+    def test_extract_error_line(self):
+        """_extract_error_line extracts error lines from content."""
+        from aiciv_mind.tools.pattern_tools import _extract_error_line
+        content = "Task: do thing\nErrors: bash command failed with exit 1\nOutput: done"
+        result = _extract_error_line(content)
+        assert result is not None
+        assert "bash command failed" in result
+
+    def test_extract_error_line_no_errors(self):
+        """_extract_error_line returns None when errors are 'none'."""
+        from aiciv_mind.tools.pattern_tools import _extract_error_line
+        content = "Task: do thing\nErrors: none\nOutput: done"
+        result = _extract_error_line(content)
+        assert result is None
+
+
+class TestMemoryIntegrationR23:
+    """Integration tests — end-to-end memory write, search, link, evolution cycle."""
+
+    def test_write_search_link_cycle(self, memory_store):
+        """Full cycle: write two memories, search for them, link them."""
+        import asyncio
+        from aiciv_mind.memory import Memory
+        from aiciv_mind.tools.memory_tools import _make_search_handler, _make_write_handler
+        from aiciv_mind.tools.graph_tools import _make_link_handler
+
+        # Write two related memories
+        id1 = memory_store.store(Memory(
+            agent_id="cycle-test", title="Hub API discovered",
+            content="Found 7 group endpoints including presence and feed",
+            memory_type="learning", tags=["hub", "api"],
+        ))
+        id2 = memory_store.store(Memory(
+            agent_id="cycle-test", title="Hub SDK design",
+            content="Designed Python SDK wrapping the 7 endpoints",
+            memory_type="decision", tags=["hub", "sdk"],
+        ))
+
+        # Search for them
+        searcher = _make_search_handler(memory_store)
+        result = searcher({"query": "hub api endpoints", "agent_id": "cycle-test"})
+        assert "Hub" in result
+
+        # Link them
+        linker = _make_link_handler(memory_store)
+        link_result = linker({
+            "source_id": id2, "target_id": id1,
+            "link_type": "references",
+        })
+        assert "Link created" in link_result
+
+    def test_memory_depth_scoring_on_access(self, memory_store):
+        """Accessing a memory via search increments its access count."""
+        from aiciv_mind.memory import Memory
+        from aiciv_mind.tools.memory_tools import _make_search_handler
+
+        mem_id = memory_store.store(Memory(
+            agent_id="depth-test", title="Frequently accessed",
+            content="This memory should get deeper over time",
+            memory_type="learning",
+        ))
+
+        searcher = _make_search_handler(memory_store)
+        # Search multiple times
+        for _ in range(3):
+            searcher({"query": "frequently accessed", "agent_id": "depth-test"})
+
+        # Check access count increased
+        row = memory_store._conn.execute(
+            "SELECT access_count FROM memories WHERE id = ?", (mem_id,)
+        ).fetchone()
+        assert row is not None
+        assert row[0] >= 3
+
+    def test_hooks_integration_with_execute(self):
+        """Full integration: hooks block tool, tool returns BLOCKED message."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner
+
+        reg = ToolRegistry()
+        hooks = HookRunner(blocked_tools=["dangerous"])
+        reg.set_hooks(hooks)
+        reg.register("dangerous", {"name": "dangerous"}, lambda inp: "should not see this")
+        reg.register("safe", {"name": "safe"}, lambda inp: "visible")
+
+        blocked = asyncio.run(reg.execute("dangerous", {}))
+        assert "BLOCKED" in blocked
+
+        safe = asyncio.run(reg.execute("safe", {}))
+        assert safe == "visible"
+
+    def test_post_hook_modifies_output(self):
+        """Post-hook can modify tool output."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        from aiciv_mind.tools.hooks import HookRunner, HookResult
+
+        class AuditHooks(HookRunner):
+            def post_tool_use(self, tool_name, tool_input, output, is_error):
+                result = super().post_tool_use(tool_name, tool_input, output, is_error)
+                # Modify output to add audit tag
+                return HookResult(allowed=True, message="", modified_output=f"[AUDITED] {output}")
+
+        reg = ToolRegistry()
+        hooks = AuditHooks()
+        reg.set_hooks(hooks)
+        reg.register("test", {"name": "test"}, lambda inp: "original output")
+
+        result = asyncio.run(reg.execute("test", {}))
+        assert "[AUDITED] original output" == result
+
+
+class TestEdgeCasesR23:
+    """Edge cases across multiple modules."""
+
+    def test_tool_handler_returns_non_string(self):
+        """execute() converts non-string handler results to string."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("number_tool", {"name": "number_tool"}, lambda inp: 42)
+        result = asyncio.run(reg.execute("number_tool", {}))
+        assert result == "42"
+
+    def test_tool_handler_returns_none(self):
+        """execute() converts None to 'None' string."""
+        import asyncio
+        from aiciv_mind.tools import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("none_tool", {"name": "none_tool"}, lambda inp: None)
+        result = asyncio.run(reg.execute("none_tool", {}))
+        assert result == "None"
+
+    def test_planning_weight_sum_is_one(self):
+        """Planning signal weights sum to 1.0."""
+        from aiciv_mind.planning import _WEIGHTS
+        total = sum(_WEIGHTS.values())
+        assert abs(total - 1.0) < 0.001
+
+    def test_complexity_keywords_are_lowercase(self):
+        """All complexity keywords are lowercase (for matching)."""
+        from aiciv_mind.planning import _COMPLEX_KEYWORDS, _NOVELTY_KEYWORDS, _IRREVERSIBLE_KEYWORDS
+        for kw in _COMPLEX_KEYWORDS:
+            assert kw == kw.lower()
+        for kw in _NOVELTY_KEYWORDS:
+            assert kw == kw.lower()
+        for kw in _IRREVERSIBLE_KEYWORDS:
+            assert kw == kw.lower()
+
+    def test_memory_store_skill_operations(self, memory_store):
+        """MemoryStore skill CRUD: register, get, touch, list, search."""
+        memory_store.register_skill("edge-skill", "Edge Skill", "edge", "/test/path")
+        skill = memory_store.get_skill("edge-skill")
+        assert skill is not None
+        assert skill["usage_count"] == 0
+
+        memory_store.touch_skill("edge-skill")
+        skill = memory_store.get_skill("edge-skill")
+        assert skill["usage_count"] == 1
+
+        skills = memory_store.list_skills()
+        assert any(s["skill_id"] == "edge-skill" for s in skills)
+
+        results = memory_store.search_skills("edge")
+        assert len(results) >= 1
+
+    def test_scrub_env_with_empty_env(self):
+        """scrub_env handles empty environment dict."""
+        from aiciv_mind.security import scrub_env
+        result = scrub_env(base_env={})
+        assert result == {}
+
+    def test_classify_task_empty_string(self):
+        """classify_task handles empty task string."""
+        from aiciv_mind.planning import classify_task, TaskComplexity
+        result = classify_task("")
+        assert result.complexity == TaskComplexity.TRIVIAL
