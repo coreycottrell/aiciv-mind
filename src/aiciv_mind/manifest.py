@@ -30,6 +30,7 @@ class ModelConfig(BaseModel):
     preferred: str = "ollama/qwen2.5-coder:14b"
     temperature: float = 0.7
     max_tokens: int = 4096
+    call_timeout_s: float = 120.0  # Max seconds per model API call (0 = no timeout)
 
 
 class AuthConfig(BaseModel):

@@ -6,6 +6,7 @@ Uses unittest.mock to avoid any live API calls.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -811,3 +812,101 @@ async def test_read_only_tools_can_run_concurrently(minimal_manifest, memory_sto
     contents = [r["content"] for r in result_msgs[0]["content"]]
     assert "a_result" in contents
     assert "b_result" in contents
+
+
+# ---------------------------------------------------------------------------
+# Tests: model call timeout
+# ---------------------------------------------------------------------------
+
+
+async def test_model_call_timeout_raises(memory_store):
+    """When model call exceeds call_timeout_s, TimeoutError propagates
+    (the daemon handler decides retry/skip — not the mind loop)."""
+    manifest = MindManifest(
+        mind_id="timeout-test",
+        display_name="Timeout Test Mind",
+        role="worker",
+        system_prompt="You are a test agent.",
+        model=ModelConfig(preferred="ollama/test", call_timeout_s=0.1),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+    )
+    mind = Mind(manifest=manifest, memory=memory_store)
+
+    async def slow_create(**kwargs):
+        await asyncio.sleep(5)  # Way longer than 0.1s timeout
+        return make_response(text="Never reached")
+
+    with patch.object(
+        mind._client.messages, "create", side_effect=slow_create,
+    ):
+        with pytest.raises(TimeoutError):
+            await mind.run_task("Do something slow", inject_memories=False)
+
+    # After timeout: orphaned user message was popped (no alternation corruption)
+    if mind._messages:
+        assert mind._messages[-1].get("role") != "user"
+
+
+async def test_model_call_no_timeout_when_zero(minimal_manifest, memory_store):
+    """When call_timeout_s=0, no timeout wrapper is applied."""
+    minimal_manifest.model.call_timeout_s = 0
+    mind = Mind(manifest=minimal_manifest, memory=memory_store)
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_response(text="Fast response"),
+    ):
+        result = await mind.run_task("Quick task", inject_memories=False)
+
+    assert result == "Fast response"
+
+
+# ---------------------------------------------------------------------------
+# Tests: compaction threshold respects model context window
+# ---------------------------------------------------------------------------
+
+
+async def test_compaction_uses_model_limit_when_lower(memory_store):
+    """Compaction triggers at 75% of model.max_tokens when that's lower
+    than compaction.max_context_tokens (the Root stall fix)."""
+    from aiciv_mind.context_manager import ContextManager
+    from aiciv_mind.manifest import CompactionConfig
+
+    manifest = MindManifest(
+        mind_id="compact-test",
+        display_name="Compact Test Mind",
+        role="worker",
+        system_prompt="You are a test agent.",
+        model=ModelConfig(preferred="ollama/test", max_tokens=16384),
+        auth=AuthConfig(civ_id="acg", keypair_path="/tmp/test.json"),
+        memory=MemoryConfig(db_path=":memory:", auto_search_before_task=False),
+        compaction=CompactionConfig(
+            enabled=True,
+            max_context_tokens=50000,  # Default — way higher than model
+            preserve_recent=4,
+        ),
+    )
+    ctx_mgr = ContextManager(model_max_tokens=16384)
+    mind = Mind(manifest=manifest, memory=memory_store, context_manager=ctx_mgr)
+
+    # 75% of 16384 = 12288 tokens. At 4 chars/token, that's ~49152 chars.
+    # Fill messages with enough content to exceed this threshold.
+    for i in range(20):
+        mind._messages.append({"role": "user", "content": "x" * 3000})
+        mind._messages.append({"role": "assistant", "content": "y" * 3000})
+
+    # Total chars: 40 messages × 3000 chars = 120000 chars ≈ 30000 tokens
+    # 30000 > 12288 (75% of 16384) → compaction SHOULD trigger
+    # 30000 < 50000 → without the fix, compaction would NOT trigger
+
+    with patch.object(
+        mind._client.messages, "create", new_callable=AsyncMock,
+        return_value=make_response(text="Done after compaction"),
+    ):
+        result = await mind.run_task("Test compaction", inject_memories=False)
+
+    # After compaction, messages should be drastically reduced:
+    # summary pair (2) + preserve_recent (4) + new user (1) + assistant (1) = 8
+    assert len(mind._messages) < 15  # Way less than the original 42
+    assert result == "Done after compaction"

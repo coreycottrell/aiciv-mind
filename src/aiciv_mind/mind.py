@@ -283,12 +283,19 @@ class Mind:
         while iteration < max_iterations and self._running:
             iteration += 1
 
-            # Compaction check: if messages exceed token threshold, compact
+            # Compaction check: if messages exceed token threshold, compact.
+            # Use the LOWER of compaction.max_context_tokens and 80% of model
+            # context window — prevents the "50K threshold vs 16K model" mismatch
+            # that caused Root's daemon stall (2026-04-02).
+            _compact_limit = self.manifest.compaction.max_context_tokens
+            if self.manifest.model.max_tokens > 0:
+                _model_limit = int(self.manifest.model.max_tokens * 0.75)
+                _compact_limit = min(_compact_limit, _model_limit)
             if (self.manifest.compaction.enabled
                     and self._context_manager
                     and self._context_manager.should_compact(
                         self._messages,
-                        self.manifest.compaction.max_context_tokens,
+                        _compact_limit,
                     )):
                 self._messages, self._compacted_summary = (
                     self._context_manager.compact_history(
@@ -304,7 +311,7 @@ class Mind:
                 )
 
             # Token budget awareness: warn when context pressure is high
-            if self._context_manager and iteration == 1:
+            if self._context_manager:
                 est_tokens = self._context_manager.estimate_tokens(
                     system_prompt + str(self._messages)
                 )
@@ -636,7 +643,21 @@ class Mind:
             kwargs["tools"] = tools_list
 
         t0 = time.monotonic()
-        response = await self._client.messages.create(**kwargs)
+        timeout = self.manifest.model.call_timeout_s
+        coro = self._client.messages.create(**kwargs)
+        if timeout > 0:
+            try:
+                response = await asyncio.wait_for(coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                logger.error(
+                    "[%s] Model call TIMED OUT after %.0fs (%dms). "
+                    "Context may be too large for model.",
+                    self.manifest.mind_id, timeout, latency_ms,
+                )
+                raise
+        else:
+            response = await coro
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         self._log_cache_stats(response)
