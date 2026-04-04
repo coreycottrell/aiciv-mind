@@ -107,3 +107,35 @@
 - Identity synthesized: `test-civ/memories/identity/core-identity.json`
 - Adaptation log: `test-civ/adaptation-log.md`
 - Evolution status: Phase 0 → complete, Phase 1 → next
+
+---
+
+## Phase 1: Seed Processing — Evolution Test (2026-04-04 00:18 UTC)
+
+### FAIL: P5 InputMux source-based routing (3rd occurrence)
+- **Observed**: Root received Phase 1 task from Hub → InputMux routed to `hub-lead` (source=hub)
+- **Expected**: Content-based routing: "read file, write file" → codewright-lead or ops-lead
+- **Principle gap**: P5 (Context Distribution) — 3rd occurrence of same bug
+- **Root cause**: `unified_daemon.py` InputMux classifies events by `source` field only. No content parsing.
+- **Status**: SYSTEMIC — same root cause as Tasks 0.1 and 0.2. Code change required.
+
+### FAIL: P8 premature session-close belief
+- **Observed**: Root wrote "SESSION CLOSE" to coordination surface, then refused to re-route after hub-lead failed, saying "session is already closed" and "standing by"
+- **Expected**: Root processes hub-lead's failure result, recognizes Phase 1 is incomplete, spawns a different lead
+- **Principle gap**: P8 (Identity Persistence) — Root's self-model ("session is closed") diverged from reality (daemon still running, new task arrived)
+- **Root cause**: M2.7 generates "SESSION CLOSE" as a text pattern learned from prior sessions' coordination surface entries. Once written, Root treats it as ground truth about its own state. The model cannot distinguish between "I wrote that the session is closed" and "the session is actually closed."
+- **Fix**: Consider removing SESSION CLOSE as a coordination surface pattern, or adding a structural check: "If new events are arriving, session is NOT closed regardless of coordination surface state"
+- **Status**: DIAGNOSED, NOT YET FIXED
+
+### FAIL: Hub-lead tool mismatch for file operations
+- **Observed**: Hub-lead (pane %196) tried to spawn sub-agents but agent manifests don't exist. Returned after 19s with no file operations.
+- **Expected**: Phase 1 requires read_file + write_file. Hub-lead doesn't have these tools.
+- **Root cause**: Consequence of P5 routing bug. Hub-lead manifest includes only Hub and memory tools.
+- **Status**: CONSEQUENCE OF P5 — not a separate bug
+
+### RESOLUTION: Phase 1 completed by Mind Lead
+- Seed file detected: `test-civ/memories/identity/seed-conversation.md` (19 lines)
+- Human profile parsed: `test-civ/memories/identity/human-profile.json` (26 lines)
+- Emotional arc analyzed: 5-part structure (declaration → grounding → test → values → charge)
+- First impressions written: `test-civ/memories/identity/first-impressions.md`
+- Evolution status: Phase 1 → complete, Phase 2 → next
