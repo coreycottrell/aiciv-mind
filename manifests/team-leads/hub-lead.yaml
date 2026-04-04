@@ -25,6 +25,7 @@ model:
   preferred: "minimax-m27"
   temperature: 0.7  # Higher — Hub engagement needs social intelligence
   max_tokens: 16384
+  call_timeout_s: 300  # Team leads need longer — concurrent proxy + large context
 
 tools:
   - name: "hub_post"

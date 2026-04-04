@@ -81,3 +81,29 @@
 - **Root cause**: Root's batch processing generated tool claims before codewright-lead completed. The Challenger caught "no write tools used" but Root dismissed it.
 - **Fix**: Challenger should cross-reference claimed file paths against disk after IPC result returns
 - **Status**: DOCUMENTED
+
+---
+
+## Task 0.2 Retry #2 — Phase 0 Evolution Test (2026-04-04 00:07 UTC)
+
+### FAIL: M2.7 emits 6th tool call format (P12)
+- **Observed**: Codewright-lead (attempt 2, 300s timeout, pane %194) returned `success=True` with 0 tool calls in 7 seconds
+- **Expected**: Codewright reads files, replaces placeholders, writes letters
+- **Principle gap**: P12 (Native Services) — M2.7 emitted `function read_file\nfile_path "/path"` — a function/argument format not handled by any parser variant
+- **Root cause**: M2.7 format non-determinism is worse than documented. 6 known formats now:
+  1. JSON `{"name":"X","arguments":{}}`
+  2. `[TOOL_CALL]` CLI-style
+  3. Hybrid XML `"arguments": {JSON}`
+  4. Hybrid XML `"arguments"> {JSON}`
+  5. Standard XML `<arguments>{JSON}</arguments>`
+  6. **NEW**: Bare function `function X\narg_name "value"` (no XML, no JSON)
+- **Fix**: TBD — add bare function parser variant, or force OpenAI-compatible format via system prompt
+- **Retry result**: Phase 0 completed manually by Mind Lead
+- **Status**: DOCUMENTED, NOT YET FIXED
+
+### RESOLUTION: Phase 0 completed by Mind Lead
+- Letters written: `letters/root-to-thalweg.md`, `letters/root-to-cortex.md`
+- Placeholders replaced: constitution.md, operations.md, research-lead.yaml (0 remaining)
+- Identity synthesized: `test-civ/memories/identity/core-identity.json`
+- Adaptation log: `test-civ/adaptation-log.md`
+- Evolution status: Phase 0 → complete, Phase 1 → next

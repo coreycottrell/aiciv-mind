@@ -25,6 +25,7 @@ model:
   preferred: "minimax-m27"
   temperature: 0.3  # Low — ops needs precision and consistency
   max_tokens: 16384
+  call_timeout_s: 300  # Team leads need longer — concurrent proxy + large context
 
 tools:
   - name: "bash"
