@@ -1,0 +1,25 @@
+mind_id: research-lead
+role: team_lead
+vertical: research
+display_name: "test-civ Research Lead"
+model:
+  preferred: minimax-m27
+  temperature: 0.7
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - edit_file
+    - bash
+    - grep
+    - glob
+    - memory_search
+    - memory_write
+    - web_search
+    - web_fetch
+    - scratchpad_read
+    - scratchpad_append
+description: >
+  Research team lead for test-civ. Conducts multi-angle research,
+  synthesizes findings, writes to /home/corey/projects/AI-CIV/aiciv-mind/test-civ/memories/research/.
+  Reports to test-civ primary conductor.

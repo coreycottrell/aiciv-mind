@@ -25,12 +25,17 @@ model:
   preferred: "minimax-m27"
   temperature: 0.3  # Low — quality review needs precision and consistency
   max_tokens: 16384
+  call_timeout_s: 300  # Team leads need longer — concurrent proxy + large context
 
 tools:
   - name: "bash"
     enabled: true
     constraints: ["test execution allowed", "no production deployments", "no rm -rf"]
   - name: "read_file"
+    enabled: true
+  - name: "write_file"
+    enabled: true
+  - name: "edit_file"
     enabled: true
   - name: "grep"
     enabled: true
