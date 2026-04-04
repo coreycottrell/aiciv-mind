@@ -23,6 +23,7 @@ class MsgType:
     STATUS = "status"
     HEARTBEAT = "heartbeat"
     HEARTBEAT_ACK = "heartbeat_ack"
+    READY = "ready"
     SHUTDOWN = "shutdown"
     SHUTDOWN_ACK = "shutdown_ack"
     LOG = "log"
@@ -158,6 +159,11 @@ class MindMessage:
             recipient=recipient,
             payload={"mind_id": mind_id},
         )
+
+    @classmethod
+    def ready(cls, sender: str, recipient: str) -> "MindMessage":
+        """Create a READY message indicating sub-mind has connected and is listening."""
+        return cls(type=MsgType.READY, sender=sender, recipient=recipient)
 
     @classmethod
     def heartbeat(cls, sender: str, recipient: str) -> "MindMessage":

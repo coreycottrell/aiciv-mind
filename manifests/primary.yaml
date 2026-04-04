@@ -46,6 +46,8 @@ tools:
     enabled: true
   - name: "talk_to_acg"
     enabled: true
+  - name: "telegram_send"
+    enabled: true
 
 compaction:
   enabled: true

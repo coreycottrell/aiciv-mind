@@ -389,6 +389,10 @@ class ToolRegistry:
         from aiciv_mind.tools.acg_tools import register_acg_tools
         register_acg_tools(registry)
 
+        # Telegram outbound — always registered (env-gated: needs AICIV_MIND_TG_TOKEN)
+        from aiciv_mind.tools.telegram_tools import register_telegram_tools
+        register_telegram_tools(registry)
+
         # system_health is always registered
         from aiciv_mind.tools.health_tools import register_health_tools
         register_health_tools(

@@ -101,9 +101,11 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
             teams_dir = Path(scratchpad_dir) / "teams"
             teams_dir.mkdir(parents=True, exist_ok=True)
 
+        # Maximum time to wait for READY signal from sub-mind
+        _READY_TIMEOUT = 15.0
+
         try:
             handle = spawner.spawn(mind_id, manifest_path, model_override=model_override)
-            await asyncio.sleep(1)  # Wait for ZMQ connection
 
             context_parts = [f"Spawned team lead '{mind_id}' for vertical '{vertical}'"]
             context_parts.append(f"Pane: {handle.pane_id}")
@@ -120,6 +122,33 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
 
             if objective:
                 context_parts.append(f"Objective: {objective}")
+
+            # Wait for READY signal from sub-mind before sending TASK.
+            # Replaces the old sleep-and-pray pattern that silently dropped
+            # tasks when the sub-mind was slow to initialize.
+            ready_confirmed = False
+            if bus is not None:
+                ready_event = asyncio.Event()
+
+                async def _on_ready(msg: MindMessage) -> None:
+                    if msg.sender == mind_id:
+                        ready_event.set()
+
+                bus.on(MsgType.READY, _on_ready)
+                try:
+                    await asyncio.wait_for(ready_event.wait(), timeout=_READY_TIMEOUT)
+                    ready_confirmed = True
+                    context_parts.append("READY signal received — connection confirmed")
+                except asyncio.TimeoutError:
+                    context_parts.append(
+                        f"WARNING: '{mind_id}' did not send READY within {_READY_TIMEOUT}s. "
+                        f"Sending task anyway (delivery not guaranteed)."
+                    )
+                finally:
+                    # Clean up handler to prevent accumulation (Gap #17)
+                    handlers = bus._handlers.get(MsgType.READY, [])
+                    if _on_ready in handlers:
+                        handlers.remove(_on_ready)
 
             # Send the objective as a TASK to the team lead.
             # The sub-mind's on_task handler in run_submind.py will receive this
@@ -143,9 +172,12 @@ def _make_spawn_tl_handler(spawner, bus, primary_mind_id: str, scratchpad_dir: s
                         task_id=task_id,
                         objective="\n".join(task_parts),
                     )
-                    await asyncio.sleep(1)  # Extra wait for sub-mind to finish init
                     await bus.send(task_msg)
                     context_parts.append(f"Task sent: {task_id}")
+                    if ready_confirmed:
+                        context_parts.append("Delivery: CONFIRMED (READY received before TASK sent)")
+                    else:
+                        context_parts.append("Delivery: UNCONFIRMED (no READY signal)")
                 except Exception as exc:
                     context_parts.append(f"Warning: failed to send task: {exc}")
 

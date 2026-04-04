@@ -296,7 +296,14 @@ async def run_submind(manifest_path: str, mind_id: str,
 
     recv_task = bus.start_recv()
 
-    logger.info("Sub-mind ready: %s (waiting for tasks)", manifest.mind_id)
+    # Send READY signal to primary — confirms ZMQ connection is live
+    # and this sub-mind is listening for TASK messages.
+    await bus.send(MindMessage.ready(
+        sender=manifest.mind_id,
+        recipient="primary",
+    ))
+
+    logger.info("Sub-mind ready: %s (READY signal sent, waiting for tasks)", manifest.mind_id)
     print(f"[{manifest.mind_id}] ready", flush=True)
 
     try:

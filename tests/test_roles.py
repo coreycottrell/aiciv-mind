@@ -65,15 +65,24 @@ class TestRoleEnum:
 
 
 class TestToolWhitelists:
-    def test_primary_has_exactly_7_tools(self):
-        assert len(PRIMARY_TOOLS) == 7
+    def test_primary_has_13_tools(self):
+        """Primary has exactly 13 conductor-only tools (no bash, no files, no hub)."""
+        assert len(PRIMARY_TOOLS) == 13
 
     def test_primary_tools_content(self):
         assert "spawn_team_lead" in PRIMARY_TOOLS
+        assert "shutdown_team_lead" in PRIMARY_TOOLS
+        assert "send_to_submind" in PRIMARY_TOOLS
+        assert "send_message" in PRIMARY_TOOLS
         assert "coordination_read" in PRIMARY_TOOLS
         assert "coordination_write" in PRIMARY_TOOLS
-        assert "send_message" in PRIMARY_TOOLS
-        assert "shutdown_team_lead" in PRIMARY_TOOLS
+        assert "scratchpad_read" in PRIMARY_TOOLS
+        assert "scratchpad_write" in PRIMARY_TOOLS
+        assert "scratchpad_append" in PRIMARY_TOOLS
+        assert "memory_search" in PRIMARY_TOOLS
+        assert "ab_model_test" in PRIMARY_TOOLS
+        assert "talk_to_acg" in PRIMARY_TOOLS
+        assert "telegram_send" in PRIMARY_TOOLS
 
     def test_primary_cannot_bash(self):
         """Primary must NOT have bash access."""
@@ -84,9 +93,6 @@ class TestToolWhitelists:
 
     def test_primary_cannot_write_files(self):
         assert "write_file" not in PRIMARY_TOOLS
-
-    def test_primary_cannot_search_memory(self):
-        assert "memory_search" not in PRIMARY_TOOLS
 
     def test_primary_cannot_spawn_agents(self):
         assert "spawn_agent" not in PRIMARY_TOOLS
