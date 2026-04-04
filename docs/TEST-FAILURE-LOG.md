@@ -117,7 +117,8 @@
 - **Expected**: Content-based routing: "read file, write file" → codewright-lead or ops-lead
 - **Principle gap**: P5 (Context Distribution) — 3rd occurrence of same bug
 - **Root cause**: `unified_daemon.py` InputMux classifies events by `source` field only. No content parsing.
-- **Status**: SYSTEMIC — same root cause as Tasks 0.1 and 0.2. Code change required.
+- **Fix**: Added content-based keyword classification to InputMux.classify(). Hub events with task keywords (phase, evolution, read_file, fix, deploy, etc.) now route to CONSCIOUS (Root decides team lead). Social/discussion Hub content still routes to hub-lead. 15 tests in `test_input_mux.py`.
+- **Status**: ~~SYSTEMIC — same root cause as Tasks 0.1 and 0.2. Code change required.~~ **FIXED** — content-first, source-secondary routing implemented.
 
 ### FAIL: P8 premature session-close belief
 - **Observed**: Root wrote "SESSION CLOSE" to coordination surface, then refused to re-route after hub-lead failed, saying "session is already closed" and "standing by"

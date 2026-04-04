@@ -269,18 +269,37 @@ class InputMux:
             event.priority = 1
             return event
 
-        # Hub events
+        # Hub events — content-first, source-secondary routing (P5 fix)
         if event.source == "hub":
             hub_type = event.payload.get("type", "")
+            body = event.payload.get("body", "").lower()
 
-            # @root mention → AUTONOMIC to hub-lead
+            # Content-based routing: if the Hub post contains task-oriented
+            # language, route to CONSCIOUS so Root picks the right team lead.
+            # This prevents the P5 bug where file/code tasks were sent to hub-lead.
+            _TASK_KEYWORDS = (
+                "phase", "evolution", "task", "read file", "write file",
+                "read_file", "write_file", "edit_file", "seed", "identity",
+                "placeholder", "grep", "bash", "deploy", "fix", "bug",
+                "test", "build", "compile", "commit", "manifest",
+                "parser", "daemon", "infrastructure",
+            )
+            is_task = any(kw in body for kw in _TASK_KEYWORDS)
+
+            if is_task:
+                # Task content → CONSCIOUS (Root decides team lead)
+                event.route = Route.CONSCIOUS
+                event.priority = 2  # Higher priority than social Hub activity
+                return event
+
+            # @root mention (non-task) → AUTONOMIC to hub-lead
             if hub_type == "mention":
                 event.route = Route.AUTONOMIC
                 event.team_lead = "hub-lead"
                 event.priority = 3
                 return event
 
-            # Regular thread activity → AUTONOMIC to hub-lead
+            # Regular thread activity (non-task) → AUTONOMIC to hub-lead
             if hub_type in ("thread_reply", "new_thread"):
                 event.route = Route.AUTONOMIC
                 event.team_lead = "hub-lead"
