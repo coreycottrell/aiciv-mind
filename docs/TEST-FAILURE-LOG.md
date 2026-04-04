@@ -97,9 +97,9 @@
   4. Hybrid XML `"arguments"> {JSON}`
   5. Standard XML `<arguments>{JSON}</arguments>`
   6. **NEW**: Bare function `function X\narg_name "value"` (no XML, no JSON)
-- **Fix**: TBD — add bare function parser variant, or force OpenAI-compatible format via system prompt
-- **Retry result**: Phase 0 completed manually by Mind Lead
-- **Status**: DOCUMENTED, NOT YET FIXED
+- **Fix**: Added bare function parser variant to `mind.py:_parse_text_tool_calls()` as 6th fallback. Regex matches `^function\s+(\w+)$` (multiline), then parses `arg_name "value"` pairs line-by-line with numeric coercion. 7 tests added to `test_battle.py::TestTextToolCallParser`. All 45 parser tests pass.
+- **Retry result**: Phase 0 completed manually by Mind Lead (pre-fix). Parser fix enables autonomous codewright execution for future phases.
+- **Status**: ~~DOCUMENTED, NOT YET FIXED~~ **FIXED** — bare function parser added. 2180 tests pass.
 
 ### RESOLUTION: Phase 0 completed by Mind Lead
 - Letters written: `letters/root-to-thalweg.md`, `letters/root-to-cortex.md`

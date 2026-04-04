@@ -1275,6 +1275,87 @@ class TestTextToolCallParser:
         parsed = json.loads(objects[0])
         assert parsed["msg"] == "hello {world} and }"
 
+    # --- Format 6: Bare function (M2.7 non-deterministic) ---
+
+    def test_format6_bare_function_basic(self):
+        """Bare function format: function X\narg \"value\"."""
+        mind, store = _make_mind_for_parser(["read_file"])
+        text = 'function read_file\nfile_path "/home/test/identity.json"'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "read_file"
+        assert blocks[0].input["file_path"] == "/home/test/identity.json"
+        store.close()
+
+    def test_format6_bare_function_multiarg(self):
+        """Bare function with multiple arguments."""
+        mind, store = _make_mind_for_parser(["memory_write"])
+        text = 'function memory_write\ntitle "test title"\ncontent "body text here"'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_write"
+        assert blocks[0].input["title"] == "test title"
+        assert blocks[0].input["content"] == "body text here"
+        store.close()
+
+    def test_format6_bare_function_embedded_in_prose(self):
+        """Bare function embedded in surrounding text."""
+        mind, store = _make_mind_for_parser(["read_file"])
+        text = (
+            "I'll read the identity file now.\n\n"
+            'function read_file\n'
+            'file_path "/home/test/identity.json"\n\n'
+            "Let me process the result."
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "read_file"
+        store.close()
+
+    def test_format6_bare_function_numeric_arg(self):
+        """Bare function with numeric argument values."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = 'function memory_search\nquery "hello"\nlimit 5'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].input["query"] == "hello"
+        assert blocks[0].input["limit"] == 5
+        store.close()
+
+    def test_format6_bare_function_unregistered_tool(self):
+        """Bare function with unregistered tool name is skipped."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = 'function nonexistent_tool\narg "value"'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 0
+        store.close()
+
+    def test_format6_bare_function_case_insensitive(self):
+        """Bare function with case-different tool name."""
+        mind, store = _make_mind_for_parser(["memory_search"])
+        text = 'function Memory_Search\nquery "test"'
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 1
+        assert blocks[0].name == "memory_search"
+        store.close()
+
+    def test_format6_bare_function_multiple_calls(self):
+        """Multiple bare function calls in sequence."""
+        mind, store = _make_mind_for_parser(["read_file", "write_file"])
+        text = (
+            'function read_file\n'
+            'file_path "/home/test/input.txt"\n\n'
+            'function write_file\n'
+            'file_path "/home/test/output.txt"\n'
+            'content "hello world"'
+        )
+        blocks = mind._parse_text_tool_calls(text)
+        assert len(blocks) == 2
+        assert blocks[0].name == "read_file"
+        assert blocks[1].name == "write_file"
+        assert blocks[1].input["content"] == "hello world"
+        store.close()
+
     def test_cli_style_args_escaped_quotes(self):
         """CLI-style args parser handles escaped quotes in values."""
         from aiciv_mind.mind import Mind

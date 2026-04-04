@@ -1478,6 +1478,73 @@ class Mind:
                     self.manifest.mind_id, name, str(args)[:100],
                 )
 
+        # Fallback: Bare function format (M2.7 format 6)
+        # M2.7 sometimes emits tool calls as plain text:
+        #   function read_file
+        #   file_path "/path/to/file"
+        # or:
+        #   function memory_write
+        #   title "some title"
+        #   content "body text here"
+        # No XML, no JSON, no delimiters — just "function <name>" followed by
+        # arg_name "value" pairs on subsequent lines.
+        if not blocks:
+            bare_fn_re = re.compile(
+                r'^function\s+(\w+)\s*$',
+                re.MULTILINE,
+            )
+            for match in bare_fn_re.finditer(text):
+                name = _normalize_tool_name(match.group(1))
+                if not name:
+                    continue
+                # Parse arg_name "value" pairs on subsequent lines
+                args = {}
+                rest = text[match.end():]
+                for line in rest.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Stop at next "function <name>" or blank section
+                    if re.match(r'^function\s+\w+', line):
+                        break
+                    # Match: arg_name "value" or arg_name value
+                    arg_match = re.match(r'^(\w+)\s+"((?:[^"\\]|\\.)*)"\s*$', line)
+                    if arg_match:
+                        val = arg_match.group(2).replace('\\"', '"')
+                        try:
+                            args[arg_match.group(1)] = json.loads(f'"{val}"')
+                        except (json.JSONDecodeError, ValueError):
+                            args[arg_match.group(1)] = val
+                        continue
+                    # Unquoted value
+                    arg_match2 = re.match(r'^(\w+)\s+(\S+)\s*$', line)
+                    if arg_match2:
+                        val = arg_match2.group(2)
+                        try:
+                            val = int(val)
+                        except (ValueError, TypeError):
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                        args[arg_match2.group(1)] = val
+                        continue
+                    # If line doesn't match arg pattern, stop parsing
+                    break
+
+                if args:  # Only create block if we got at least one argument
+                    block = type("SyntheticToolUse", (), {
+                        "name": name,
+                        "input": args,
+                        "id": f"synthetic_{uuid.uuid4().hex[:12]}",
+                        "type": "tool_use",
+                    })()
+                    blocks.append(block)
+                    logger.info(
+                        "[%s] Parsed bare function call: %s(%s)",
+                        self.manifest.mind_id, name, str(args)[:100],
+                    )
+
         return blocks
 
     @staticmethod
